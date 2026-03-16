@@ -1,0 +1,15 @@
+[package]
+name = "misaka-crypto"
+description = "Hybrid signature (Ed25519 + ML-DSA-65) for MISAKA Network"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+misaka-types = { path = "../misaka-types" }
+misaka-pqc = { path = "../misaka-pqc" }
+sha3 = { workspace = true }
+ed25519-dalek = { workspace = true }
+rand = { workspace = true }
+thiserror = { workspace = true }
+hex = { workspace = true }
