@@ -93,7 +93,7 @@ pub async fn get_balance(rpc_url: &str, address: &str) -> Result<()> {
             println!("  Outputs ({}):", outputs.len());
             for o in outputs {
                 let tx = o["txHash"].as_str().unwrap_or("?");
-                let idx = &o["outputIndex"];
+                let idx = o["outputIndex"];
                 print!("    {}..:{}", &tx[..tx.len().min(12)], idx);
                 match o["amount"].as_u64() {
                     Some(a) => print!("  amount={}", a),
