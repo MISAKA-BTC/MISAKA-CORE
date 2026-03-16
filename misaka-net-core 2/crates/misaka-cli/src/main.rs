@@ -5,8 +5,8 @@
 //!   genesis     Generate a genesis.json for testnet
 //!   status      Query node status
 //!   balance     Query address balance
-//!   transfer    Send MISAKA tokens
-//!   faucet      Request testnet tokens
+//!   transfer    Send MISAKA tokens (supports UTXO reuse)
+//!   faucet      Request testnet tokens (auto-registers UTXO with --wallet)
 
 use clap::{Parser, Subcommand};
 use anyhow::Result;
@@ -16,6 +16,7 @@ mod genesis;
 mod rpc_client;
 mod transfer;
 mod faucet;
+pub mod wallet_state;
 
 #[derive(Parser)]
 #[command(name = "misaka-cli", version, about = "MISAKA Network CLI tools")]
@@ -55,9 +56,9 @@ enum Commands {
         #[arg(long, default_value = "http://127.0.0.1:3001")]
         rpc: String,
     },
-    /// Send MISAKA tokens
+    /// Send MISAKA tokens (supports multiple sends via UTXO tracking)
     Transfer {
-        /// Sender key file path (e.g. alice.key.json)
+        /// Sender key file path (e.g. wallet1.key.json)
         #[arg(long)]
         from: String,
         /// Recipient address (e.g. msk1abc...)
@@ -77,6 +78,9 @@ enum Commands {
     Faucet {
         /// Recipient address
         address: String,
+        /// Wallet key file (optional — enables auto UTXO tracking for transfers)
+        #[arg(long)]
+        wallet: Option<String>,
         /// Node RPC URL
         #[arg(long, default_value = "http://127.0.0.1:3001")]
         rpc: String,
@@ -93,7 +97,7 @@ async fn main() -> Result<()> {
         Commands::Status { rpc } => rpc_client::get_status(&rpc).await?,
         Commands::Balance { address, rpc } => rpc_client::get_balance(&rpc, &address).await?,
         Commands::Transfer { from, to, amount, fee, rpc } => transfer::run(&from, &to, amount, fee, &rpc).await?,
-        Commands::Faucet { address, rpc } => faucet::run(&address, &rpc).await?,
+        Commands::Faucet { address, rpc, wallet } => faucet::run(&address, &rpc, wallet.as_deref()).await?,
     }
 
     Ok(())
