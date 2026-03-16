@@ -1,11 +1,17 @@
 //! MISAKA Network — PQ-first UTXO node.
 //!
 //! Usage:
-//!   misaka-node                              # public mode, defaults
-//!   misaka-node --mode hidden                # hidden (validator) mode
+//!   misaka-node                              # public full node (no block production)
+//!   misaka-node --mode hidden --validator    # hidden validator mode
 //!   misaka-node --mode seed --p2p-port 6690  # seed node
-//!   misaka-node --block-time 10              # fast blocks for testing
+//!   misaka-node --block-time 10 --validator  # fast blocks for testing
 //!   misaka-node --mode hidden --proxy 127.0.0.1:9050  # Tor (future)
+//!
+//! Advertise address:
+//!   --advertise-addr 133.167.126.51:6690
+//!     Tells peers to connect back on this external address.
+//!     Without this, the node will NOT be discoverable via peer exchange.
+//!     Ignored when --hide-my-ip or --mode hidden is set.
 
 pub mod config;
 pub mod chain_store;
@@ -20,12 +26,12 @@ use clap::Parser;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{info, Level};
+use tracing::{info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
 use crate::block_producer::{NodeState, SharedState};
 use crate::chain_store::ChainStore;
-use crate::config::{NodeMode, P2pConfig};
+use crate::config::{NodeMode, NodeRole, P2pConfig};
 
 #[derive(Parser, Debug)]
 #[command(name = "misaka-node", version, about = "MISAKA Network validator node")]
@@ -58,6 +64,11 @@ struct Cli {
     #[arg(long, default_value = "1")]
     validators: usize,
 
+    /// Enable block production (validator role).
+    /// Without this flag, the node runs as a full node and does NOT produce blocks.
+    #[arg(long)]
+    validator: bool,
+
     /// Static peers (comma-separated)
     #[arg(long, value_delimiter = ',')]
     peers: Vec<String>,
@@ -79,6 +90,13 @@ struct Cli {
     chain_id: u32,
 
     // ─── P2P overrides ───────────────────────────────────
+
+    /// External address to advertise to peers for discovery.
+    /// Example: --advertise-addr 133.167.126.51:6690
+    /// If not set, this node will NOT appear in peer exchange.
+    /// Ignored when --hide-my-ip is set.
+    #[arg(long, value_name = "HOST:PORT")]
+    advertise_addr: Option<String>,
 
     /// Force outbound-only (no inbound connections)
     #[arg(long)]
@@ -117,6 +135,29 @@ async fn main() -> anyhow::Result<()> {
     // Parse NodeMode
     let node_mode = NodeMode::from_str_loose(&cli.mode);
 
+    // Parse advertise address
+    let advertise_addr: Option<SocketAddr> = cli.advertise_addr
+        .as_deref()
+        .and_then(|s| {
+            match s.parse::<SocketAddr>() {
+                Ok(addr) => {
+                    if config::is_valid_advertise_addr(&addr) {
+                        Some(addr)
+                    } else {
+                        warn!("Invalid --advertise-addr '{}': must not be 0.0.0.0/loopback", s);
+                        None
+                    }
+                }
+                Err(e) => {
+                    warn!("Failed to parse --advertise-addr '{}': {}", s, e);
+                    None
+                }
+            }
+        });
+
+    // Determine role
+    let role = NodeRole::determine(node_mode, cli.validator, cli.validator_index, cli.validators);
+
     // Build P2P config
     let p2p_config = P2pConfig::from_mode(node_mode).with_overrides(
         cli.max_inbound_peers,
@@ -125,6 +166,7 @@ async fn main() -> anyhow::Result<()> {
         cli.hide_my_ip,
         cli.seeds.clone(),
         cli.proxy.clone(),
+        advertise_addr,
     );
 
     // Banner
@@ -138,6 +180,24 @@ async fn main() -> anyhow::Result<()> {
         NodeMode::Seed   => "🌱 SEED    — bootstrap node, peer discovery",
     };
     info!("Mode: {}", mode_label);
+    info!("Role: {} (block production {})", role,
+        if role.produces_blocks() { "ENABLED" } else { "disabled" });
+
+    // Log listen/advertise addresses clearly
+    info!("P2P listening on 0.0.0.0:{}", cli.p2p_port);
+    if let Some(ref addr) = p2p_config.advertise_addr {
+        info!("Advertising as {}", addr);
+    } else if p2p_config.advertise_address {
+        warn!("No valid advertise address — this node will NOT be discoverable. Use --advertise-addr <HOST:PORT>");
+    }
+
+    if !role.produces_blocks() {
+        match node_mode {
+            NodeMode::Public => info!("Block production disabled for public node (use --validator to enable)"),
+            NodeMode::Seed => info!("Block production disabled for seed node"),
+            _ => {}
+        }
+    }
 
     if cli.proxy.is_some() {
         info!("Proxy: {} (Tor/I2P support is experimental)", cli.proxy.as_deref().unwrap_or(""));
@@ -186,26 +246,26 @@ async fn main() -> anyhow::Result<()> {
         p2p.connect_to_peers(&all_peers, 0).await;
     }
 
-    // RPC server
+    // RPC server (pass p2p handle for /api/get_peers)
     let rpc_addr: SocketAddr = format!("0.0.0.0:{}", cli.rpc_port).parse()?;
     let rpc_state = state.clone();
+    let rpc_p2p = p2p.clone();
     tokio::spawn(async move {
-        if let Err(e) = rpc_server::run_rpc_server(rpc_state, rpc_addr).await {
+        if let Err(e) = rpc_server::run_rpc_server(rpc_state, rpc_p2p, rpc_addr).await {
             tracing::error!("RPC server error: {}", e);
         }
     });
 
     info!(
-        "Node '{}' ready | mode={} | RPC=:{} | P2P=:{} | block={}s | val={}/{}",
-        cli.name, node_mode, cli.rpc_port, cli.p2p_port, cli.block_time,
+        "Node '{}' ready | mode={} | role={} | RPC=:{} | P2P=:{} | block={}s | val={}/{}",
+        cli.name, node_mode, role, cli.rpc_port, cli.p2p_port, cli.block_time,
         cli.validator_index, cli.validators
     );
 
-    // Block production (seed nodes don't produce blocks)
-    if p2p_config.mode.can_propose_blocks() {
+    // Block production — only for validator role
+    if role.produces_blocks() {
         block_producer::run_block_producer(state.clone(), cli.block_time, cli.validator_index).await;
     } else {
-        info!("Seed node: block production disabled. Running peer discovery only.");
         // Keep the process alive
         loop { tokio::time::sleep(tokio::time::Duration::from_secs(3600)).await; }
     }
@@ -232,5 +292,25 @@ mod tests {
         let g = chain.store_genesis(1_700_000_000_000);
         assert_eq!(g.height, 0);
         assert_ne!(g.hash, [0u8; 32]);
+    }
+
+    #[test]
+    fn test_public_mode_no_block_production_by_default() {
+        // Public mode without --validator → FullNode → no blocks
+        let role = NodeRole::determine(NodeMode::Public, false, 0, 1);
+        assert!(!role.produces_blocks());
+    }
+
+    #[test]
+    fn test_seed_mode_never_produces_blocks() {
+        // Seed mode even with --validator → FullNode
+        let role = NodeRole::determine(NodeMode::Seed, true, 0, 1);
+        assert!(!role.produces_blocks());
+    }
+
+    #[test]
+    fn test_validator_flag_enables_block_production() {
+        let role = NodeRole::determine(NodeMode::Public, true, 0, 1);
+        assert!(role.produces_blocks());
     }
 }
