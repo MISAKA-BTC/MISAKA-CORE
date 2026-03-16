@@ -31,7 +31,8 @@ pub enum P2pMessage {
         node_name: String,
         /// Peer's operating mode (so hidden nodes can signal "don't advertise me").
         mode: String,
-        /// Advertised listen address (None for hidden nodes).
+        /// Advertised address for peer discovery (None for hidden/no-advertise nodes).
+        /// This is the external address, NOT the listen address (which may be 0.0.0.0).
         listen_addr: Option<String>,
     },
     /// Announce new block.
@@ -88,8 +89,27 @@ pub struct ConnectedPeer {
     pub inbound: bool,
     /// Whether this peer wants to be advertised in GetPeers responses.
     pub advertisable: bool,
-    /// The peer's listen address (may differ from connection addr due to NAT).
-    pub listen_addr: Option<SocketAddr>,
+    /// The peer's advertised address (validated — no 0.0.0.0 or loopback).
+    pub advertise_addr: Option<SocketAddr>,
+    /// Peer's reported mode.
+    pub peer_mode: String,
+    /// When this peer connected (epoch ms).
+    pub connected_at_ms: u64,
+    /// Last activity timestamp (epoch ms).
+    pub last_seen_ms: u64,
+}
+
+/// Peer info returned by the /api/get_peers RPC endpoint.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PeerInfoRpc {
+    pub node_name: String,
+    pub remote_addr: String,
+    pub advertise_addr: Option<String>,
+    pub mode: String,
+    pub direction: String,
+    pub height: u64,
+    pub connected_at: String,
+    pub last_seen: String,
 }
 
 // ─── P2P Network ────────────────────────────────────────────
@@ -100,6 +120,28 @@ pub struct P2pNetwork {
     chain_id: u32,
     node_name: String,
     config: P2pConfig,
+    /// Our listen port (for reference).
+    listen_port: std::sync::atomic::AtomicU16,
+}
+
+/// Validate and parse an advertised address string, rejecting invalid ones.
+fn validate_advertise_addr(addr_str: &str) -> Option<SocketAddr> {
+    let addr: SocketAddr = addr_str.parse().ok()?;
+    if crate::config::is_valid_advertise_addr(&addr) {
+        Some(addr)
+    } else {
+        debug!("Rejected invalid advertise address: {}", addr_str);
+        None
+    }
+}
+
+fn now_ms() -> u64 {
+    chrono::Utc::now().timestamp_millis() as u64
+}
+
+fn ms_to_iso(ms: u64) -> String {
+    chrono::DateTime::from_timestamp_millis(ms as i64)
+        .map(|d| d.to_rfc3339()).unwrap_or_default()
 }
 
 impl P2pNetwork {
@@ -110,12 +152,18 @@ impl P2pNetwork {
             config.mode, config.listen, config.advertise_address,
             config.max_inbound_peers, config.max_outbound_peers,
         );
+        if let Some(ref addr) = config.advertise_addr {
+            info!("Advertising as {}", addr);
+        } else if config.advertise_address {
+            warn!("No --advertise-addr set; this node will NOT be discoverable by peers. Use --advertise-addr <HOST:PORT>");
+        }
         Self {
             peers: Arc::new(RwLock::new(HashMap::new())),
             broadcast_tx,
             chain_id,
             node_name,
             config,
+            listen_port: std::sync::atomic::AtomicU16::new(0),
         }
     }
 
@@ -136,12 +184,29 @@ impl P2pNetwork {
     }
 
     /// Get list of advertisable peers (for GetPeers responses).
+    /// Only returns peers with valid advertise addresses.
     pub async fn get_advertisable_peers(&self) -> Vec<(String, String)> {
         self.peers.read().await.values()
-            .filter(|p| p.advertisable)
-            .filter_map(|p| {
-                let addr = p.listen_addr.unwrap_or(p.addr);
-                Some((addr.to_string(), p.node_name.clone()))
+            .filter(|p| p.advertisable && p.advertise_addr.is_some())
+            .map(|p| {
+                let addr = p.advertise_addr.unwrap(); // safe: filtered above
+                (addr.to_string(), p.node_name.clone())
+            })
+            .collect()
+    }
+
+    /// Get peer info list for RPC /api/get_peers endpoint.
+    pub async fn get_peer_info_list(&self) -> Vec<PeerInfoRpc> {
+        self.peers.read().await.values()
+            .map(|p| PeerInfoRpc {
+                node_name: p.node_name.clone(),
+                remote_addr: p.addr.to_string(),
+                advertise_addr: p.advertise_addr.map(|a| a.to_string()),
+                mode: p.peer_mode.clone(),
+                direction: if p.inbound { "inbound".into() } else { "outbound".into() },
+                height: p.height,
+                connected_at: ms_to_iso(p.connected_at_ms),
+                last_seen: ms_to_iso(p.last_seen_ms),
             })
             .collect()
     }
@@ -155,6 +220,8 @@ impl P2pNetwork {
             return Ok(());
         }
 
+        self.listen_port.store(addr.port(), std::sync::atomic::Ordering::Relaxed);
+
         let listener = TcpListener::bind(addr).await?;
         info!("P2P listening on {} (mode={})", addr, self.config.mode);
 
@@ -163,9 +230,9 @@ impl P2pNetwork {
         let node_name = self.node_name.clone();
         let broadcast_tx = self.broadcast_tx.clone();
         let max_inbound = self.config.max_inbound_peers;
-        let advertise = self.config.advertise_address;
         let mode = self.config.mode;
-        let listen_str = if advertise { Some(addr.to_string()) } else { None };
+        // Use effective_advertise_addr — never sends 0.0.0.0
+        let advertise_str = self.config.effective_advertise_addr(addr.port());
 
         tokio::spawn(async move {
             loop {
@@ -183,12 +250,12 @@ impl P2pNetwork {
                         let peers = peers.clone();
                         let node_name = node_name.clone();
                         let mut rx = broadcast_tx.subscribe();
-                        let listen_str = listen_str.clone();
+                        let advertise_str = advertise_str.clone();
 
                         tokio::spawn(async move {
                             if let Err(e) = handle_inbound(
                                 stream, peer_addr, peers.clone(), chain_id,
-                                &node_name, mode, listen_str.as_deref(), &mut rx,
+                                &node_name, mode, advertise_str.as_deref(), &mut rx,
                             ).await {
                                 debug!("Peer {} disconnected: {}", peer_addr, e);
                             }
@@ -222,8 +289,10 @@ impl P2pNetwork {
             let mut rx = self.broadcast_tx.subscribe();
             let height = our_height;
             let mode = self.config.mode;
-            let advertise = self.config.advertise_address;
             let p2p_config = self.config.clone();
+            // Use effective_advertise_addr — never sends 0.0.0.0
+            let listen_port = self.listen_port.load(std::sync::atomic::Ordering::Relaxed);
+            let advertise_str = self.config.effective_advertise_addr(listen_port);
 
             tokio::spawn(async move {
                 match TcpStream::connect(addr).await {
@@ -231,17 +300,13 @@ impl P2pNetwork {
                         info!("Outbound connected: {}", addr);
                         let (mut reader, mut writer) = stream.into_split();
 
-                        // Send Hello (hidden nodes: no listen_addr)
+                        // Send Hello — advertise_str is None if no valid address
                         let hello = P2pMessage::Hello {
                             chain_id,
                             height,
                             node_name: node_name.clone(),
                             mode: mode.to_string(),
-                            listen_addr: if advertise {
-                                Some(format!("0.0.0.0:{}", addr.port()))
-                            } else {
-                                None
-                            },
+                            listen_addr: advertise_str,
                         };
                         if writer.write_all(&hello.encode()).await.is_err() {
                             return;
@@ -266,29 +331,45 @@ impl P2pNetwork {
                                 let mut msg_buf = vec![0u8; len];
                                 if reader.read_exact(&mut msg_buf).await.is_err() { break; }
                                 match P2pMessage::decode(&msg_buf) {
-                                    Ok(P2pMessage::Hello { node_name: name, height, mode: peer_mode, listen_addr, .. }) => {
+                                    Ok(P2pMessage::Hello { node_name: name, height, chain_id: their_chain, mode: peer_mode, listen_addr }) => {
+                                        // Validate chain_id
+                                        if their_chain != chain_id {
+                                            warn!("Outbound peer {} chain_id mismatch: ours={} theirs={}", addr, chain_id, their_chain);
+                                            break;
+                                        }
                                         let advertisable = peer_mode != "hidden";
-                                        let listen = listen_addr.and_then(|s| s.parse().ok());
+                                        // Validate advertised address — reject 0.0.0.0/loopback
+                                        let validated_addr = listen_addr.as_deref().and_then(validate_advertise_addr);
+                                        debug!("Outbound Hello from {}: mode={} listen_addr={:?} validated={:?}", addr, peer_mode, listen_addr, validated_addr);
+                                        let ts = now_ms();
                                         peers_r.write().await.insert(addr, ConnectedPeer {
                                             addr, node_name: name, height, inbound: false,
-                                            advertisable, listen_addr: listen,
+                                            advertisable, advertise_addr: validated_addr,
+                                            peer_mode, connected_at_ms: ts, last_seen_ms: ts,
                                         });
                                     }
                                     Ok(P2pMessage::NewBlock { height, .. }) => {
                                         debug!("Peer {} block #{}", addr, height);
                                     }
                                     Ok(P2pMessage::Peers { addrs }) => {
-                                        info!("Received {} peers from {}", addrs.len(), addr);
-                                        // Future: connect to discovered peers
-                                        for (a, n) in &addrs {
+                                        // Filter out invalid addresses from discovered peers
+                                        let valid: Vec<_> = addrs.iter()
+                                            .filter(|(a, _)| validate_advertise_addr(a).is_some())
+                                            .collect();
+                                        let rejected = addrs.len() - valid.len();
+                                        info!("Received {} peers from {} ({} valid, {} rejected)", addrs.len(), addr, valid.len(), rejected);
+                                        for (a, n) in &valid {
                                             debug!("  discovered: {} ({})", a, n);
+                                        }
+                                        if rejected > 0 {
+                                            debug!("  rejected {} peers with invalid addresses", rejected);
                                         }
                                     }
                                     Ok(P2pMessage::GetPeers) if serves_discovery => {
                                         let peer_list = peers_r.read().await;
                                         let advertisable: Vec<(String, String)> = peer_list.values()
-                                            .filter(|p| p.advertisable)
-                                            .filter_map(|p| p.listen_addr.map(|la| (la.to_string(), p.node_name.clone())))
+                                            .filter(|p| p.advertisable && p.advertise_addr.is_some())
+                                            .map(|p| (p.advertise_addr.unwrap().to_string(), p.node_name.clone()))
                                             .collect();
                                         drop(peer_list);
                                         // Can't write from read loop; log for now
@@ -353,11 +434,15 @@ async fn handle_inbound(
 
         // Hidden peers are NOT added to advertisable list
         let advertisable = peer_mode != "hidden";
-        let listen = listen_addr.and_then(|s| s.parse().ok());
+        // Validate advertised address — reject 0.0.0.0/loopback
+        let validated_addr = listen_addr.as_deref().and_then(validate_advertise_addr);
+        debug!("Inbound Hello from {}: mode={} listen_addr={:?} validated={:?}", addr, peer_mode, listen_addr, validated_addr);
+        let ts = now_ms();
 
         peers.write().await.insert(addr, ConnectedPeer {
             addr, node_name: name.clone(), height,
-            inbound: true, advertisable, listen_addr: listen,
+            inbound: true, advertisable, advertise_addr: validated_addr,
+            peer_mode: peer_mode.clone(), connected_at_ms: ts, last_seen_ms: ts,
         });
         info!("Peer {} identified: {} (mode={}, height={})", addr, name, peer_mode, height);
     } else {
@@ -381,9 +466,10 @@ async fn handle_inbound(
 
             match P2pMessage::decode(&msg_buf) {
                 Ok(P2pMessage::GetPeers) if serves_discovery => {
+                    // Only return peers with valid advertise addresses
                     let peer_list: Vec<(String, String)> = peers_for_read.read().await.values()
-                        .filter(|p| p.advertisable)
-                        .filter_map(|p| p.listen_addr.map(|la| (la.to_string(), p.node_name.clone())))
+                        .filter(|p| p.advertisable && p.advertise_addr.is_some())
+                        .map(|p| (p.advertise_addr.unwrap().to_string(), p.node_name.clone()))
                         .collect();
                     let _ = response_tx.send(P2pMessage::Peers { addrs: peer_list }).await;
                 }
@@ -447,7 +533,7 @@ mod tests {
     #[test]
     fn test_overrides() {
         let cfg = P2pConfig::from_mode(NodeMode::Public)
-            .with_overrides(Some(10), None, false, true, vec![], None);
+            .with_overrides(Some(10), None, false, true, vec![], None, None);
         assert_eq!(cfg.max_inbound_peers, 10);
         assert!(!cfg.advertise_address); // hide_ip override
         assert!(cfg.listen); // not overridden
@@ -456,7 +542,7 @@ mod tests {
     #[test]
     fn test_outbound_only_override() {
         let cfg = P2pConfig::from_mode(NodeMode::Public)
-            .with_overrides(None, None, true, false, vec![], None);
+            .with_overrides(None, None, true, false, vec![], None, None);
         assert!(!cfg.listen);
         assert_eq!(cfg.max_inbound_peers, 0);
     }
@@ -485,5 +571,44 @@ mod tests {
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(!json.contains("6690")); // no port leaked
+    }
+
+    // ─── New address validation tests ───────────────────────
+
+    #[test]
+    fn test_validate_rejects_unspecified() {
+        assert!(validate_advertise_addr("0.0.0.0:6690").is_none());
+    }
+
+    #[test]
+    fn test_validate_rejects_ipv6_unspecified() {
+        assert!(validate_advertise_addr("[::]:6690").is_none());
+    }
+
+    #[test]
+    fn test_validate_rejects_loopback() {
+        assert!(validate_advertise_addr("127.0.0.1:6690").is_none());
+    }
+
+    #[test]
+    fn test_validate_rejects_ipv6_loopback() {
+        assert!(validate_advertise_addr("[::1]:6690").is_none());
+    }
+
+    #[test]
+    fn test_validate_accepts_public_ip() {
+        let addr = validate_advertise_addr("133.167.126.51:6690");
+        assert!(addr.is_some());
+        assert_eq!(addr.unwrap().to_string(), "133.167.126.51:6690");
+    }
+
+    #[test]
+    fn test_validate_rejects_garbage() {
+        assert!(validate_advertise_addr("not-an-address").is_none());
+    }
+
+    #[test]
+    fn test_validate_rejects_zero_port() {
+        assert!(validate_advertise_addr("1.2.3.4:0").is_none());
     }
 }
