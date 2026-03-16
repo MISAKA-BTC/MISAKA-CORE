@@ -1,14 +1,25 @@
 //! HTTP RPC server — axum-based, serves Explorer + CLI.
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 use axum::{Router, Json, extract::State, routing::{post, get}, http::StatusCode};
 use tower_http::cors::CorsLayer;
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
 use crate::block_producer::{SharedState, PendingTx};
+use crate::p2p_network::P2pNetwork;
 
-pub async fn run_rpc_server(state: SharedState, addr: SocketAddr) -> anyhow::Result<()> {
+/// Combined state for RPC handlers.
+#[derive(Clone)]
+pub struct RpcState {
+    pub node: SharedState,
+    pub p2p: Arc<P2pNetwork>,
+}
+
+pub async fn run_rpc_server(state: SharedState, p2p: Arc<P2pNetwork>, addr: SocketAddr) -> anyhow::Result<()> {
+    let rpc_state = RpcState { node: state, p2p };
+
     let app = Router::new()
         .route("/api/get_chain_info", post(get_chain_info))
         .route("/api/get_latest_blocks", post(get_latest_blocks))
@@ -20,12 +31,13 @@ pub async fn run_rpc_server(state: SharedState, addr: SocketAddr) -> anyhow::Res
         .route("/api/get_validator_by_id", post(get_validator_by_id))
         .route("/api/get_block_production", post(get_block_production))
         .route("/api/get_address_outputs", post(get_address_outputs))
+        .route("/api/get_peers", post(get_peers))
         .route("/api/search", post(search))
         .route("/api/submit_tx", post(submit_tx))
         .route("/api/faucet", post(faucet))
         .route("/health", get(health))
         .layer(CorsLayer::permissive())
-        .with_state(state);
+        .with_state(rpc_state);
 
     info!("RPC server listening on {}", addr);
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -111,8 +123,8 @@ fn stored_tx_to_info(tx: &crate::chain_store::StoredTx, block_h: u64) -> TxInfo 
 
 async fn health() -> &'static str { "ok" }
 
-async fn get_chain_info(State(state): State<SharedState>) -> Json<serde_json::Value> {
-    let s = state.read().await;
+async fn get_chain_info(State(rpc): State<RpcState>) -> Json<serde_json::Value> {
+    let s = rpc.node.read().await;
     Json(serde_json::json!({
         "networkName": s.chain_name,
         "networkVersion": s.version,
@@ -127,8 +139,8 @@ async fn get_chain_info(State(state): State<SharedState>) -> Json<serde_json::Va
     }))
 }
 
-async fn get_latest_blocks(State(state): State<SharedState>, Json(p): Json<PageParams>) -> Json<serde_json::Value> {
-    let s = state.read().await;
+async fn get_latest_blocks(State(rpc): State<RpcState>, Json(p): Json<PageParams>) -> Json<serde_json::Value> {
+    let s = rpc.node.read().await;
     let page = p.page.unwrap_or(1).max(1);
     let ps = p.page_size.unwrap_or(20).min(100);
     let all = s.chain.get_latest(s.chain.len().min(500));
@@ -142,23 +154,23 @@ async fn get_latest_blocks(State(state): State<SharedState>, Json(p): Json<PageP
     Json(serde_json::json!({ "data": data, "total": total, "page": page, "pageSize": ps, "hasMore": start + ps < total }))
 }
 
-async fn get_block_by_height(State(state): State<SharedState>, Json(p): Json<HeightParam>) -> Result<Json<serde_json::Value>, StatusCode> {
-    let s = state.read().await;
+async fn get_block_by_height(State(rpc): State<RpcState>, Json(p): Json<HeightParam>) -> Result<Json<serde_json::Value>, StatusCode> {
+    let s = rpc.node.read().await;
     let b = s.chain.get_by_height(p.height).ok_or(StatusCode::NOT_FOUND)?;
     let txs: Vec<TxInfo> = s.chain.get_txs_for_block(b.height).iter().map(|t| stored_tx_to_info(t, b.height)).collect();
     Ok(Json(serde_json::to_value(block_to_info(b, txs)).unwrap()))
 }
 
-async fn get_block_by_hash(State(state): State<SharedState>, Json(p): Json<HashParam>) -> Result<Json<serde_json::Value>, StatusCode> {
-    let s = state.read().await;
+async fn get_block_by_hash(State(rpc): State<RpcState>, Json(p): Json<HashParam>) -> Result<Json<serde_json::Value>, StatusCode> {
+    let s = rpc.node.read().await;
     let hash: [u8; 32] = hex::decode(&p.hash).ok().and_then(|v| v.try_into().ok()).ok_or(StatusCode::BAD_REQUEST)?;
     let b = s.chain.get_by_hash(&hash).ok_or(StatusCode::NOT_FOUND)?;
     let txs: Vec<TxInfo> = s.chain.get_txs_for_block(b.height).iter().map(|t| stored_tx_to_info(t, b.height)).collect();
     Ok(Json(serde_json::to_value(block_to_info(b, txs)).unwrap()))
 }
 
-async fn get_latest_txs(State(state): State<SharedState>, Json(p): Json<PageParams>) -> Json<serde_json::Value> {
-    let s = state.read().await;
+async fn get_latest_txs(State(rpc): State<RpcState>, Json(p): Json<PageParams>) -> Json<serde_json::Value> {
+    let s = rpc.node.read().await;
     let page = p.page.unwrap_or(1).max(1);
     let ps = p.page_size.unwrap_or(20).min(100);
     let (txs, total) = s.chain.get_recent_txs(page, ps);
@@ -166,8 +178,8 @@ async fn get_latest_txs(State(state): State<SharedState>, Json(p): Json<PagePara
     Json(serde_json::json!({ "data": data, "total": total, "page": page, "pageSize": ps, "hasMore": (page * ps) < total }))
 }
 
-async fn get_tx_by_hash(State(state): State<SharedState>, Json(p): Json<HashParam>) -> Result<Json<serde_json::Value>, StatusCode> {
-    let s = state.read().await;
+async fn get_tx_by_hash(State(rpc): State<RpcState>, Json(p): Json<HashParam>) -> Result<Json<serde_json::Value>, StatusCode> {
+    let s = rpc.node.read().await;
     let hash: [u8; 32] = hex::decode(&p.hash).ok().and_then(|v| v.try_into().ok()).ok_or(StatusCode::BAD_REQUEST)?;
     let (tx, block_h) = s.chain.get_tx_by_hash(&hash).ok_or(StatusCode::NOT_FOUND)?;
     let block = s.chain.get_by_height(block_h).ok_or(StatusCode::NOT_FOUND)?;
@@ -185,8 +197,8 @@ async fn get_tx_by_hash(State(state): State<SharedState>, Json(p): Json<HashPara
     Ok(Json(serde_json::to_value(detail).unwrap()))
 }
 
-async fn get_validator_set(State(state): State<SharedState>, Json(_p): Json<PageParams>) -> Json<serde_json::Value> {
-    let s = state.read().await;
+async fn get_validator_set(State(rpc): State<RpcState>, Json(_p): Json<PageParams>) -> Json<serde_json::Value> {
+    let s = rpc.node.read().await;
     let vals: Vec<serde_json::Value> = (0..s.validator_count).map(|i| serde_json::json!({
         "id": format!("validator-{:02}", i),
         "publicKey": format!("msk1val{:064x}", i),
@@ -199,8 +211,8 @@ async fn get_validator_set(State(state): State<SharedState>, Json(_p): Json<Page
     Json(serde_json::json!({ "data": vals, "total": s.validator_count, "page": 1, "pageSize": 50, "hasMore": false }))
 }
 
-async fn get_validator_by_id(State(state): State<SharedState>, Json(p): Json<IdParam>) -> Result<Json<serde_json::Value>, StatusCode> {
-    let s = state.read().await;
+async fn get_validator_by_id(State(rpc): State<RpcState>, Json(p): Json<IdParam>) -> Result<Json<serde_json::Value>, StatusCode> {
+    let s = rpc.node.read().await;
     // Parse validator index from id like "validator-02"
     let idx: usize = p.id.strip_prefix("validator-")
         .and_then(|s| s.parse().ok())
@@ -237,8 +249,8 @@ async fn get_validator_by_id(State(state): State<SharedState>, Json(p): Json<IdP
     })))
 }
 
-async fn get_block_production(State(state): State<SharedState>, Json(p): Json<CountParam>) -> Json<serde_json::Value> {
-    let s = state.read().await;
+async fn get_block_production(State(rpc): State<RpcState>, Json(p): Json<CountParam>) -> Json<serde_json::Value> {
+    let s = rpc.node.read().await;
     let count = p.count.unwrap_or(30).min(100);
     let blocks = s.chain.get_latest(count);
     let data: Vec<serde_json::Value> = blocks.iter().map(|b| serde_json::json!({
@@ -256,9 +268,24 @@ async fn get_address_outputs(Json(p): Json<AddressParam>) -> Json<serde_json::Va
     }))
 }
 
-async fn search(State(state): State<SharedState>, Json(p): Json<QueryParam>) -> Json<serde_json::Value> {
+/// Get connected peers — for Explorer /peers page.
+async fn get_peers(State(rpc): State<RpcState>) -> Json<serde_json::Value> {
+    let peers = rpc.p2p.get_peer_info_list().await;
+    let total = peers.len();
+    let inbound = peers.iter().filter(|p| p.direction == "inbound").count();
+    let outbound = total - inbound;
+
+    Json(serde_json::json!({
+        "peers": peers,
+        "total": total,
+        "inbound": inbound,
+        "outbound": outbound,
+    }))
+}
+
+async fn search(State(rpc): State<RpcState>, Json(p): Json<QueryParam>) -> Json<serde_json::Value> {
     let q = p.query.trim();
-    let s = state.read().await;
+    let s = rpc.node.read().await;
 
     // Numeric → block height
     if let Ok(h) = q.parse::<u64>() {
@@ -292,7 +319,7 @@ async fn search(State(state): State<SharedState>, Json(p): Json<QueryParam>) -> 
 }
 
 /// Submit a raw transaction.
-async fn submit_tx(State(state): State<SharedState>, Json(body): Json<serde_json::Value>) -> Json<serde_json::Value> {
+async fn submit_tx(State(rpc): State<RpcState>, Json(body): Json<serde_json::Value>) -> Json<serde_json::Value> {
     let now_ms = chrono::Utc::now().timestamp_millis() as u64;
 
     // Parse required fields
@@ -317,7 +344,7 @@ async fn submit_tx(State(state): State<SharedState>, Json(body): Json<serde_json
         }).collect())
         .unwrap_or_default();
 
-    let mut s = state.write().await;
+    let mut s = rpc.node.write().await;
 
     // Double-spend check
     for ki in &key_images {
@@ -372,9 +399,9 @@ async fn submit_tx(State(state): State<SharedState>, Json(body): Json<serde_json
 }
 
 /// Faucet — drip testnet tokens.
-async fn faucet(State(state): State<SharedState>, Json(req): Json<FaucetReq>) -> Json<serde_json::Value> {
+async fn faucet(State(rpc): State<RpcState>, Json(req): Json<FaucetReq>) -> Json<serde_json::Value> {
     let now_ms = chrono::Utc::now().timestamp_millis() as u64;
-    let mut s = state.write().await;
+    let mut s = rpc.node.write().await;
 
     // Rate limit: 1 drip per address per 60 seconds
     if let Some(&last) = s.faucet_drips.get(&req.address) {
