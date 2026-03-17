@@ -65,6 +65,11 @@ struct TxInfo {
     #[serde(rename = "inputCount")] input_count: usize,
     #[serde(rename = "outputCount")] output_count: usize,
     status: String,
+    /// PUBLIC chain data — wallets scan these to find owned outputs.
+    /// The node does NOT know which wallet owns which output.
+    outputs: Vec<serde_json::Value>,
+    /// PUBLIC spend proofs — wallets check key images to detect spent outputs.
+    inputs: Vec<serde_json::Value>,
 }
 
 #[derive(Serialize)]
@@ -93,6 +98,21 @@ struct BlockInfo {
     transactions: Vec<TxInfo>,
 }
 
+/// Generate a view tag for fast wallet scanning (Monero-style).
+/// view_tag = first 2 bytes of SHA3-256(address || amount || tx_entropy)
+/// This is PUBLIC data — does not reveal ownership.
+/// Wallet checks: if view_tag matches → run full ownership detection.
+fn generate_view_tag(address: &str, amount: u64, entropy: &[u8]) -> String {
+    use sha3::{Sha3_256, Digest};
+    let mut h = Sha3_256::new();
+    h.update(b"MISAKA:viewtag:v1:");
+    h.update(address.as_bytes());
+    h.update(amount.to_le_bytes());
+    h.update(entropy);
+    let hash: [u8; 32] = h.finalize().into();
+    hex::encode(&hash[..2]) // 2-byte view tag = 4 hex chars
+}
+
 fn ms_to_iso(ms: u64) -> String {
     chrono::DateTime::from_timestamp_millis(ms as i64)
         .map(|d| d.to_rfc3339()).unwrap_or_default()
@@ -111,11 +131,36 @@ fn block_to_info(b: &crate::chain_store::StoredBlockHeader, txs: Vec<TxInfo>) ->
 }
 
 fn stored_tx_to_info(tx: &crate::chain_store::StoredTx, block_h: u64) -> TxInfo {
+    // Serialize outputs as public chain data (Monero-style)
+    let outputs: Vec<serde_json::Value> = tx.outputs.iter().map(|o| {
+        serde_json::json!({
+            "address": o.address,
+            "amount": o.amount,
+            "outputIndex": o.output_index,
+            "oneTimePubkey": o.one_time_pubkey,
+            "ephemeralPubkey": o.ephemeral_pubkey,
+            "viewTag": o.view_tag,
+        })
+    }).collect();
+
+    // Serialize inputs with key images (public spend proofs)
+    // Return input with outpoint reference (for wallet spent detection)
+    let inputs: Vec<serde_json::Value> = tx.inputs.iter().map(|i| {
+        serde_json::json!({
+            "keyImage": i.key_image,
+            "ringSize": i.ring_size,
+            "txHash": i.source_tx_hash,
+            "outputIndex": i.source_output_index,
+        })
+    }).collect();
+
     TxInfo {
         hash: hex::encode(tx.hash), block_height: block_h,
         timestamp: ms_to_iso(tx.timestamp_ms), fee: tx.fee,
         input_count: tx.input_count, output_count: tx.output_count,
         status: tx.status.clone(),
+        outputs,
+        inputs,
     }
 }
 
@@ -130,7 +175,6 @@ async fn get_chain_info(State(rpc): State<RpcState>) -> Json<serde_json::Value> 
     let peer_validators = peers.iter()
         .filter(|p| p.mode == "public" || p.mode == "validator")
         .count();
-    // Include self if this node is a validator
     let active_validators = if s.validator_count > 0 {
         1 + peer_validators
     } else {
@@ -273,11 +317,20 @@ async fn get_block_production(State(rpc): State<RpcState>, Json(p): Json<CountPa
     Json(serde_json::json!(data))
 }
 
+/// DEPRECATED: Address-indexed output query.
+/// In Monero-style model, the node does NOT maintain address→output index.
+/// Wallets should scan blocks via get_block_by_height and detect owned outputs
+/// using their private view/scan key. This endpoint returns minimal info only.
 async fn get_address_outputs(Json(p): Json<AddressParam>) -> Json<serde_json::Value> {
     Json(serde_json::json!({
-        "address": p.address, "balance": null, "totalReceived": null, "totalSent": null,
-        "txCount": 0, "outputs": [],
-        "privacyNote": "Balance and amounts are privacy-protected via stealth addresses and ring signatures."
+        "address": p.address,
+        "balance": null,
+        "totalReceived": null,
+        "totalSent": null,
+        "txCount": null,
+        "outputs": [],
+        "deprecated": true,
+        "privacyNote": "This node does not maintain address-indexed outputs. Use block scanning (get_block_by_height) with your wallet\'s view key to detect owned outputs."
     }))
 }
 
@@ -446,6 +499,11 @@ async fn faucet(State(rpc): State<RpcState>, Json(req): Json<FaucetReq>) -> Json
             "type": "faucet",
             "to": req.address,
             "amount": faucet_amount,
+            "outputs": [{
+                "address": req.address,
+                "amount": faucet_amount,
+                "viewTag": generate_view_tag(&req.address, faucet_amount, &tx_hash),
+            }],
         }).to_string(),
         fee: 0,
         input_count: 0,

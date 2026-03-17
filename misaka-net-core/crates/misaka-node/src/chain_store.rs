@@ -1,10 +1,68 @@
 //! Chain store — block headers + transaction index.
+//!
+//! ## Monero-style Privacy Model
+//!
+//! - Outputs are PUBLIC chain data. Every node stores and serves them.
+//! - Returning outputs does NOT reveal who owns them.
+//! - Ownership is determined by the wallet using view keys / scan keys.
+//! - The node does NOT maintain address-indexed output sets.
+//! - Privacy comes from stealth addresses + ring signatures, NOT from hiding outputs.
+//!
+//! "Showing outputs" ≠ "revealing the owner"
 
 use std::collections::HashMap;
 use serde::{Serialize, Deserialize};
 use sha3::{Sha3_256, Digest};
 
-/// Stored transaction summary.
+/// A transaction output — public chain data.
+///
+/// This is NOT secret. It is part of the public ledger.
+/// The wallet uses its private view/scan key to determine
+/// if an output belongs to it (Monero-style scanning).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TxOutput {
+    /// Recipient address (stealth one-time address in production).
+    pub address: String,
+    /// Amount in base units (may be encrypted/committed in confidential mode).
+    pub amount: u64,
+    /// Output index within the transaction.
+    pub output_index: u32,
+    /// One-time public key (for stealth scanning). Empty if not stealth.
+    #[serde(default)]
+    pub one_time_pubkey: String,
+    /// Ephemeral public key (tx public key for Diffie-Hellman with view key).
+    #[serde(default)]
+    pub ephemeral_pubkey: String,
+    /// View tag for fast scanning (first byte of shared secret hash).
+    #[serde(default)]
+    pub view_tag: String,
+}
+
+/// A transaction input — public spend proof.
+///
+/// Contains the key image (nullifier) which prevents double-spending.
+/// The wallet checks if any of its owned outputs' key images appear
+/// in transaction inputs to detect spent outputs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TxInput {
+    /// Key image — deterministic from the secret spend key.
+    /// Used to detect if an owned output has been spent.
+    pub key_image: String,
+    /// Ring size (number of decoy inputs).
+    #[serde(default)]
+    pub ring_size: usize,
+    /// Source transaction hash (outpoint — which UTXO is being spent).
+    #[serde(default)]
+    pub source_tx_hash: String,
+    /// Source output index within the source transaction.
+    #[serde(default)]
+    pub source_output_index: u32,
+}
+
+/// Stored transaction with full public data.
+///
+/// Contains everything a wallet needs to scan for owned outputs
+/// and detect spent inputs — without any address-indexed queries.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredTx {
     pub hash: [u8; 32],
@@ -16,6 +74,13 @@ pub struct StoredTx {
     pub key_images: Vec<[u8; 32]>,
     pub size: usize,
     pub has_payload: bool,
+    /// Transaction outputs — PUBLIC chain data.
+    /// Wallets scan these to find their owned outputs.
+    /// The node does NOT know which wallet owns which output.
+    pub outputs: Vec<TxOutput>,
+    /// Transaction inputs — PUBLIC spend proofs.
+    /// Wallets check key images against their known outputs to detect spends.
+    pub inputs: Vec<TxInput>,
 }
 
 /// Stored block header.
@@ -51,12 +116,9 @@ impl StoredBlockHeader {
 pub struct ChainStore {
     blocks_by_height: HashMap<u64, StoredBlockHeader>,
     hash_to_height: HashMap<[u8; 32], u64>,
-    /// TXs indexed by block height.
     txs_by_block: HashMap<u64, Vec<StoredTx>>,
-    /// TX hash → block height index.
     tx_hash_to_block: HashMap<[u8; 32], u64>,
-    /// All TXs in order (most recent first, capped).
-    recent_txs: Vec<(StoredTx, u64)>, // (tx, block_height)
+    recent_txs: Vec<(StoredTx, u64)>,
     pub tip_height: u64,
     pub tip_hash: [u8; 32],
 }
@@ -108,12 +170,10 @@ impl ChainStore {
             tx_count, total_fees, proposer_index, state_root,
         };
 
-        // Index TXs
         for tx in &txs {
             self.tx_hash_to_block.insert(tx.hash, height);
             self.recent_txs.push((tx.clone(), height));
         }
-        // Cap recent_txs at 10000
         if self.recent_txs.len() > 10_000 {
             self.recent_txs.drain(0..self.recent_txs.len() - 10_000);
         }
@@ -159,9 +219,6 @@ impl ChainStore {
         (data, total)
     }
 
-    pub fn total_tx_count(&self) -> usize {
-        self.recent_txs.len()
-    }
-
+    pub fn total_tx_count(&self) -> usize { self.recent_txs.len() }
     pub fn len(&self) -> usize { self.blocks_by_height.len() }
 }

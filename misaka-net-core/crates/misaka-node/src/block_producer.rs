@@ -117,6 +117,13 @@ fn parse_inputs_from_raw(raw_json: &str, key_images: &[[u8; 32]]) -> Vec<TxInput
                 ring_size: inp["ringSize"].as_u64()
                     .or(inp["ring_size"].as_u64())
                     .unwrap_or(0) as usize,
+                source_tx_hash: inp["txHash"].as_str()
+                    .or(inp["tx_hash"].as_str())
+                    .or(inp["sourceTxHash"].as_str())
+                    .unwrap_or("").to_string(),
+                source_output_index: inp["outputIndex"].as_u64()
+                    .or(inp["output_index"].as_u64())
+                    .unwrap_or(0) as u32,
             }
         }).collect();
     }
@@ -126,6 +133,8 @@ fn parse_inputs_from_raw(raw_json: &str, key_images: &[[u8; 32]]) -> Vec<TxInput
         TxInput {
             key_image: hex::encode(ki),
             ring_size: 4,
+            source_tx_hash: String::new(),
+            source_output_index: 0,
         }
     }).collect()
 }
