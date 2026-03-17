@@ -110,6 +110,29 @@ fn parse_inputs_from_raw(raw_json: &str, key_images: &[[u8; 32]]) -> Vec<TxInput
     // Build from explicit inputs array if present
     if let Some(inputs) = parsed["inputs"].as_array() {
         return inputs.iter().map(|inp| {
+            // Try explicit txHash first
+            let mut src_hash = inp["txHash"].as_str()
+                .or(inp["tx_hash"].as_str())
+                .or(inp["sourceTxHash"].as_str())
+                .unwrap_or("").to_string();
+            let mut src_idx = inp["outputIndex"].as_u64()
+                .or(inp["output_index"].as_u64())
+                .unwrap_or(0) as u32;
+
+            // Fallback: extract from first ring member (real outpoint)
+            if src_hash.is_empty() {
+                if let Some(members) = inp["ringMembers"].as_array() {
+                    if let Some(first) = members.first() {
+                        src_hash = first["txHash"].as_str()
+                            .or(first["tx_hash"].as_str())
+                            .unwrap_or("").to_string();
+                        src_idx = first["outputIndex"].as_u64()
+                            .or(first["output_index"].as_u64())
+                            .unwrap_or(0) as u32;
+                    }
+                }
+            }
+
             TxInput {
                 key_image: inp["keyImage"].as_str()
                     .or(inp["key_image"].as_str())
@@ -117,13 +140,8 @@ fn parse_inputs_from_raw(raw_json: &str, key_images: &[[u8; 32]]) -> Vec<TxInput
                 ring_size: inp["ringSize"].as_u64()
                     .or(inp["ring_size"].as_u64())
                     .unwrap_or(0) as usize,
-                source_tx_hash: inp["txHash"].as_str()
-                    .or(inp["tx_hash"].as_str())
-                    .or(inp["sourceTxHash"].as_str())
-                    .unwrap_or("").to_string(),
-                source_output_index: inp["outputIndex"].as_u64()
-                    .or(inp["output_index"].as_u64())
-                    .unwrap_or(0) as u32,
+                source_tx_hash: src_hash,
+                source_output_index: src_idx,
             }
         }).collect();
     }
