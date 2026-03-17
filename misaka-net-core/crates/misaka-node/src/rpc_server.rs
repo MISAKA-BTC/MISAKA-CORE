@@ -125,12 +125,25 @@ async fn health() -> &'static str { "ok" }
 
 async fn get_chain_info(State(rpc): State<RpcState>) -> Json<serde_json::Value> {
     let s = rpc.node.read().await;
+    // Count validators dynamically from connected peers
+    let peers = rpc.p2p.get_peer_info_list().await;
+    let peer_validators = peers.iter()
+        .filter(|p| p.mode == "public" || p.mode == "validator")
+        .count();
+    // Include self if this node is a validator
+    let active_validators = if s.validator_count > 0 {
+        1 + peer_validators
+    } else {
+        peer_validators
+    };
+    let connected_peers = peers.len();
     Json(serde_json::json!({
         "networkName": s.chain_name,
         "networkVersion": s.version,
         "latestBlockHeight": s.height,
         "totalTransactions": s.tx_count_total,
-        "activeValidators": s.validator_count,
+        "activeValidators": active_validators,
+        "connectedPeers": connected_peers,
         "avgBlockTime": 60.0,
         "tpsEstimate": if s.height > 0 { s.tx_count_total as f64 / (s.height as f64 * 60.0) } else { 0.0 },
         "finalityStatus": "finalized",
