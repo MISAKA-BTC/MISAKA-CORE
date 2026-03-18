@@ -1,0 +1,13 @@
+[package]
+name = "misaka-types"
+description = "Core types for MISAKA Network — PQC-native"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+[dependencies]
+sha3 = { workspace = true }
+serde = { workspace = true }
+hex = { workspace = true }
+thiserror = { workspace = true }
+[dev-dependencies]
+serde_json = { workspace = true }
