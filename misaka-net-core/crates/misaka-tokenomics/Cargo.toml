@@ -1,0 +1,12 @@
+[package]
+name = "misaka-tokenomics"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+[dependencies]
+misaka-types = { path = "../misaka-types" }
+misaka-crypto = { path = "../misaka-crypto" }
+sha3 = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
