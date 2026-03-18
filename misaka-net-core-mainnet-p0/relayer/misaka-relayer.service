@@ -1,0 +1,31 @@
+[Unit]
+Description=MISAKA Bridge Relayer
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=misaka
+Group=misaka
+ExecStart=/usr/local/bin/misaka-relayer
+Restart=always
+RestartSec=10
+
+# Environment
+Environment=SOLANA_RPC_URL=https://api.devnet.solana.com
+Environment=MISAKA_RPC_URL=http://127.0.0.1:3001
+Environment=BRIDGE_PROGRAM_ID=MBRDGxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+Environment=RELAYER_KEYPAIR=/etc/misaka/relayer.json
+Environment=POLL_INTERVAL=15
+Environment=PROCESSED_STORE=/var/lib/misaka/relayer-processed.json
+Environment=RUST_LOG=info
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/misaka
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
