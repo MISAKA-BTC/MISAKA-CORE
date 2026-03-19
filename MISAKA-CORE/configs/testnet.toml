@@ -1,0 +1,51 @@
+# MISAKA Network — Testnet Configuration (Pure PoS)
+# chain_id = 2, LogRing-v1 default, chipmunk disabled, bridge disabled
+# No faucet. No PoW. No dev features.
+
+[chain]
+chain_id = 2
+chain_name = "MISAKA Testnet"
+
+[node]
+mode = "public"                     # public | hidden | seed
+data_dir = "./misaka-data"
+log_level = "info"
+
+[p2p]
+port = 6690
+max_inbound_peers = 32
+max_outbound_peers = 8
+# advertise_addr = "YOUR_PUBLIC_IP:6690"
+
+[rpc]
+port = 3001
+
+[consensus]
+block_time_secs = 60
+epoch_length = 720                  # ~12 hours at 60s blocks
+
+[validator]
+# Enable to run as a validator (block production + voting).
+# Requires registration via misakastake.com.
+enabled = false
+# validator_id = ""                 # hex-encoded 20-byte validator ID
+# consensus_key_path = "./keys/consensus.key"
+# network_key_path = "./keys/network.key"
+minimum_self_stake = 100000000      # 100 MISAKA
+
+[staking]
+# Source of validator registry data.
+# "chain" = on-chain state (default)
+# "snapshot" = signed registry snapshot file
+registry_source = "chain"
+
+[ring_signature]
+default_scheme = "logring-v1"
+min_ring_size = 4
+max_ring_size = 1024
+
+[bridge]
+enabled = false
+
+[features]
+chipmunk_enabled = false
