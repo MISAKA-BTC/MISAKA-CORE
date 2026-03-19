@@ -1,0 +1,6 @@
+[package]
+name = "misaka-bridge"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

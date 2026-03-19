@@ -1,0 +1,6 @@
+[package]
+name = "misaka-p2p"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

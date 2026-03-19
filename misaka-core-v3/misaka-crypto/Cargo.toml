@@ -1,0 +1,6 @@
+[package]
+name = "misaka-crypto"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

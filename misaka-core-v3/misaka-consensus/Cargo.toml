@@ -1,0 +1,6 @@
+[package]
+name = "misaka-consensus"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
