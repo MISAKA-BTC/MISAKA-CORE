@@ -1,0 +1,15 @@
+{
+  "name": "misaka-validator-tools",
+  "version": "0.5.0",
+  "description": "MISAKA Network L1 Validator Key Generation & Startup Tools",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "generate-key": "node generate-l1-key.js",
+    "start-validator": "node start-validator.js"
+  },
+  "dependencies": {
+    "@noble/post-quantum": "^0.2.0",
+    "@noble/hashes": "^1.4.0"
+  }
+}
