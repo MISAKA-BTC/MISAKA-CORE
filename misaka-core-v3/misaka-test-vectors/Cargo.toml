@@ -1,0 +1,6 @@
+[package]
+name = "misaka-test-vectors"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
