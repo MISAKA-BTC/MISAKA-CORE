@@ -1,6 +1,0 @@
-[package]
-name = "misaka-governance"
-version.workspace = true
-edition.workspace = true
-
-[dependencies]

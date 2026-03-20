@@ -1,6 +1,0 @@
-[package]
-name = "misaka-tokenomics"
-version.workspace = true
-edition.workspace = true
-
-[dependencies]

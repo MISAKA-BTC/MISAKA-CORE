@@ -1,6 +1,0 @@
-[package]
-name = "misaka-mev"
-version.workspace = true
-edition.workspace = true
-
-[dependencies]

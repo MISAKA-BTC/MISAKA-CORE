@@ -1,6 +1,0 @@
-[package]
-name = "misaka-dag"
-version.workspace = true
-edition.workspace = true
-
-[dependencies]

@@ -1,6 +1,0 @@
-[package]
-name = "misaka-pqc"
-version.workspace = true
-edition.workspace = true
-
-[dependencies]

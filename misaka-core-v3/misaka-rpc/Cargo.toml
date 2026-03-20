@@ -1,6 +1,0 @@
-[package]
-name = "misaka-rpc"
-version.workspace = true
-edition.workspace = true
-
-[dependencies]
