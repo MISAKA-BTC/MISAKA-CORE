@@ -1,0 +1,40 @@
+# docker/explorer/docker-compose.yml
+# Usage:
+#   docker compose up -d              # Start explorer + nginx
+#   docker compose up -d --build      # Rebuild and start
+#   docker compose logs -f explorer   # Watch logs
+
+services:
+  # ─── Explorer (Next.js) ────────────────────────────────
+  explorer:
+    build:
+      context: ../../misaka-explorer     # misaka-explorer root
+      dockerfile: ../docker/explorer/Dockerfile
+      args:
+        MISAKA_RPC_URL: ${MISAKA_RPC_URL:-http://host.docker.internal:3001}
+    container_name: misaka-explorer
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - MISAKA_RPC_URL=${MISAKA_RPC_URL:-http://host.docker.internal:3001}
+      - NODE_ENV=production
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  # ─── Nginx (HTTPS termination) ─────────────────────────
+  # Uncomment if you want nginx managed by compose.
+  # Otherwise use the host's existing nginx.
+  #
+  # nginx:
+  #   image: nginx:alpine
+  #   container_name: misaka-nginx
+  #   restart: unless-stopped
+  #   ports:
+  #     - "80:80"
+  #     - "443:443"
+  #   volumes:
+  #     - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+  #     - /etc/letsencrypt:/etc/letsencrypt:ro
+  #   depends_on:
+  #     - explorer
