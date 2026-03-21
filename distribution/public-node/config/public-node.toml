@@ -1,0 +1,36 @@
+[chain]
+chain_id = 2
+
+[node]
+name = "misaka-public-01"
+mode = "public"
+data_dir = "../data/public"
+log_level = "info"
+
+[p2p]
+port = 6691
+max_inbound_peers = 48
+max_outbound_peers = 16
+# advertise_addr = "YOUR_PUBLIC_IP:6691"
+
+[rpc]
+port = 3001
+
+[consensus]
+block_time_secs = 60
+validator = false
+validator_index = 0
+validators = 1
+
+[faucet]
+enabled = true
+amount = 100000
+cooldown_secs = 300
+
+[bootstrap]
+seed_nodes = []
+seed_file = "./seeds.txt"
+reconnect_interval_secs = 30
+
+[genesis]
+timestamp_ms = 1773446400000
