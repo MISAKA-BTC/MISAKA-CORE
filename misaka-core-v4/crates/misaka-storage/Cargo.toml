@@ -1,0 +1,23 @@
+[package]
+name = "misaka-storage"
+description = "Storage: JMT + UTXO set with rollback"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+[dependencies]
+misaka-types = { path = "../misaka-types" }
+misaka-crypto = { path = "../misaka-crypto" }
+sha3 = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+parking_lot = { workspace = true }
+hex = { workspace = true }
+rocksdb = { version = "0.22", default-features = false, features = ["snappy"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true
