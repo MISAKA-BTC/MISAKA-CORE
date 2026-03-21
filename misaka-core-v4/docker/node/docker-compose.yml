@@ -1,0 +1,90 @@
+# docker/node/docker-compose.yml
+# Usage:
+#   docker compose up seed          # Seed node
+#   docker compose up public        # Public full node
+#   docker compose up validator     # Validator node
+#   docker compose up seed public   # Seed + Public together
+
+services:
+  # ─── Seed Node ──────────────────────────────────────────
+  seed:
+    build:
+      context: ../../          # misaka-net-core root
+      dockerfile: docker/node/Dockerfile
+    container_name: misaka-seed
+    restart: unless-stopped
+    ports:
+      - "6690:6690"
+      - "3001:3001"
+    volumes:
+      - seed-data:/home/misaka/data
+    environment:
+      - RUST_LOG=info
+    command: >
+      --name seed-01
+      --mode seed
+      --chain-id 2
+      --rpc-port 3001
+      --p2p-port 6690
+      --advertise-addr ${ADVERTISE_ADDR:-0.0.0.0:6690}
+      --data-dir /home/misaka/data
+      --log-level info
+
+  # ─── Public Full Node ──────────────────────────────────
+  public:
+    build:
+      context: ../../
+      dockerfile: docker/node/Dockerfile
+    container_name: misaka-public
+    restart: unless-stopped
+    ports:
+      - "6691:6690"
+      - "3002:3001"
+    volumes:
+      - public-data:/home/misaka/data
+    environment:
+      - RUST_LOG=info
+    command: >
+      --name public-01
+      --mode public
+      --chain-id 2
+      --rpc-port 3001
+      --p2p-port 6690
+      --advertise-addr ${PUBLIC_ADVERTISE_ADDR:-0.0.0.0:6691}
+      --seeds ${SEED_ADDR:-49.212.136.189:6690}
+      --data-dir /home/misaka/data
+      --log-level info
+
+  # ─── Validator Node ────────────────────────────────────
+  validator:
+    build:
+      context: ../../
+      dockerfile: docker/node/Dockerfile
+    container_name: misaka-validator
+    restart: unless-stopped
+    ports:
+      - "6692:6690"
+      - "3003:3001"
+    volumes:
+      - validator-data:/home/misaka/data
+    environment:
+      - RUST_LOG=info
+    command: >
+      --name validator-01
+      --mode public
+      --chain-id 2
+      --rpc-port 3001
+      --p2p-port 6690
+      --advertise-addr ${VALIDATOR_ADVERTISE_ADDR:-0.0.0.0:6692}
+      --seeds ${SEED_ADDR:-49.212.136.189:6690}
+      --validator
+      --validator-index ${VALIDATOR_INDEX:-0}
+      --validators ${VALIDATOR_COUNT:-1}
+      --block-time ${BLOCK_TIME:-60}
+      --data-dir /home/misaka/data
+      --log-level info
+
+volumes:
+  seed-data:
+  public-data:
+  validator-data:
