@@ -26,13 +26,33 @@ MISAKA testnet に初心者でも参加しやすい形で入るための配布 r
 もし macOS が「Mac に損害を与える可能性があるため開けません」などと表示した場合は、展開したフォルダに対して一度だけ quarantine を外してください。
 
 ```bash
-xattr -dr com.apple.quarantine misaka-public-node-v0.4.1-macos-arm64
+xattr -dr com.apple.quarantine <展開したフォルダ名>
 ```
 
 ### Linux
 
 1. tar.gz を展開
 2. `./start-public-node.sh` を実行
+
+## 公式 seed が落ちている時
+
+共有 VPS が止まっていても、配布物だけでローカル接続確認はできます。
+
+- Windows: `start-self-hosted-testnet.bat`
+- macOS: `start-self-hosted-testnet.command`
+- Linux: `./start-self-hosted-testnet.sh`
+
+これは `seed node` と `public node` を同梱 package 内で一緒に起動して、public node を `127.0.0.1:6690` に向けます。
+
+## ポート開放の考え方
+
+まず `show-network-guide.*` か `misaka-launcher doctor --profile public` を実行してください。
+
+- 参加だけなら router のポート開放は必須ではありません
+- 他ノードから見える public node にしたいなら `TCP 6691`
+- 自分で seed を配るなら `TCP 6690`
+
+router の設定画面は機種ごとに違うので、port forwarding 自体を完全自動化することはしていません。代わりに package 内で必要ポートと現在の LAN 情報を表示します。
 
 ## seed の差し替え
 
@@ -49,6 +69,8 @@ xattr -dr com.apple.quarantine misaka-public-node-v0.4.1-macos-arm64
 - `config/seed-node.toml`
 - `config/validator-node.toml`
 - `config/seeds.txt`
+- `config/self-host-seeds.txt`
+- `config/offline-seeds.txt`
 
 ## 補足
 
