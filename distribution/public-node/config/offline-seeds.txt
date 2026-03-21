@@ -1,0 +1,2 @@
+# Keep this file empty for isolated self-host tests.
+# The launcher points the local seed profile here when running `self-host`.

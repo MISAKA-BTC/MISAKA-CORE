@@ -1,0 +1,2 @@
+# Loopback bootstrap used by `misaka-launcher self-host`.
+127.0.0.1:6690

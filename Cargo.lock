@@ -1240,7 +1240,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-bridge"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "hex",
  "misaka-pqc",
@@ -1253,7 +1253,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-cli"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1273,7 +1273,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-consensus"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "hex",
  "misaka-crypto",
@@ -1289,7 +1289,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-crypto"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "hex",
  "misaka-pqc",
@@ -1302,7 +1302,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-dag"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "chrono",
  "hex",
@@ -1322,7 +1322,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-execution"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "misaka-consensus",
  "misaka-crypto",
@@ -1337,7 +1337,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-governance"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "misaka-crypto",
  "misaka-types",
@@ -1349,15 +1349,17 @@ dependencies = [
 
 [[package]]
 name = "misaka-launcher"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "anyhow",
  "clap",
+ "serde",
+ "toml",
 ]
 
 [[package]]
 name = "misaka-mempool"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "hex",
  "misaka-crypto",
@@ -1372,7 +1374,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-mev"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "misaka-crypto",
  "misaka-types",
@@ -1384,7 +1386,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-node"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "anyhow",
  "axum",
@@ -1418,7 +1420,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-p2p"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "misaka-crypto",
  "misaka-pqc",
@@ -1431,7 +1433,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-pqc"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "chacha20poly1305",
  "hex",
@@ -1458,7 +1460,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-rpc"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "misaka-crypto",
  "misaka-types",
@@ -1471,7 +1473,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-storage"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "hex",
  "misaka-crypto",
@@ -1488,7 +1490,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-test-vectors"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "hex",
  "misaka-crypto",
@@ -1499,7 +1501,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-tokenomics"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "misaka-crypto",
  "misaka-types",
@@ -1511,7 +1513,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-types"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "hex",
  "serde",
