@@ -1,0 +1,79 @@
+name: build-public-node
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/build-public-node.yml"
+      - "misaka-core-v4/**"
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            platform: linux
+            arch: x86_64
+          - runner: windows-latest
+            platform: windows
+            arch: x86_64
+          - runner: macos-14
+            platform: macos
+            arch: arm64
+
+    runs-on: ${{ matrix.runner }}
+
+    defaults:
+      run:
+        working-directory: misaka-core-v4
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config cmake clang libclang-dev
+
+      - name: Install macOS dependencies
+        if: runner.os == 'macOS'
+        run: |
+          brew update
+          brew install llvm cmake
+          echo "LIBCLANG_PATH=$(brew --prefix llvm)/lib" >> "$GITHUB_ENV"
+
+      - name: Install Windows dependencies
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          choco install llvm -y --no-progress
+          echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Build release binaries
+        run: cargo build --release -p misaka-node -p misaka-launcher
+
+      - name: Package public-node distribution
+        shell: bash
+        run: |
+          python scripts/package_public_node.py \
+            --workspace-root . \
+            --binary-dir target/release \
+            --platform "${{ matrix.platform }}" \
+            --arch "${{ matrix.arch }}" \
+            --output-dir dist
+
+      - name: Upload packaged artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: misaka-public-node-${{ matrix.platform }}-${{ matrix.arch }}
+          path: |
+            misaka-core-v4/dist/*

@@ -1,0 +1,31 @@
+[package]
+name = "misaka-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+misaka-pqc = { path = "../crates/misaka-pqc" }
+misaka-types = { path = "../crates/misaka-types" }
+
+[[bin]]
+name = "fuzz_tx_decode"
+path = "fuzz_targets/fuzz_tx_decode.rs"
+
+[[bin]]
+name = "fuzz_ki_proof_deser"
+path = "fuzz_targets/fuzz_ki_proof_deser.rs"
+
+[[bin]]
+name = "fuzz_poly_deser"
+path = "fuzz_targets/fuzz_poly_deser.rs"
+
+[[bin]]
+name = "fuzz_mcs1_read"
+path = "fuzz_targets/fuzz_mcs1_read.rs"
+
+[workspace]

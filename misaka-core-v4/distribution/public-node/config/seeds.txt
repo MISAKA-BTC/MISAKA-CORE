@@ -1,0 +1,3 @@
+# One seed per line.
+# Replace this file when the published bootstrap list changes.
+49.212.136.189:6690

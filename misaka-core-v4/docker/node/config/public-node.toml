@@ -1,0 +1,30 @@
+[chain]
+chain_id = 2
+
+[node]
+name = "public-01"
+mode = "public"
+data_dir = "/home/misaka/data"
+log_level = "info"
+
+[p2p]
+port = 6690
+max_inbound_peers = 48
+max_outbound_peers = 16
+
+[rpc]
+port = 3001
+
+[consensus]
+block_time_secs = 60
+validator = false
+validator_index = 0
+validators = 1
+
+[bootstrap]
+seed_nodes = []
+seed_file = "/config/seeds.txt"
+reconnect_interval_secs = 30
+
+[genesis]
+timestamp_ms = 1773446400000

@@ -1,0 +1,29 @@
+[package]
+name = "misaka-cli"
+description = "MISAKA Network CLI — keygen, genesis, transfer, balance"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "misaka-cli"
+path = "src/main.rs"
+
+[dependencies]
+misaka-types = { path = "../misaka-types" }
+misaka-pqc = { path = "../misaka-pqc" }
+misaka-rpc = { path = "../misaka-rpc" }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+hex = { workspace = true }
+sha3 = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true }
+rand = { workspace = true }
+chrono = { workspace = true }
+reqwest = { version = "0.12", features = ["json"] }
+tracing = { workspace = true }
+
+[lints]
+workspace = true
