@@ -7,6 +7,9 @@ MISAKA testnet に初心者でも参加しやすい形で入るための配布 r
 - Windows x86_64: [misaka-public-node-windows-x86_64.zip](https://github.com/sasakiyuuu/misaka-test-net/releases/latest/download/misaka-public-node-windows-x86_64.zip)
 - macOS arm64: [misaka-public-node-macos-arm64.tar.gz](https://github.com/sasakiyuuu/misaka-test-net/releases/latest/download/misaka-public-node-macos-arm64.tar.gz)
 - Linux x86_64: [misaka-public-node-linux-x86_64.tar.gz](https://github.com/sasakiyuuu/misaka-test-net/releases/latest/download/misaka-public-node-linux-x86_64.tar.gz)
+- SHA256: [SHA256SUMS](https://github.com/sasakiyuuu/misaka-test-net/releases/latest/download/SHA256SUMS)
+
+最新 release 一覧: https://github.com/sasakiyuuu/misaka-test-net/releases/latest
 
 ## 使い方
 
