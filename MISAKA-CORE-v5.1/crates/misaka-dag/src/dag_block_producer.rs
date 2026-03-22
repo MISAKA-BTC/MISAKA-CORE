@@ -748,6 +748,7 @@ pub async fn run_dag_block_producer(
         s.dag_store.set_ghostdag(block_hash, ghostdag_data.clone());
 
         // ── Step 6a: Persist to RocksDB (write-through) ──
+        #[cfg(feature = "rocksdb")]
         if let Some(ref backend) = s.persistent_backend {
             use crate::persistent_store::PersistentDagBackend;
             if let Err(e) = backend.insert_block_atomic(
