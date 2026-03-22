@@ -150,7 +150,8 @@ async fn tcp_responder_handshake(
     let hs = reply.verify_initiator(&init_sig, &initiator_pk)
         .map_err(|e| format!("verify init: {}", e))?;
 
-    Ok((hs, DirectionalKeys::derive(&hs.session_key, false)))
+    let dk = DirectionalKeys::derive(&hs.session_key, false);
+    Ok((hs, dk))
 }
 
 // ═══════════════════════════════════════════════════════════════
