@@ -299,11 +299,6 @@ impl CtStealthScanner {
     }
 }
 
-fn ct_eq(a: &[u8; 16], b: &[u8; 16]) -> bool {
-    let mut diff = 0u8;
-    for i in 0..16 { diff |= a[i] ^ b[i]; }
-    diff == 0
-}
 
 // ═══════════════════════════════════════════════════════════════
 //  Tests
