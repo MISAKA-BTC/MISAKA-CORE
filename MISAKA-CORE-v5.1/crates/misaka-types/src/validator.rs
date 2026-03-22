@@ -1,0 +1,123 @@
+//! Public PoS validator types — PQ-only (ML-DSA-65).
+//!
+//! ECC (Ed25519) is COMPLETELY EXCLUDED.
+//! Validator signatures are ML-DSA-65 only (FIPS 204).
+
+use crate::mcs1;
+
+pub type ValidatorId = [u8; 20];
+
+/// Validator public key (ML-DSA-65 only, 1952 bytes).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ValidatorPublicKey {
+    pub bytes: Vec<u8>, // 1952 bytes (ML-DSA-65)
+}
+
+/// Validator signature (ML-DSA-65 only, 3309 bytes).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ValidatorSignature {
+    pub bytes: Vec<u8>, // 3309 bytes (ML-DSA-65)
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ValidatorIdentity {
+    pub validator_id: ValidatorId,
+    pub stake_weight: u128,
+    pub public_key: ValidatorPublicKey,
+    pub is_active: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Proposal {
+    pub slot: u64,
+    pub proposer: ValidatorId,
+    pub block_hash: [u8; 32],
+    pub signature: ValidatorSignature,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct CommitteeVote {
+    pub slot: u64,
+    pub voter: ValidatorId,
+    pub block_hash: [u8; 32],
+    pub signature: ValidatorSignature,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct FinalityProof {
+    pub slot: u64,
+    pub block_hash: [u8; 32],
+    pub commits: Vec<CommitteeVote>,
+}
+
+/// Deterministic validator signing target for a GhostDAG-ordered checkpoint.
+///
+/// `timestamp_ms` is intentionally excluded because it is a local observation,
+/// not consensus state. Validators sign the ordered state commitment itself.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct DagCheckpointTarget {
+    pub block_hash: [u8; 32],
+    pub blue_score: u64,
+    pub utxo_root: [u8; 32],
+    pub total_key_images: u64,
+    pub total_applied_txs: u64,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct DagCheckpointVote {
+    pub voter: ValidatorId,
+    pub target: DagCheckpointTarget,
+    pub signature: ValidatorSignature,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct DagCheckpointFinalityProof {
+    pub target: DagCheckpointTarget,
+    pub commits: Vec<DagCheckpointVote>,
+}
+
+impl Proposal {
+    pub fn signing_bytes(&self) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(60);
+        buf.extend_from_slice(b"MISAKA:proposal:v2:");
+        mcs1::write_u64(&mut buf, self.slot);
+        mcs1::write_fixed(&mut buf, &self.proposer);
+        mcs1::write_fixed(&mut buf, &self.block_hash);
+        buf
+    }
+}
+
+impl CommitteeVote {
+    pub fn signing_bytes(&self) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(60);
+        buf.extend_from_slice(b"MISAKA:vote:v2:");
+        mcs1::write_u64(&mut buf, self.slot);
+        mcs1::write_fixed(&mut buf, &self.voter);
+        mcs1::write_fixed(&mut buf, &self.block_hash);
+        buf
+    }
+}
+
+impl DagCheckpointTarget {
+    pub fn signing_bytes(&self) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(128);
+        buf.extend_from_slice(b"MISAKA:dag-checkpoint-target:v1:");
+        mcs1::write_fixed(&mut buf, &self.block_hash);
+        mcs1::write_u64(&mut buf, self.blue_score);
+        mcs1::write_fixed(&mut buf, &self.utxo_root);
+        mcs1::write_u64(&mut buf, self.total_key_images);
+        mcs1::write_u64(&mut buf, self.total_applied_txs);
+        buf
+    }
+}
+
+impl DagCheckpointVote {
+    pub fn signing_bytes(&self) -> Vec<u8> {
+        let target_bytes = self.target.signing_bytes();
+        let mut buf = Vec::with_capacity(64 + target_bytes.len());
+        buf.extend_from_slice(b"MISAKA:dag-checkpoint-vote:v1:");
+        mcs1::write_fixed(&mut buf, &self.voter);
+        buf.extend_from_slice(&target_bytes);
+        buf
+    }
+}
