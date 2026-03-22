@@ -266,6 +266,8 @@ impl StakingRegistry {
 
     /// LOCKED → ACTIVE
     pub fn activate(&mut self, validator_id: &[u8; 20], current_epoch: u64) -> Result<(), StakingError> {
+        // Check capacity before mutable borrow (SEC-AUDIT-V5: borrow checker fix)
+        let at_capacity = self.active_count() >= self.config.max_active_validators;
         let a = self.validators.get_mut(validator_id).ok_or(StakingError::ValidatorNotFound)?;
         if a.state != ValidatorState::Locked {
             return Err(StakingError::InvalidTransition { from: a.state.label().into(), to: "ACTIVE".into() });
@@ -273,7 +275,7 @@ impl StakingRegistry {
         if a.stake_amount < self.config.min_validator_stake {
             return Err(StakingError::BelowMinStake { deposited: a.stake_amount, minimum: self.config.min_validator_stake });
         }
-        if self.active_count() >= self.config.max_active_validators {
+        if at_capacity {
             return Err(StakingError::ValidatorSetFull);
         }
         a.state = ValidatorState::Active;

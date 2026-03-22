@@ -129,13 +129,13 @@ impl RewardEpochTracker {
 
         for (vid, (acc, stake, smoothed)) in &self.accumulators {
             let snap = acc.clone().into_snapshot(
-                vid.to_hex(),
+                hex::encode(vid),
                 epoch,
                 &self.config,
             );
 
             reward_inputs.push(ValidatorRewardInput {
-                validator_id: vid.to_hex(),
+                validator_id: hex::encode(vid),
                 active_stake: *stake,
                 smoothed_score: snap.workload_score, // use current epoch score
             });
@@ -157,7 +157,7 @@ impl RewardEpochTracker {
         // Update smoothed scores for next epoch (EMA: 70/30)
         for (vid, (_, _, smoothed)) in self.accumulators.iter_mut() {
             let current = snapshots.iter()
-                .find(|s| s.validator_id == vid.to_hex())
+                .find(|s| s.validator_id == hex::encode(vid))
                 .map(|s| s.workload_score)
                 .unwrap_or(0);
             *smoothed = (*smoothed * 7 + current * 3) / 10;
@@ -261,9 +261,9 @@ mod tests {
         }
 
         let output = tracker.transition_epoch();
-        let r1 = output.breakdowns.iter().find(|b| b.validator_id == vid(1).to_hex())
+        let r1 = output.breakdowns.iter().find(|b| b.validator_id == hex::encode(vid(1)))
             .map(|b| b.epoch_reward).unwrap_or(0);
-        let r2 = output.breakdowns.iter().find(|b| b.validator_id == vid(2).to_hex())
+        let r2 = output.breakdowns.iter().find(|b| b.validator_id == hex::encode(vid(2)))
             .map(|b| b.epoch_reward).unwrap_or(0);
 
         // V2 has 100x stake but should NOT get 100x reward (sqrt dampening)
