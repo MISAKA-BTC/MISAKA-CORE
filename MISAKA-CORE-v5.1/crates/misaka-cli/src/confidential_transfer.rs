@@ -246,7 +246,7 @@ pub async fn run(
         }],
         outputs,
         fee: conf_fee,
-        balance_proof,
+        balance_proof: balance_proof.clone(),
         extra: vec![],
     };
 
