@@ -1,0 +1,15 @@
+[package]
+name = "misaka-wallet-core"
+description = "MISAKA Wallet SDK — key management, coin selection, TX planning"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha3 = { workspace = true }
+hex = { workspace = true }
+
+[lints]
+workspace = true
