@@ -897,3 +897,26 @@ pub(crate) fn sample_masking_poly_v2() -> Poly {
     }
     y
 }
+
+/// Sample a simulated OR-proof response bounded by BETA.
+/// In OR-proofs, the simulated branch's response must satisfy ||z||_inf < BETA.
+pub(crate) fn sample_sim_response() -> Poly {
+    let mut rng = rand::rngs::OsRng;
+    let mut z = Poly::zero();
+    let bound = BETA - 1;
+    let range = (2 * bound - 1) as u32;
+    let threshold = u32::MAX - (u32::MAX % range);
+    for i in 0..N {
+        loop {
+            let mut buf = [0u8; 4];
+            rng.fill_bytes(&mut buf);
+            let raw = u32::from_le_bytes(buf);
+            if raw < threshold {
+                let val = (raw % range) as i32 - (bound - 1);
+                z.coeffs[i] = ((val % Q) + Q) % Q;
+                break;
+            }
+        }
+    }
+    z
+}

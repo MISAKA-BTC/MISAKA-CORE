@@ -89,7 +89,7 @@ use rand::RngCore;
 use zeroize::Zeroize;
 
 use crate::pq_ring::{
-    Poly, Q, N, BETA, MAX_SIGN_ATTEMPTS,
+    Poly, Q, N, BETA, MAX_SIGN_ATTEMPTS, sample_sim_response,
     sample_masking_poly, hash_to_challenge,
 };
 use crate::bdlop::{BdlopCrs, BdlopCommitment, BlindingFactor};
@@ -393,40 +393,34 @@ pub fn prove_membership(
             sis_node(sis_crs, &current_node_poly, sib_poly)
         };
 
-        // Compute parent blinding factor
-        // parent_blind satisfies: C(parent) = A1·r_parent + A2·parent
-        let r_parent = BlindingFactor::random();
+        // Phase 2 fix: derive r_parent so that r_excess is SHORT.
+        // r_parent = a_m1·r_left + a_m2·r_right + epsilon  (epsilon is short)
+        // Then D = A1·(r_natural - r_parent) = A1·(-epsilon)
+        // So r_excess = -epsilon (short, rejection sampling works)
+        let epsilon = BlindingFactor::random(); // SHORT: {-1, 0, 1}
+        let r_natural = if is_right {
+            sis_crs.a_m1.mul(r_sib.as_poly()).add(&sis_crs.a_m2.mul(current_node_blind.as_poly()))
+        } else {
+            sis_crs.a_m1.mul(current_node_blind.as_poly()).add(&sis_crs.a_m2.mul(r_sib.as_poly()))
+        };
+        let r_parent = BlindingFactor({
+            let mut p = r_natural.add(epsilon.as_poly());
+            for j in 0..N { p.coeffs[j] = ((p.coeffs[j] % Q) + Q) % Q; }
+            p
+        });
         let parent_commitment = BdlopCommitment::commit_poly(bdlop_crs, &r_parent, &parent_poly);
 
-        // Current node commitment
         let node_commitment = BdlopCommitment::commit_poly(
             bdlop_crs, &current_node_blind, &current_node_poly,
         );
 
-        // ── OR-proof: direction hiding ──
-        //
-        // Branch 0 (node=left): D0 = A_m1·C_node + A_m2·C_sib - C_parent
-        //   D0 should be A1·(a_m1·r_node + a_m2·r_sib - r_parent) if dir=0
-        //
-        // Branch 1 (node=right): D1 = A_m1·C_sib + A_m2·C_node - C_parent
-        //   D1 should be A1·(a_m1·r_sib + a_m2·r_node - r_parent) if dir=1
-
-        let real_branch = if is_right { 1u8 } else { 0u8 };
-
-        // Compute the excess blinding for the REAL branch
-        let r_excess = if is_right {
-            // Branch 1: r_excess = a_m1·r_sib + a_m2·r_node - r_parent
-            let term1 = sis_crs.a_m1.mul(r_sib.as_poly());
-            let term2 = sis_crs.a_m2.mul(current_node_blind.as_poly());
-            let sum = term1.add(&term2);
-            BlindingFactor(sum.sub(r_parent.as_poly()))
-        } else {
-            // Branch 0: r_excess = a_m1·r_node + a_m2·r_sib - r_parent
-            let term1 = sis_crs.a_m1.mul(current_node_blind.as_poly());
-            let term2 = sis_crs.a_m2.mul(r_sib.as_poly());
-            let sum = term1.add(&term2);
-            BlindingFactor(sum.sub(r_parent.as_poly()))
+        // r_excess = -epsilon (negated! because D = A1·(-epsilon))
+        let neg_epsilon = {
+            let mut p = Poly::zero();
+            for j in 0..N { p.coeffs[j] = ((-(epsilon.as_poly().coeffs[j] as i64)) % Q as i64 + Q as i64) as i32 % Q; }
+            p
         };
+        let r_excess = BlindingFactor(neg_epsilon);
 
         // Σ-protocol for zero-commitment proof (the real branch)
         for _attempt in 0..MAX_SIGN_ATTEMPTS {
@@ -434,7 +428,7 @@ pub fn prove_membership(
             let w_real = bdlop_crs.a1.mul(&y_real); // A1·y
 
             // Simulate the fake branch
-            let z_fake = sample_masking_poly();
+            let z_fake = sample_sim_response();
             let mut c_fake_bytes = [0u8; 32];
             rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut c_fake_bytes);
             let c_fake_poly = hash_to_challenge(&c_fake_bytes);
@@ -1108,32 +1102,31 @@ pub fn prove_membership_v2(
         } else {
             sis_node(sis_crs, &cur_node, sib_poly)
         };
-        // Phase 2 fix: derive r_parent from children's blinds + short epsilon.
-        // This ensures the excess witness (epsilon) is SHORT, making the
-        // Σ-protocol rejection sampling work.
-        //
+        // Phase 2 fix: derive r_parent so that r_excess is SHORT.
         // r_parent = a_m1·r_left + a_m2·r_right + epsilon
-        // D = C_parent - a_m1·C_left - a_m2·C_right = A1·epsilon
-        // epsilon is short → Σ-protocol always succeeds (~7 attempts)
+        // D = a_m1·C_left + a_m2·C_right - C_parent = A1·(-epsilon)
+        // So r_excess = -epsilon (short, rejection sampling works)
         let epsilon = BlindingFactor::random(); // SHORT: {-1, 0, 1}
         let r_natural = if is_right {
-            // cur_node is right child, sib is left child
             sis_crs.a_m1.mul(r_sib.as_poly()).add(&sis_crs.a_m2.mul(cur_blind.as_poly()))
         } else {
-            // cur_node is left child, sib is right child
             sis_crs.a_m1.mul(cur_blind.as_poly()).add(&sis_crs.a_m2.mul(r_sib.as_poly()))
         };
         let r_parent = BlindingFactor({
             let mut p = r_natural.add(epsilon.as_poly());
-            p.reduce();
+            for j in 0..N { p.coeffs[j] = ((p.coeffs[j] % Q) + Q) % Q; }
             p
         });
         let parent_comm = BdlopCommitment::commit_poly(bdlop_crs, &r_parent, &parent_poly);
 
         let node_comm = BdlopCommitment::commit_poly(bdlop_crs, &cur_blind, &cur_node);
 
-        // Excess blinding = epsilon (SHORT by construction)
-        let r_excess = epsilon;
+        // r_excess = -epsilon (negated: D = A1·(-epsilon))
+        let r_excess = BlindingFactor({
+            let mut p = Poly::zero();
+            for j in 0..N { p.coeffs[j] = ((-(epsilon.as_poly().coeffs[j] as i64)) % Q as i64 + Q as i64) as i32 % Q; }
+            p
+        });
 
         // OR-proof with rejection sampling
         let mut done = false;
@@ -1142,7 +1135,7 @@ pub fn prove_membership_v2(
             let w_real = bdlop_crs.a1.mul(&y_real);
 
             // Simulate fake branch
-            let z_fake = sample_masking_poly();
+            let z_fake = sample_sim_response();
             let mut c_fake = [0u8; 32];
             rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut c_fake);
             let c_fake_poly = hash_to_challenge(&c_fake);

@@ -22,7 +22,7 @@ use sha3::{Sha3_256, Digest as Sha3Digest};
 use zeroize::Zeroize;
 use serde::{Serialize, Deserialize};
 
-use crate::pq_ring::{Poly, Q, N, BETA, MAX_SIGN_ATTEMPTS, hash_to_challenge, sample_masking_poly};
+use crate::pq_ring::{Poly, Q, N, BETA, MAX_SIGN_ATTEMPTS, hash_to_challenge, sample_masking_poly, sample_sim_response};
 use crate::bdlop::{BdlopCrs, BdlopCommitment, BlindingFactor};
 use crate::error::CryptoError;
 
@@ -276,7 +276,7 @@ fn prove_bit(
 
     for _ in 0..MAX_SIGN_ATTEMPTS {
         // Simulated branch (the bit we're NOT)
-        let sim_z = sample_masking_poly();
+        let sim_z = sample_sim_response();
         let mut sim_c_bytes = [0u8; 32];
         rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut sim_c_bytes);
         let sim_c_poly = hash_to_challenge(&sim_c_bytes);
