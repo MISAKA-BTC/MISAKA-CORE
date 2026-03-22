@@ -866,3 +866,34 @@ mod tests {
         );
     }
 }
+
+// ═══════════════════════════════════════════════════════════════
+//  V2 Parameters (Phase 2: wider masking for multi-witness proofs)
+// ═══════════════════════════════════════════════════════════════
+
+/// Wider masking parameter for multi-witness Σ-protocols.
+/// Needed when proving knowledge of 3+ short witnesses simultaneously,
+/// as the combined success probability drops with GAMMA=6000.
+pub const GAMMA_V2: i32 = 12000;
+pub const BETA_V2: i32 = GAMMA_V2 - (TAU as i32) * ETA; // 11954
+
+/// Sample masking polynomial from [-GAMMA_V2, GAMMA_V2].
+pub(crate) fn sample_masking_poly_v2() -> Poly {
+    let mut rng = rand::rngs::OsRng;
+    let mut y = Poly::zero();
+    let range = (2 * GAMMA_V2 - 1) as u32;
+    let threshold = u32::MAX - (u32::MAX % range);
+    for i in 0..N {
+        loop {
+            let mut buf = [0u8; 4];
+            rng.fill_bytes(&mut buf);
+            let raw = u32::from_le_bytes(buf);
+            if raw < threshold {
+                let val = (raw % range) as i32 - (GAMMA_V2 - 1);
+                y.coeffs[i] = ((val % Q) + Q) % Q;
+                break;
+            }
+        }
+    }
+    y
+}

@@ -1108,21 +1108,32 @@ pub fn prove_membership_v2(
         } else {
             sis_node(sis_crs, &cur_node, sib_poly)
         };
-        let r_parent = BlindingFactor::random();
+        // Phase 2 fix: derive r_parent from children's blinds + short epsilon.
+        // This ensures the excess witness (epsilon) is SHORT, making the
+        // Σ-protocol rejection sampling work.
+        //
+        // r_parent = a_m1·r_left + a_m2·r_right + epsilon
+        // D = C_parent - a_m1·C_left - a_m2·C_right = A1·epsilon
+        // epsilon is short → Σ-protocol always succeeds (~7 attempts)
+        let epsilon = BlindingFactor::random(); // SHORT: {-1, 0, 1}
+        let r_natural = if is_right {
+            // cur_node is right child, sib is left child
+            sis_crs.a_m1.mul(r_sib.as_poly()).add(&sis_crs.a_m2.mul(cur_blind.as_poly()))
+        } else {
+            // cur_node is left child, sib is right child
+            sis_crs.a_m1.mul(cur_blind.as_poly()).add(&sis_crs.a_m2.mul(r_sib.as_poly()))
+        };
+        let r_parent = BlindingFactor({
+            let mut p = r_natural.add(epsilon.as_poly());
+            p.reduce();
+            p
+        });
         let parent_comm = BdlopCommitment::commit_poly(bdlop_crs, &r_parent, &parent_poly);
 
         let node_comm = BdlopCommitment::commit_poly(bdlop_crs, &cur_blind, &cur_node);
 
-        // Excess blinding for the real direction
-        let r_excess = if is_right {
-            let t1 = sis_crs.a_m1.mul(r_sib.as_poly());
-            let t2 = sis_crs.a_m2.mul(cur_blind.as_poly());
-            BlindingFactor(t1.add(&t2).sub(r_parent.as_poly()))
-        } else {
-            let t1 = sis_crs.a_m1.mul(cur_blind.as_poly());
-            let t2 = sis_crs.a_m2.mul(r_sib.as_poly());
-            BlindingFactor(t1.add(&t2).sub(r_parent.as_poly()))
-        };
+        // Excess blinding = epsilon (SHORT by construction)
+        let r_excess = epsilon;
 
         // OR-proof with rejection sampling
         let mut done = false;

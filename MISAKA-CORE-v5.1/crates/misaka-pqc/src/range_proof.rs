@@ -186,6 +186,70 @@ pub fn prove_range(
     Ok((RangeProof { bit_commitments, bit_proofs }, bit_blinds))
 }
 
+/// Generate a range proof with bottom-up construction (Phase 2 fix).
+///
+/// # Key Difference from `prove_range`
+///
+/// `prove_range` takes an existing blind and decomposes it — but the last
+/// bit blind becomes full-range (up to Q/2), causing rejection sampling
+/// to always fail.
+///
+/// `prove_range_v2` generates ALL 64 bit blinds as SHORT random ({-1,0,1}),
+/// then derives the aggregate commitment and blind from them.
+///
+/// Returns: `(proof, commitment, aggregate_blind)`
+/// - The commitment is built homomorphically: C = Σ 2^i · C_i
+/// - The aggregate blind is derived: r = Σ 2^i · r_i (NOT short, but
+///   never used as a Σ-protocol witness)
+pub fn prove_range_v2(
+    crs: &BdlopCrs,
+    amount: u64,
+) -> Result<(RangeProof, BdlopCommitment, BlindingFactor), CryptoError> {
+    let mut bit_commitments = Vec::with_capacity(RANGE_BITS);
+    let mut bit_proofs = Vec::with_capacity(RANGE_BITS);
+    let mut bit_blinds = Vec::with_capacity(RANGE_BITS);
+
+    // Phase 1: Generate ALL bit blinds as short random
+    for _ in 0..RANGE_BITS {
+        bit_blinds.push(BlindingFactor::random());
+    }
+
+    // Phase 2: Build commitments and proofs (all blinds short → always succeeds)
+    for i in 0..RANGE_BITS {
+        let bit = ((amount >> i) & 1) as u64;
+        let c_i = BdlopCommitment::commit(crs, &bit_blinds[i], bit)?;
+        let proof = prove_bit(crs, &c_i, &bit_blinds[i], bit as u8)?;
+        bit_commitments.push(c_i);
+        bit_proofs.push(proof);
+    }
+
+    // Phase 3: Compute aggregate commitment C = Σ 2^i · C_i (homomorphic)
+    let mut aggregate = Poly::zero();
+    for (i, c_i) in bit_commitments.iter().enumerate() {
+        let power = pow2_mod_q(i) as i64;
+        for j in 0..N {
+            aggregate.coeffs[j] = ((aggregate.coeffs[j] as i64
+                + c_i.0.coeffs[j] as i64 * power) % Q as i64 + Q as i64) as i32 % Q;
+        }
+    }
+
+    // Phase 4: Compute aggregate blind r = Σ 2^i · r_i
+    let mut agg_blind = Poly::zero();
+    for (i, r_i) in bit_blinds.iter().enumerate() {
+        let power = pow2_mod_q(i) as i64;
+        for j in 0..N {
+            agg_blind.coeffs[j] = ((agg_blind.coeffs[j] as i64
+                + r_i.as_poly().coeffs[j] as i64 * power) % Q as i64 + Q as i64) as i32 % Q;
+        }
+    }
+
+    Ok((
+        RangeProof { bit_commitments, bit_proofs },
+        BdlopCommitment(aggregate),
+        BlindingFactor(agg_blind),
+    ))
+}
+
 /// Extended Euclidean algorithm for modular inverse.
 /// Returns x such that a·x ≡ 1 (mod m).
 fn mod_inverse(a: i64, m: i64) -> i64 {

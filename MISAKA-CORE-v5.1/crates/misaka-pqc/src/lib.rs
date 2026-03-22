@@ -157,7 +157,7 @@ pub use bdlop::{
 };
 
 pub use nullifier::{OutputId, NullifierProof, compute_nullifier, verify_nullifier, canonical_nullifier_hash};
-pub use range_proof::{RangeProof, prove_range, verify_range, RANGE_BITS};
+pub use range_proof::{RangeProof, prove_range, prove_range_v2, verify_range, RANGE_BITS};
 pub use membership::{
     SisMerkleCrs, ZkMembershipProofV2,
     sis_leaf, compute_sis_root, sis_root_hash,
