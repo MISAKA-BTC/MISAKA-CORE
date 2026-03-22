@@ -1,0 +1,65 @@
+[package]
+name = "misaka-node"
+description = "MISAKA Network validator node"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+# ═══ DAG Consensus — Production Default ═══
+# GhostDAG BlockDAG with multi-parent blocks, UTXO/DAG virtual state,
+# PQ-encrypted P2P transport, economic finality checkpoints.
+# This is the mainnet consensus layer.
+default = ["dag"]
+dag = ["misaka-dag"]
+# ═══ Q-DAG-CT (v4) ═══
+qdag_ct = ["dag", "misaka-dag/qdag-ct"]
+# ═══ RocksDB Persistent Storage (production) ═══
+rocksdb = ["dag", "misaka-dag/rocksdb"]
+# ═══ Development features (PHYSICALLY ISOLATED from production) ═══
+# Development-only RPC endpoints (get_address_outputs — privacy leak).
+dev-rpc = []
+# Testnet faucet endpoint.
+faucet = []
+# Development bridge mock verifier.
+dev-bridge-mock = []
+# ═══ STARK STUB — DEV-ONLY, PHYSICALLY EXCLUDED FROM PROD ═══
+# This feature gate ONLY controls dev/test builds.
+# Production binary `misaka-node` MUST be compiled WITHOUT this feature.
+# Release builds enforce via compile_error! below.
+stark-stub = ["misaka-pqc/stark-stub", "misaka-mempool/stark-stub", "misaka-consensus/stark-stub", "misaka-execution/stark-stub"]
+# General dev feature — compile_error! in release builds prevents shipping.
+dev = ["dev-rpc", "faucet", "dev-bridge-mock"]
+
+[dependencies]
+misaka-types = { path = "../misaka-types" }
+misaka-crypto = { path = "../misaka-crypto" }
+misaka-pqc = { path = "../misaka-pqc" }
+misaka-execution = { path = "../misaka-execution" }
+misaka-storage = { path = "../misaka-storage" }
+misaka-mempool = { path = "../misaka-mempool" }
+misaka-consensus = { path = "../misaka-consensus" }
+misaka-p2p = { path = "../misaka-p2p" }
+misaka-tokenomics = { path = "../misaka-tokenomics" }
+misaka-rpc = { path = "../misaka-rpc" }
+# DAG crate — compiled by default (production consensus layer)
+misaka-dag = { path = "../misaka-dag", optional = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha3 = { workspace = true }
+rand = { workspace = true }
+hex = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+axum = { workspace = true }
+tower-http = { workspace = true }
+tower = { workspace = true }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+[lints]
+workspace = true
