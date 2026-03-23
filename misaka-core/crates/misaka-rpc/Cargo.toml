@@ -1,0 +1,17 @@
+[package]
+name = "misaka-rpc"
+description = "JSON-RPC server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+[dependencies]
+misaka-types = { path = "../misaka-types" }
+misaka-crypto = { path = "../misaka-crypto" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+
+[lints]
+workspace = true
