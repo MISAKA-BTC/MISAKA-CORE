@@ -1,0 +1,55 @@
+services:
+  misaka-node:
+    build:
+      context: ..
+      dockerfile: docker/node.Dockerfile
+    container_name: misaka-node
+    restart: unless-stopped
+    init: true
+    environment:
+      NODE_NAME: ${NODE_NAME:-misaka-node-0}
+      NODE_MODE: ${NODE_MODE:-public}
+      NODE_RPC_PORT: ${NODE_RPC_PORT:-3001}
+      NODE_P2P_PORT: ${NODE_P2P_PORT:-6690}
+      NODE_BLOCK_TIME_SECS: ${NODE_BLOCK_TIME_SECS:-60}
+      NODE_VALIDATOR_INDEX: ${NODE_VALIDATOR_INDEX:-0}
+      NODE_VALIDATORS: ${NODE_VALIDATORS:-1}
+      NODE_DATA_DIR: ${NODE_DATA_DIR:-/var/lib/misaka}
+      NODE_LOG_LEVEL: ${NODE_LOG_LEVEL:-info}
+      NODE_CHAIN_ID: ${NODE_CHAIN_ID:-2}
+      NODE_DAG_K: ${NODE_DAG_K:-18}
+      NODE_FAUCET_AMOUNT: ${NODE_FAUCET_AMOUNT:-1000000}
+      NODE_FAUCET_COOLDOWN_MS: ${NODE_FAUCET_COOLDOWN_MS:-300000}
+      NODE_ADVERTISE_ADDR: ${NODE_ADVERTISE_ADDR:-}
+      NODE_OUTBOUND_ONLY: ${NODE_OUTBOUND_ONLY:-false}
+      NODE_HIDE_MY_IP: ${NODE_HIDE_MY_IP:-false}
+      NODE_VALIDATOR: ${NODE_VALIDATOR:-false}
+      NODE_PEERS: ${NODE_PEERS:-}
+      NODE_SEEDS: ${NODE_SEEDS:-}
+      NODE_MAX_INBOUND_PEERS: ${NODE_MAX_INBOUND_PEERS:-32}
+      NODE_MAX_OUTBOUND_PEERS: ${NODE_MAX_OUTBOUND_PEERS:-8}
+      NODE_PROXY: ${NODE_PROXY:-}
+      NODE_DAG_CHECKPOINT_INTERVAL: ${NODE_DAG_CHECKPOINT_INTERVAL:-50}
+      NODE_DAG_MAX_TXS: ${NODE_DAG_MAX_TXS:-256}
+      NODE_DAG_MEMPOOL_SIZE: ${NODE_DAG_MEMPOOL_SIZE:-10000}
+      NODE_DAG_RPC_PEERS: ${NODE_DAG_RPC_PEERS:-}
+      NODE_EXPERIMENTAL_ZK_PATH: ${NODE_EXPERIMENTAL_ZK_PATH:-false}
+      MISAKA_VALIDATOR_PASSPHRASE: ${MISAKA_VALIDATOR_PASSPHRASE:-}
+    ports:
+      - "${NODE_RPC_PORT:-3001}:${NODE_RPC_PORT:-3001}"
+      - "${NODE_P2P_PORT:-6690}:${NODE_P2P_PORT:-6690}"
+    volumes:
+      - misaka-node-data:/var/lib/misaka
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - curl -fsS http://127.0.0.1:$${NODE_RPC_PORT:-3001}/health >/dev/null
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    stop_grace_period: 2m
+
+volumes:
+  misaka-node-data:
+    driver: local
