@@ -1,0 +1,31 @@
+[package]
+name = "misaka-shielded"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "MISAKA Network — ZK-based shielded transfer module (opt-in)"
+
+[dependencies]
+misaka-types = { path = "../misaka-types" }
+misaka-pqc   = { path = "../misaka-pqc" }
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+serde_with   = { workspace = true }
+thiserror    = { workspace = true }
+zeroize      = { workspace = true }
+blake3       = { workspace = true }
+rand         = { workspace = true }
+rand_core    = { workspace = true }
+sha3         = { workspace = true }
+hex          = { workspace = true }
+tracing      = { workspace = true }
+parking_lot  = { workspace = true }
+chacha20poly1305 = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+hex = { workspace = true }
+
+[lints]
+workspace = true
