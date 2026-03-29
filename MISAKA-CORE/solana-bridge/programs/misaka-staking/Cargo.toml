@@ -1,0 +1,20 @@
+[package]
+name = "misaka-staking"
+version = "0.1.0"
+description = "MISAKA Network — Validator Staking Program for misakastake.com"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "misaka_staking"
+
+[features]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+cpi = ["no-entrypoint"]
+default = []
+
+[dependencies]
+anchor-lang = "0.30"
+anchor-spl = "0.30"
