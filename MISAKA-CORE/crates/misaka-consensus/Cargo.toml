@@ -1,0 +1,32 @@
+[package]
+name = "misaka-consensus"
+description = "Public PoS consensus with ML-DSA-65 PQ-only signatures"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+[dependencies]
+misaka-storage = { path = "../misaka-storage" }
+misaka-database = { path = "../misaka-database" }
+misaka-types = { path = "../misaka-types" }
+misaka-crypto = { path = "../misaka-crypto" }
+misaka-pqc = { path = "../misaka-pqc" }
+misaka-tokenomics = { path = "../misaka-tokenomics" }
+sha3 = { workspace = true }
+rand = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+hex = { workspace = true }
+parking_lot = { workspace = true }
+rocksdb = { version = "0.22", default-features = false, features = ["snappy"] }
+bincode = { workspace = true }
+
+[features]
+default = ["strict-ki-proof"]
+strict-ki-proof = []
+legacy-block-fallback = []
+stark-stub = ["misaka-pqc/stark-stub"]
+
+[lints]
+workspace = true
