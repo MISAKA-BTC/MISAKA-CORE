@@ -121,8 +121,8 @@ impl WalletState {
             Ok(state)
         } else {
             let state = Self::new(wallet_name, master_address);
+            let mut state = Self::new(wallet_name, master_address);
             state.save(key_path)?;
-            Ok(state)
         }
     }
 
