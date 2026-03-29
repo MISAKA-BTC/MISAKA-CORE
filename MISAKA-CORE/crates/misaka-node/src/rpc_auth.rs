@@ -1,0 +1,263 @@
+//! Shared RPC authentication middleware.
+//!
+//! Used by both v1 (`rpc_server.rs`) and DAG (`dag_rpc.rs`) RPC servers.
+//!
+//! ## Configuration
+//!
+//! - `MISAKA_RPC_API_KEY` env var: when set, write endpoints require
+//!   `Authorization: Bearer <key>` header.
+//! - Production mode (`MISAKA_CHAIN_ID=1` or `MISAKA_RPC_AUTH_MODE=required`):
+//!   the API key MUST be set. Server refuses to start otherwise.
+//! - `MISAKA_RPC_WRITE_ALLOWLIST`: comma-separated IP allowlist for write
+//!   endpoints. When set, write requests from non-listed IPs are rejected
+//!   EVEN IF the Bearer token is valid.
+//!
+//! ## Security Model
+//!
+//! Write endpoints have two independent gates (both must pass):
+//! 1. Bearer token authentication (API key match)
+//! 2. IP allowlist (if configured)
+//!
+//! Read endpoints are public (no auth required).
+//! /health is always public.
+
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
+use axum::middleware::Next;
+use std::net::IpAddr;
+
+/// Cached API key + IP allowlist loaded once at server startup.
+#[derive(Clone)]
+pub struct ApiKeyState {
+    /// None = auth disabled (open access). Some = require Bearer token.
+    pub required_key: Option<String>,
+    /// IP allowlist for write endpoints. Empty = no IP restriction.
+    pub write_ip_allowlist: Vec<IpAddr>,
+    /// Whether auth is mandatory (production mode).
+    pub auth_required: bool,
+}
+
+/// Configuration error for auth setup.
+#[derive(Debug, thiserror::Error)]
+pub enum AuthConfigError {
+    #[error("FATAL: MISAKA_RPC_API_KEY must be set in production (chain_id=1 or MISAKA_RPC_AUTH_MODE=required). Set the key or explicitly set MISAKA_RPC_AUTH_MODE=open for development.")]
+    ApiKeyRequiredInProduction,
+    #[error("FATAL: MISAKA_RPC_WRITE_ALLOWLIST contains invalid IP '{ip}': {reason}")]
+    InvalidAllowlistIp { ip: String, reason: String },
+}
+
+impl ApiKeyState {
+    /// Load from environment with production safety checks.
+    ///
+    /// Returns `Err(AuthConfigError)` if production mode requires auth
+    /// but the API key is not set. Never panics.
+    pub fn from_env_checked(chain_id: u32) -> Result<Self, AuthConfigError> {
+        let required_key = std::env::var("MISAKA_RPC_API_KEY")
+            .ok()
+            .map(|k| k.trim().to_string())
+            .filter(|k| !k.is_empty());
+
+        // Determine if auth is mandatory
+        let auth_mode = std::env::var("MISAKA_RPC_AUTH_MODE")
+            .unwrap_or_default()
+            .to_lowercase();
+        let auth_required = chain_id == 1
+            || auth_mode == "required"
+            || auth_mode == "production";
+
+        // Fail-closed: production without API key is a fatal error
+        if auth_required && required_key.is_none() {
+            return Err(AuthConfigError::ApiKeyRequiredInProduction);
+        }
+
+        // Parse IP allowlist
+        let write_ip_allowlist = match std::env::var("MISAKA_RPC_WRITE_ALLOWLIST") {
+            Ok(list) => {
+                let mut ips = Vec::new();
+                for entry in list.split(',') {
+                    let trimmed = entry.trim();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                    let ip: IpAddr = trimmed.parse().map_err(|e| {
+                        AuthConfigError::InvalidAllowlistIp {
+                            ip: trimmed.to_string(),
+                            reason: format!("{}", e),
+                        }
+                    })?;
+                    ips.push(ip);
+                }
+                ips
+            }
+            Err(_) => Vec::new(),
+        };
+
+        Ok(Self {
+            required_key,
+            write_ip_allowlist,
+            auth_required,
+        })
+    }
+
+    /// Legacy constructor for backward compatibility (no chain_id check).
+    /// Use `from_env_checked()` for production.
+    pub fn from_env() -> Self {
+        Self::from_env_checked(0).unwrap_or_else(|_| Self {
+            required_key: std::env::var("MISAKA_RPC_API_KEY")
+                .ok()
+                .map(|k| k.trim().to_string())
+                .filter(|k| !k.is_empty()),
+            write_ip_allowlist: Vec::new(),
+            auth_required: false,
+        })
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        self.required_key.is_some()
+    }
+
+    /// Check if an IP is allowed for write operations.
+    fn is_ip_allowed(&self, ip: &IpAddr) -> bool {
+        if self.write_ip_allowlist.is_empty() {
+            return true; // No allowlist = all IPs allowed (backward compat)
+        }
+        self.write_ip_allowlist.contains(ip)
+    }
+}
+
+/// Axum middleware: reject requests without valid Bearer token
+/// when API key is configured, AND enforce IP allowlist for write endpoints.
+///
+/// # Security Layers
+///
+/// 1. **Bearer Token**: constant-time comparison to prevent timing side-channel
+/// 2. **IP Allowlist**: checked via ConnectInfo<SocketAddr>
+///
+/// Both must pass for write requests. Read requests skip auth entirely.
+pub async fn require_api_key(
+    axum::extract::State(auth): axum::extract::State<ApiKeyState>,
+    req: Request<Body>,
+    next: Next,
+) -> Result<axum::response::Response, StatusCode> {
+    // ── IP Allowlist Check (for write endpoints) ──
+    if !auth.write_ip_allowlist.is_empty() {
+        if let Some(connect_info) = req
+            .extensions()
+            .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        {
+            let client_ip = connect_info.0.ip();
+            if !auth.is_ip_allowed(&client_ip) {
+                tracing::warn!(
+                    "RPC write rejected: IP {} not in allowlist",
+                    client_ip
+                );
+                return Err(StatusCode::FORBIDDEN);
+            }
+        } else {
+            // SEC-FIX [Audit #5]: fail-closed. If ConnectInfo is missing,
+            // we CANNOT determine the client IP, so we MUST reject.
+            // This prevents allowlist bypass if the server binding changes.
+            tracing::error!(
+                "RPC write rejected: ConnectInfo unavailable — \
+                 cannot verify IP allowlist (fail-closed)"
+            );
+            return Err(StatusCode::FORBIDDEN);
+        }
+    }
+
+    // ── Bearer Token Check ──
+    if let Some(ref expected_key) = auth.required_key {
+        let auth_header = req
+            .headers()
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok());
+
+        match auth_header {
+            Some(value) if value.starts_with("Bearer ") => {
+                let token = &value[7..];
+                // SEC-AUDIT-V5 HIGH-002: constant-time comparison prevents
+                // timing side-channel that could leak the API key byte-by-byte.
+                let token_bytes = token.as_bytes();
+                let expected_bytes = expected_key.as_bytes();
+                let length_match = token_bytes.len() == expected_bytes.len();
+                let mut acc = 0u8;
+                let n = std::cmp::min(token_bytes.len(), expected_bytes.len());
+                for i in 0..n {
+                    acc |= token_bytes[i] ^ expected_bytes[i];
+                }
+                if !length_match || acc != 0 {
+                    return Err(StatusCode::UNAUTHORIZED);
+                }
+            }
+            _ => return Err(StatusCode::UNAUTHORIZED),
+        }
+    }
+    Ok(next.run(req).await)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_production_requires_api_key() {
+        std::env::remove_var("MISAKA_RPC_API_KEY");
+        std::env::remove_var("MISAKA_RPC_AUTH_MODE");
+        let result = ApiKeyState::from_env_checked(1); // mainnet chain_id
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_production_with_key_succeeds() {
+        std::env::set_var("MISAKA_RPC_API_KEY", "test-key-123");
+        let result = ApiKeyState::from_env_checked(1);
+        assert!(result.is_ok());
+        let state = result.unwrap();
+        assert!(state.is_enabled());
+        assert!(state.auth_required);
+        std::env::remove_var("MISAKA_RPC_API_KEY");
+    }
+
+    #[test]
+    fn test_dev_without_key_succeeds() {
+        std::env::remove_var("MISAKA_RPC_API_KEY");
+        std::env::remove_var("MISAKA_RPC_AUTH_MODE");
+        let result = ApiKeyState::from_env_checked(2); // testnet
+        assert!(result.is_ok());
+        let state = result.unwrap();
+        assert!(!state.is_enabled());
+        assert!(!state.auth_required);
+    }
+
+    #[test]
+    fn test_auth_mode_required_forces_key() {
+        std::env::remove_var("MISAKA_RPC_API_KEY");
+        std::env::set_var("MISAKA_RPC_AUTH_MODE", "required");
+        let result = ApiKeyState::from_env_checked(2); // testnet but forced
+        assert!(result.is_err());
+        std::env::remove_var("MISAKA_RPC_AUTH_MODE");
+    }
+
+    #[test]
+    fn test_ip_allowlist_parsed() {
+        std::env::set_var("MISAKA_RPC_API_KEY", "key");
+        std::env::set_var("MISAKA_RPC_WRITE_ALLOWLIST", "127.0.0.1, 10.0.0.1");
+        let state = ApiKeyState::from_env_checked(2).unwrap();
+        assert_eq!(state.write_ip_allowlist.len(), 2);
+        assert!(state.is_ip_allowed(&"127.0.0.1".parse().unwrap()));
+        assert!(state.is_ip_allowed(&"10.0.0.1".parse().unwrap()));
+        assert!(!state.is_ip_allowed(&"1.2.3.4".parse().unwrap()));
+        std::env::remove_var("MISAKA_RPC_API_KEY");
+        std::env::remove_var("MISAKA_RPC_WRITE_ALLOWLIST");
+    }
+
+    #[test]
+    fn test_empty_allowlist_allows_all() {
+        let state = ApiKeyState {
+            required_key: Some("key".into()),
+            write_ip_allowlist: vec![],
+            auth_required: false,
+        };
+        assert!(state.is_ip_allowed(&"1.2.3.4".parse().unwrap()));
+    }
+}
