@@ -1,0 +1,15 @@
+[package]
+name = "misaka-connectionmanager"
+description = "P2P connection manager: outbound/inbound connection lifecycle"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+misaka-addressmanager = { path = "../addressmanager" }
+tokio = { workspace = true }
+tracing = { workspace = true }
+parking_lot = { workspace = true }
+
+[lints]
+workspace = true

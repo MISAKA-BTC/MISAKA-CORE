@@ -1,0 +1,65 @@
+# MISAKA Network — Testnet Configuration
+# chain_id = 2, LogRing-v1 default, LRS legacy, bridge disabled
+
+[chain]
+chain_id = 2
+chain_name = "MISAKA Testnet"
+
+[node]
+mode = "public"
+data_dir = "./misaka-data"
+log_level = "info"
+
+[p2p]
+port = 6690
+max_inbound_peers = 32
+max_outbound_peers = 8
+# advertise_addr = "YOUR_PUBLIC_IP:6690"
+
+# SEC-P2P-GUARD: Connection guard settings (v3 defaults)
+# Per-IP handshake attempts allowed per 60s window
+max_handshake_attempts_per_ip = 5
+# Maximum concurrent half-open (handshake in progress) connections
+max_half_open = 64
+# Half-open timeout before slot is reclaimed (seconds)
+half_open_timeout_secs = 15
+# Maximum established inbound connections from same /24 subnet
+max_inbound_per_subnet = 4
+# Maximum established inbound connections from same IP
+max_inbound_per_ip = 2
+
+# SEC-ST-LIFE: Session lifetime (seconds)
+# Validator nodes SHOULD use 14400 (4 hours) for tighter key rotation
+max_session_lifetime_secs = 86400
+
+# Protocol version (v3 required — v2 nodes will be rejected)
+min_protocol_version = 3
+
+[rpc]
+port = 3001
+
+[consensus]
+fast_block_time_secs = 2
+zkp_block_time_secs = 30
+
+[faucet]
+enabled = true
+amount = 1000000000    # 1 MISAKA (9 decimal places)
+cooldown_secs = 300    # 5 minutes between drips per address
+
+# [ring_signature] REMOVED — purged in v10. ML-DSA-65 is sole signature scheme.
+
+[bridge]
+enabled = false
+
+
+# ─── Shielded Module ────────────────────────────────────────────────────────
+# Testnet: shielded module is ENABLED with stub proofs for P0 testing.
+# P1 will replace stub backend with real Groth16/PLONK proving system.
+[shielded]
+enabled = true
+mempool_proof_verify = false
+max_anchor_age_blocks = 200
+min_shielded_fee = 100
+# testnet_mode = true enables stub proofs (P0 phase only)
+testnet_mode = true
