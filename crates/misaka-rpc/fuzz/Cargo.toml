@@ -1,0 +1,20 @@
+[package]
+name = "misaka-rpc-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+misaka-rpc = { path = ".." }
+
+[[bin]]
+name = "fuzz_rpc_request"
+path = "fuzz_targets/fuzz_rpc_request.rs"
+
+[[bin]]
+name = "fuzz_auth_header"
+path = "fuzz_targets/fuzz_auth_header.rs"
