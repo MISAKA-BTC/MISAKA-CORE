@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MISAKA Node Manager</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0a0a0a; color: #e0e0e0; min-height: 100vh; }
+  .app { max-width: 800px; margin: 0 auto; padding: 20px; }
+  .header { text-align: center; padding: 40px 0 30px; }
+  .header h1 { color: #00ff88; font-size: 32px; font-weight: 700; letter-spacing: 3px; }
+  .header .sub { color: #888; font-size: 14px; margin-top: 8px; }
+
+  /* Screens */
+  .screen { display: none; }
+  .screen.active { display: block; }
+
+  /* Role cards */
+  .roles { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 20px 0; }
+  .role-card { background: #141414; border: 2px solid #2a2a2a; border-radius: 12px; padding: 20px; cursor: pointer; transition: all 0.2s; }
+  .role-card:hover { border-color: #00ff88; }
+  .role-card.selected { border-color: #00ff88; background: #0a1a0a; }
+  .role-card.disabled { opacity: 0.4; cursor: not-allowed; }
+  .role-card h3 { color: #fff; font-size: 16px; margin-bottom: 6px; }
+  .role-card .desc { color: #888; font-size: 13px; }
+  .role-card .badge { display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 4px; margin-top: 8px; }
+  .badge.easy { background: #0a2a0a; color: #00ff88; }
+  .badge.medium { background: #2a2a0a; color: #ffaa00; }
+  .badge.advanced { background: #2a0a0a; color: #ff4444; }
+  .badge.testnet { background: #0a0a2a; color: #4488ff; }
+
+  /* Network select */
+  .network-select { display: flex; gap: 12px; margin: 20px 0; justify-content: center; }
+  .net-btn { padding: 12px 32px; background: #141414; border: 2px solid #2a2a2a; border-radius: 8px; color: #888; cursor: pointer; font-size: 15px; transition: all 0.2s; }
+  .net-btn:hover { border-color: #555; }
+  .net-btn.selected { border-color: #00ff88; color: #00ff88; background: #0a1a0a; }
+
+  /* Buttons */
+  .btn { display: inline-block; padding: 14px 40px; background: #00ff88; color: #000; border: none; border-radius: 8px; font-weight: 700; font-size: 16px; cursor: pointer; transition: all 0.2s; }
+  .btn:hover { background: #00cc66; }
+  .btn:disabled { background: #333; color: #666; cursor: not-allowed; }
+  .btn-secondary { background: transparent; border: 2px solid #00ff88; color: #00ff88; }
+  .center { text-align: center; margin: 30px 0; }
+
+  /* Status */
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin: 20px 0; }
+  .stat { background: #141414; border: 1px solid #2a2a2a; border-radius: 8px; padding: 16px; }
+  .stat .label { color: #888; font-size: 12px; text-transform: uppercase; letter-spacing: 1px; }
+  .stat .value { color: #fff; font-size: 22px; font-weight: 700; margin-top: 4px; }
+  .stat .value.green { color: #00ff88; }
+
+  /* Progress */
+  .progress-bar { width: 100%; height: 6px; background: #2a2a2a; border-radius: 3px; margin: 16px 0; overflow: hidden; }
+  .progress-bar .fill { height: 100%; background: #00ff88; border-radius: 3px; transition: width 0.3s; }
+  .step-list { list-style: none; margin: 20px 0; }
+  .step-list li { padding: 8px 0; color: #888; font-size: 14px; }
+  .step-list li.done { color: #00ff88; }
+  .step-list li.done::before { content: "\u2713 "; }
+  .step-list li.active { color: #fff; }
+  .step-list li.active::before { content: "\u25b6 "; color: #00ff88; }
+
+  .warning-box { background: #2a1a0a; border: 1px solid #ff8800; border-radius: 8px; padding: 16px; margin: 16px 0; color: #ffaa00; font-size: 13px; }
+  .controls { display: flex; gap: 12px; justify-content: center; margin: 20px 0; }
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="header">
+    <h1>MISAKA</h1>
+    <div class="sub">Post-Quantum Native L1 BlockDAG</div>
+  </div>
+
+  <!-- Screen 1: Welcome -->
+  <div class="screen active" id="screen-welcome">
+    <div class="center">
+      <h2 style="color:#fff; margin-bottom:12px">Join the MISAKA Network</h2>
+      <p style="color:#888; margin-bottom:30px">Set up your node in minutes. No terminal required.</p>
+      <button class="btn" onclick="showScreen('network')">Get Started</button>
+    </div>
+  </div>
+
+  <!-- Screen 2: Network -->
+  <div class="screen" id="screen-network">
+    <h2 style="text-align:center; color:#fff; margin-bottom:20px">Select Network</h2>
+    <div class="network-select">
+      <div class="net-btn selected" onclick="selectNetwork(this,'testnet')">Testnet</div>
+      <div class="net-btn" onclick="selectNetwork(this,'mainnet')">Mainnet</div>
+    </div>
+    <div class="center"><button class="btn" onclick="showScreen('role')">Next</button></div>
+  </div>
+
+  <!-- Screen 3: Role -->
+  <div class="screen" id="screen-role">
+    <h2 style="text-align:center; color:#fff; margin-bottom:20px">Choose Your Role</h2>
+    <div class="roles">
+      <div class="role-card selected" onclick="selectRole(this,'observer')">
+        <h3>Observer</h3>
+        <div class="desc">Lightweight node. Validate and sync with minimal resources.</div>
+        <span class="badge easy">Recommended</span>
+      </div>
+      <div class="role-card" onclick="selectRole(this,'candidate')">
+        <h3>Candidate</h3>
+        <div class="desc">Participate and build reputation for future SR promotion.</div>
+        <span class="badge easy">Easy</span>
+      </div>
+      <div class="role-card" onclick="selectRole(this,'archive')">
+        <h3>Archive</h3>
+        <div class="desc">Store full chain history. Higher disk usage.</div>
+        <span class="badge medium">Medium</span>
+      </div>
+      <div class="role-card" onclick="selectRole(this,'relay')">
+        <h3>Relay</h3>
+        <div class="desc">Bridge network traffic. Requires public IP.</div>
+        <span class="badge medium">Advanced</span>
+      </div>
+      <div class="role-card" id="sr-card" onclick="selectRole(this,'sr')">
+        <h3>SR Validator</h3>
+        <div class="desc">Finality committee member. High resources required.</div>
+        <span class="badge testnet">Testnet Only</span>
+      </div>
+    </div>
+    <div id="sr-warning" style="display:none">
+      <div class="warning-box">
+        <strong>SR Mode — Testnet Only</strong><br>
+        This mode uses significantly more CPU, RAM, and bandwidth.
+        Public IP and stable connectivity are recommended.
+        Do NOT use for mainnet validator operations.
+      </div>
+    </div>
+    <div class="center"><button class="btn" onclick="startInstall()">Install &amp; Launch</button></div>
+  </div>
+
+  <!-- Screen 4: Installing -->
+  <div class="screen" id="screen-install">
+    <h2 style="text-align:center; color:#fff; margin-bottom:20px">Setting Up Your Node</h2>
+    <div class="progress-bar"><div class="fill" id="progress" style="width:0%"></div></div>
+    <ul class="step-list" id="steps">
+      <li class="active">Checking system requirements...</li>
+      <li>Downloading MISAKA source</li>
+      <li>Installing dependencies</li>
+      <li>Building node binary</li>
+      <li>Generating configuration</li>
+      <li>Starting node</li>
+    </ul>
+  </div>
+
+  <!-- Screen 5: Running -->
+  <div class="screen" id="screen-running">
+    <h2 style="text-align:center; color:#fff; margin-bottom:6px">Node Running</h2>
+    <p style="text-align:center; color:#888; margin-bottom:20px" id="role-label">Observer on Testnet</p>
+    <div class="stats">
+      <div class="stat"><div class="label">Status</div><div class="value green" id="s-status">Connected</div></div>
+      <div class="stat"><div class="label">Current Round</div><div class="value" id="s-round">-</div></div>
+      <div class="stat"><div class="label">Committed</div><div class="value green" id="s-committed">-</div></div>
+      <div class="stat"><div class="label">Blocks/sec</div><div class="value" id="s-bps">-</div></div>
+      <div class="stat"><div class="label">Peers</div><div class="value" id="s-peers">-</div></div>
+      <div class="stat"><div class="label">Finalized</div><div class="value" id="s-finality">-</div></div>
+    </div>
+    <div class="controls">
+      <button class="btn btn-secondary" onclick="stopNode()">Stop</button>
+      <button class="btn btn-secondary" onclick="restartNode()">Restart</button>
+    </div>
+  </div>
+</div>
+
+<script>
+let selectedNetwork = 'testnet';
+let selectedRole = 'observer';
+let rpcPort = 3001;
+let prevCount = 0, prevTime = Date.now();
+
+function showScreen(id) { document.querySelectorAll('.screen').forEach(s => s.classList.remove('active')); document.getElementById('screen-'+id).classList.add('active'); }
+
+function selectNetwork(el, net) {
+  document.querySelectorAll('.net-btn').forEach(b => b.classList.remove('selected'));
+  el.classList.add('selected');
+  selectedNetwork = net;
+  const srCard = document.getElementById('sr-card');
+  if (net === 'mainnet') { srCard.classList.add('disabled'); srCard.onclick = null; }
+  else { srCard.classList.remove('disabled'); srCard.onclick = () => selectRole(srCard, 'sr'); }
+}
+
+function selectRole(el, role) {
+  if (el.classList.contains('disabled')) return;
+  document.querySelectorAll('.role-card').forEach(c => c.classList.remove('selected'));
+  el.classList.add('selected');
+  selectedRole = role;
+  document.getElementById('sr-warning').style.display = role === 'sr' ? 'block' : 'none';
+}
+
+async function startInstall() {
+  showScreen('install');
+  const steps = document.querySelectorAll('#steps li');
+  const progress = document.getElementById('progress');
+  for (let i = 0; i < steps.length; i++) {
+    steps[i].classList.add('active');
+    if (i > 0) steps[i-1].classList.remove('active');
+    steps[i-1]?.classList.add('done');
+    progress.style.width = ((i+1)/steps.length*100) + '%';
+    await new Promise(r => setTimeout(r, 1500));
+  }
+  steps[steps.length-1].classList.remove('active');
+  steps[steps.length-1].classList.add('done');
+  progress.style.width = '100%';
+  document.getElementById('role-label').textContent = selectedRole.charAt(0).toUpperCase() + selectedRole.slice(1) + ' on ' + selectedNetwork.charAt(0).toUpperCase() + selectedNetwork.slice(1);
+  await new Promise(r => setTimeout(r, 500));
+  showScreen('running');
+  pollStatus();
+}
+
+async function pollStatus() {
+  try {
+    const r = await fetch('http://127.0.0.1:'+rpcPort+'/api/get_chain_info', { method:'POST', headers:{'Content-Type':'application/json'}, body:'{}' });
+    const d = await r.json();
+    document.getElementById('s-round').textContent = d.currentRound?.toLocaleString() || '-';
+    document.getElementById('s-committed').textContent = d.committedCount?.toLocaleString() || '-';
+    document.getElementById('s-finality').textContent = d.isFinalized ? 'Yes' : 'Pending';
+    document.getElementById('s-status').textContent = 'Connected';
+    document.getElementById('s-status').className = 'value green';
+    const now = Date.now();
+    if (prevCount > 0) { document.getElementById('s-bps').textContent = ((d.committedCount-prevCount)/((now-prevTime)/1000)).toFixed(1); }
+    prevCount = d.committedCount; prevTime = now;
+  } catch(e) {
+    document.getElementById('s-status').textContent = 'Disconnected';
+    document.getElementById('s-status').className = 'value';
+  }
+  setTimeout(pollStatus, 3000);
+}
+
+function stopNode() { fetch('http://127.0.0.1:'+rpcPort+'/health').catch(()=>{}); document.getElementById('s-status').textContent = 'Stopping...'; }
+function restartNode() { document.getElementById('s-status').textContent = 'Restarting...'; }
+</script>
+</body>
+</html>

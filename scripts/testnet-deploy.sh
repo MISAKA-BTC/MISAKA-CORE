@@ -1,0 +1,236 @@
+#!/usr/bin/env bash
+# ═══════════════════════════════════════════════════════════════
+#  MISAKA Testnet — Genesis Node Deployment Script
+#
+#  Usage:
+#    ./scripts/testnet-deploy.sh [--ip YOUR_PUBLIC_IP]
+#
+#  This script:
+#    1. Builds the misaka-node binary with testnet features
+#    2. Generates ML-DSA-65 validator keypair
+#    3. Creates systemd service
+#    4. Configures firewall
+#    5. Starts the testnet genesis node
+#
+#  Requirements:
+#    - Rust 1.80+ (will install if missing)
+#    - Ubuntu 22.04+ or Debian 12+
+#    - Root or sudo access
+# ═══════════════════════════════════════════════════════════════
+set -euo pipefail
+
+# ── Configuration ──────────────────────────────────────────────
+CHAIN_ID=2
+NODE_NAME="misaka-testnet-sr0"
+DATA_DIR="/opt/misaka/data"
+RPC_PORT=3001
+P2P_PORT=6690
+FAUCET_AMOUNT=1000000000       # 1 MISAKA (9 decimals)
+FAUCET_COOLDOWN_MS=300000      # 5 minutes
+CHECKPOINT_INTERVAL=50
+MAX_TXS=256
+MEMPOOL_SIZE=10000
+VALIDATORS=1
+VALIDATOR_INDEX=0
+LOG_LEVEL="info"
+
+# Parse arguments
+PUBLIC_IP=""
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --ip) PUBLIC_IP="$2"; shift 2 ;;
+        --name) NODE_NAME="$2"; shift 2 ;;
+        --data-dir) DATA_DIR="$2"; shift 2 ;;
+        *) echo "Unknown arg: $1"; exit 1 ;;
+    esac
+done
+
+# Auto-detect public IP if not provided
+if [ -z "$PUBLIC_IP" ]; then
+    PUBLIC_IP=$(curl -s -4 ifconfig.me 2>/dev/null || curl -s -4 icanhazip.com 2>/dev/null || echo "")
+    if [ -z "$PUBLIC_IP" ]; then
+        echo "ERROR: Could not detect public IP. Use --ip YOUR_IP"
+        exit 1
+    fi
+fi
+
+echo "╔═══════════════════════════════════════════════════════════╗"
+echo "║  MISAKA Testnet Genesis Node Deployment                  ║"
+echo "╠═══════════════════════════════════════════════════════════╣"
+echo "║  Chain ID:    $CHAIN_ID (testnet)                            ║"
+echo "║  Node:        $NODE_NAME"
+echo "║  Public IP:   $PUBLIC_IP"
+echo "║  RPC:         $RPC_PORT"
+echo "║  P2P:         $P2P_PORT"
+echo "║  Data:        $DATA_DIR"
+echo "╚═══════════════════════════════════════════════════════════╝"
+
+# ── Phase 1: System Preparation ────────────────────────────────
+echo ""
+echo ">>> Phase 1: System preparation"
+
+# Check Rust
+if ! command -v cargo &>/dev/null; then
+    echo "Installing Rust..."
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+    source "$HOME/.cargo/env"
+fi
+echo "  Rust: $(rustc --version)"
+
+# Install build deps (Debian/Ubuntu)
+if command -v apt-get &>/dev/null; then
+    sudo apt-get update -qq
+    sudo apt-get install -y -qq build-essential pkg-config libssl-dev curl ufw
+fi
+
+# Create data directory
+sudo mkdir -p "$DATA_DIR"
+sudo chown "$(whoami)" "$DATA_DIR"
+
+# ── Phase 2: Build ─────────────────────────────────────────────
+echo ""
+echo ">>> Phase 2: Building misaka-node (release + testnet features)"
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$PROJECT_ROOT"
+
+cargo build -p misaka-node --release --features testnet 2>&1 | tail -5
+
+BINARY="$PROJECT_ROOT/target/release/misaka-node"
+if [ ! -f "$BINARY" ]; then
+    echo "ERROR: Build failed — binary not found"
+    exit 1
+fi
+echo "  Binary: $BINARY ($(du -h "$BINARY" | cut -f1))"
+
+# ── Phase 3: Validator Key Generation ──────────────────────────
+echo ""
+echo ">>> Phase 3: Generating ML-DSA-65 validator keypair"
+
+KEYSTORE="$DATA_DIR/dag_validator_0.enc.json"
+if [ -f "$KEYSTORE" ]; then
+    echo "  Keystore already exists: $KEYSTORE (skipping keygen)"
+else
+    # Set passphrase from env or prompt
+    if [ -z "${MISAKA_VALIDATOR_PASSPHRASE:-}" ]; then
+        echo "  Enter validator passphrase (min 8 chars):"
+        read -rs MISAKA_VALIDATOR_PASSPHRASE
+        export MISAKA_VALIDATOR_PASSPHRASE
+    fi
+
+    "$BINARY" \
+        --keygen-only \
+        --name "$NODE_NAME" \
+        --chain-id "$CHAIN_ID" \
+        --data-dir "$DATA_DIR" \
+        --validator \
+        --validator-index "$VALIDATOR_INDEX" \
+        --validators "$VALIDATORS"
+
+    echo "  Keystore created: $KEYSTORE"
+fi
+
+# ── Phase 4: Systemd Service ───────────────────────────────────
+echo ""
+echo ">>> Phase 4: Creating systemd service"
+
+SERVICE_FILE="/etc/systemd/system/misaka-node.service"
+PASSPHRASE_FILE="/opt/misaka/.passphrase"
+
+# Store passphrase securely
+if [ -n "${MISAKA_VALIDATOR_PASSPHRASE:-}" ]; then
+    echo "$MISAKA_VALIDATOR_PASSPHRASE" | sudo tee "$PASSPHRASE_FILE" > /dev/null
+    sudo chmod 600 "$PASSPHRASE_FILE"
+    sudo chown root:root "$PASSPHRASE_FILE"
+fi
+
+sudo tee "$SERVICE_FILE" > /dev/null << SERVICEEOF
+[Unit]
+Description=MISAKA Testnet Node ($NODE_NAME)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=$(whoami)
+WorkingDirectory=$PROJECT_ROOT
+Environment=RUST_LOG=$LOG_LEVEL
+Environment=MISAKA_VALIDATOR_PASSPHRASE_FILE=$PASSPHRASE_FILE
+ExecStart=$BINARY \\
+    --validator \\
+    --name $NODE_NAME \\
+    --chain-id $CHAIN_ID \\
+    --validator-index $VALIDATOR_INDEX \\
+    --validators $VALIDATORS \\
+    --data-dir $DATA_DIR \\
+    --rpc-port $RPC_PORT \\
+    --p2p-port $P2P_PORT \\
+    --advertise-addr $PUBLIC_IP:$P2P_PORT \\
+    --dag-checkpoint-interval $CHECKPOINT_INTERVAL \\
+    --dag-max-txs $MAX_TXS \\
+    --dag-mempool-size $MEMPOOL_SIZE \\
+    --faucet-amount $FAUCET_AMOUNT \\
+    --faucet-cooldown-ms $FAUCET_COOLDOWN_MS \\
+    --log-level $LOG_LEVEL
+Restart=on-failure
+RestartSec=10
+LimitNOFILE=65535
+TimeoutStopSec=120
+
+[Install]
+WantedBy=multi-user.target
+SERVICEEOF
+
+sudo systemctl daemon-reload
+echo "  Service created: $SERVICE_FILE"
+
+# ── Phase 5: Firewall ──────────────────────────────────────────
+echo ""
+echo ">>> Phase 5: Configuring firewall"
+
+if command -v ufw &>/dev/null; then
+    sudo ufw allow "$RPC_PORT"/tcp comment "MISAKA RPC"
+    sudo ufw allow "$P2P_PORT"/tcp comment "MISAKA P2P"
+    sudo ufw allow 22/tcp comment "SSH"
+    sudo ufw --force enable 2>/dev/null || true
+    echo "  Firewall: ports $RPC_PORT, $P2P_PORT, 22 open"
+else
+    echo "  WARNING: ufw not found — configure firewall manually"
+fi
+
+# ── Phase 6: Start ─────────────────────────────────────────────
+echo ""
+echo ">>> Phase 6: Starting node"
+
+sudo systemctl enable misaka-node
+sudo systemctl start misaka-node
+
+echo "  Waiting for node to start..."
+for i in $(seq 1 30); do
+    if curl -s "http://127.0.0.1:$RPC_PORT/health" | grep -q '"status"' 2>/dev/null; then
+        echo "  Node is UP!"
+        break
+    fi
+    if [ "$i" -eq 30 ]; then
+        echo "  WARNING: Node did not respond within 30s"
+        echo "  Check logs: sudo journalctl -u misaka-node -f"
+        exit 1
+    fi
+    sleep 1
+done
+
+# ── Summary ────────────────────────────────────────────────────
+echo ""
+echo "╔═══════════════════════════════════════════════════════════╗"
+echo "║  MISAKA Testnet Genesis Node — RUNNING                   ║"
+echo "╠═══════════════════════════════════════════════════════════╣"
+echo "║  Health:   http://$PUBLIC_IP:$RPC_PORT/health"
+echo "║  Chain:    http://$PUBLIC_IP:$RPC_PORT/api/get_chain_info"
+echo "║  Faucet:   curl -X POST http://$PUBLIC_IP:$RPC_PORT/api/faucet -d '{\"address\":\"misaka1...\"}'"
+echo "║  Logs:     sudo journalctl -u misaka-node -f"
+echo "║  Seed:     $PUBLIC_IP:$P2P_PORT"
+echo "╚═══════════════════════════════════════════════════════════╝"
+echo ""
+echo "To join this testnet from another node:"
+echo "  ./scripts/testnet-join.sh --seeds $PUBLIC_IP:$P2P_PORT"

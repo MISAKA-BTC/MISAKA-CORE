@@ -1,0 +1,20 @@
+[package]
+name = "misaka-rpc-core"
+description = "MISAKA RPC core types, traits, and API definitions"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+misaka-types = { path = "../../crates/misaka-types" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+borsh = { workspace = true, optional = true }
+
+[features]
+default = []
+borsh-rpc = ["borsh"]
+
+[lints]
+workspace = true
