@@ -1,0 +1,13 @@
+[package]
+name = "misaka-muhash"
+description = "MuHash: incremental multiset hash for UTXO commitments"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+sha3 = { workspace = true }
+serde = { workspace = true }
+
+[lints]
+workspace = true

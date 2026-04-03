@@ -1,0 +1,506 @@
+//! Node configuration — NodeMode, NodeRole, P2P settings, CLI mapping.
+
+use serde::{Deserialize, Serialize};
+use std::net::{IpAddr, SocketAddr};
+
+// ─── Node Mode ──────────────────────────────────────────────
+
+/// P2P operating mode.
+///
+/// Controls inbound/outbound behavior, peer advertisement, and discovery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NodeMode {
+    /// Normal P2P node: accepts inbound, advertises IP, relays everything.
+    Public,
+    /// Privacy-focused: outbound only, never advertises IP, never in peer lists.
+    Hidden,
+    /// Bootstrap node: accepts inbound, serves peer discovery, does not propose blocks.
+    Seed,
+}
+
+impl NodeMode {
+    /// Parse from CLI string.
+    pub fn from_str_loose(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "hidden" => Self::Hidden,
+            "seed" => Self::Seed,
+            "validator" => Self::Public, // validator is Public mode + validator role
+            _ => Self::Public,
+        }
+    }
+
+    /// Whether this mode accepts inbound TCP connections.
+    pub fn accepts_inbound(&self) -> bool {
+        matches!(self, Self::Public | Self::Seed)
+    }
+
+    /// Whether this mode advertises its address to peers.
+    pub fn advertises_address(&self) -> bool {
+        matches!(self, Self::Public | Self::Seed)
+    }
+
+    /// Whether this mode relays peer discovery (GetPeers responses).
+    pub fn serves_peer_discovery(&self) -> bool {
+        matches!(self, Self::Public | Self::Seed)
+    }
+}
+
+impl std::fmt::Display for NodeMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Public => write!(f, "public"),
+            Self::Hidden => write!(f, "hidden"),
+            Self::Seed => write!(f, "seed"),
+        }
+    }
+}
+
+// ─── Node Role ──────────────────────────────────────────────
+
+/// Node role — determines consensus participation level.
+///
+/// "SR nodes decide. Archive nodes support. Candidates evolve."
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NodeRole {
+    /// SR (Super Representative) — finality committee member.
+    /// Fixed 21-member committee. Produces checkpoints, signs finality.
+    /// Requirements: public IP, >95% uptime, mTLS, VPS/dedicated.
+    Sr,
+    /// Candidate — aspiring SR. Scores are tracked for potential promotion.
+    /// Can run on local PC. Outbound-only supported.
+    Candidate,
+    /// Archive — full/partial history storage. Serves data queries.
+    /// Can run on local PC. Outbound-only supported.
+    Archive,
+    /// Relay — network propagation bridge for NAT-restricted nodes.
+    /// Public IP required. Does not participate in consensus.
+    Relay,
+    /// Observer — light validation node. Minimal resources.
+    Observer,
+}
+
+impl NodeRole {
+    pub fn determine(
+        mode: NodeMode,
+        is_validator: bool,
+        validator_index: usize,
+        validator_count: usize,
+    ) -> Self {
+        if mode == NodeMode::Seed { return Self::Relay; }
+        if is_validator && validator_index < validator_count && validator_count > 0 {
+            Self::Sr
+        } else if is_validator {
+            Self::Candidate
+        } else {
+            Self::Archive
+        }
+    }
+
+    pub fn produces_blocks(&self) -> bool {
+        matches!(self, Self::Sr)
+    }
+
+    /// Whether this role participates in BFT finality voting.
+    pub fn participates_in_finality(&self) -> bool {
+        matches!(self, Self::Sr)
+    }
+
+    /// Whether this role stores full historical data.
+    ///
+    /// SR nodes are finality-only — they do NOT store full history.
+    /// Only Archive and Candidate nodes store complete chain history.
+    /// This keeps SR memory footprint within 16 GB.
+    pub fn stores_history(&self) -> bool {
+        matches!(self, Self::Archive | Self::Candidate)
+    }
+
+    /// Whether this role can serve RPC queries.
+    pub fn serves_rpc(&self) -> bool {
+        matches!(self, Self::Archive | Self::Sr | Self::Candidate)
+    }
+
+    /// Whether this role requires public IP.
+    pub fn requires_public_ip(&self) -> bool {
+        matches!(self, Self::Sr | Self::Relay)
+    }
+
+    /// Whether this role is a potential SR candidate.
+    pub fn is_promotable(&self) -> bool {
+        matches!(self, Self::Candidate)
+    }
+}
+
+impl std::fmt::Display for NodeRole {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Sr => write!(f, "SR"),
+            Self::Candidate => write!(f, "candidate"),
+            Self::Archive => write!(f, "archive"),
+            Self::Relay => write!(f, "relay"),
+            Self::Observer => write!(f, "observer"),
+        }
+    }
+}
+
+// ─── Address validation ────────────────────────────────────
+
+/// Check if an IP address is valid for advertising to peers.
+///
+/// SEC-FIX [Audit #9]: Rejects all bogon / non-routable addresses using
+/// the same filter as DAG P2P transport (private, link-local, CGNAT,
+/// documentation, multicast, broadcast, etc.).
+pub fn is_valid_advertise_ip(ip: &IpAddr) -> bool {
+    !ip.is_unspecified() && !ip.is_loopback() && !misaka_p2p::is_bogon_ip(ip)
+}
+
+/// Check if a socket address is valid for advertising.
+pub fn is_valid_advertise_addr(addr: &SocketAddr) -> bool {
+    is_valid_advertise_ip(&addr.ip()) && addr.port() > 0
+}
+
+// ─── P2P Config ─────────────────────────────────────────────
+
+/// P2P-specific configuration derived from NodeMode + CLI overrides.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct P2pConfig {
+    pub mode: NodeMode,
+    /// Accept inbound connections (overridable; defaults from mode).
+    pub listen: bool,
+    /// Advertise our address in Hello/GetPeers (overridable; defaults from mode).
+    pub advertise_address: bool,
+    /// Explicit advertise address (--advertise-addr). Takes priority over listen addr.
+    pub advertise_addr: Option<SocketAddr>,
+    /// Max inbound peers (0 for hidden mode).
+    pub max_inbound_peers: usize,
+    /// Max outbound peers.
+    pub max_outbound_peers: usize,
+    /// Seed node addresses for initial bootstrap.
+    pub seed_nodes: Vec<String>,
+    /// SOCKS5 proxy for Tor (future).
+    pub proxy: Option<String>,
+    /// SEC-P2P-GUARD: Connection guard settings.
+    ///
+    /// Controls per-IP throttling, half-open limits, subnet diversity, etc.
+    /// Loaded from `[p2p]` section in testnet.toml / mainnet.toml.
+    /// Falls back to compile-time defaults if not specified.
+    #[serde(default)]
+    pub guard: misaka_p2p::GuardConfig,
+}
+
+impl P2pConfig {
+    /// Build from NodeMode with sensible defaults.
+    pub fn from_mode(mode: NodeMode) -> Self {
+        match mode {
+            NodeMode::Public => Self {
+                mode,
+                listen: true,
+                advertise_address: true,
+                advertise_addr: None,
+                max_inbound_peers: 48,
+                max_outbound_peers: 16,
+                seed_nodes: vec![],
+                proxy: None,
+                guard: misaka_p2p::GuardConfig::default(),
+            },
+            NodeMode::Hidden => Self {
+                mode,
+                listen: false,
+                advertise_address: false,
+                advertise_addr: None,
+                max_inbound_peers: 0,
+                max_outbound_peers: 16,
+                seed_nodes: vec![],
+                proxy: None,
+                guard: misaka_p2p::GuardConfig::default(),
+            },
+            NodeMode::Seed => Self {
+                mode,
+                listen: true,
+                advertise_address: true,
+                advertise_addr: None,
+                max_inbound_peers: 128,
+                max_outbound_peers: 32,
+                seed_nodes: vec![],
+                proxy: None,
+                guard: misaka_p2p::GuardConfig::default(),
+            },
+        }
+    }
+
+    /// Apply CLI overrides.
+    pub fn with_overrides(
+        mut self,
+        max_inbound: Option<usize>,
+        max_outbound: Option<usize>,
+        outbound_only: bool,
+        hide_ip: bool,
+        seeds: Vec<String>,
+        proxy: Option<String>,
+        advertise_addr: Option<SocketAddr>,
+    ) -> Self {
+        if let Some(n) = max_inbound {
+            self.max_inbound_peers = n;
+        }
+        if let Some(n) = max_outbound {
+            self.max_outbound_peers = n;
+        }
+        if outbound_only {
+            self.listen = false;
+            self.max_inbound_peers = 0;
+        }
+        if hide_ip {
+            self.advertise_address = false;
+            self.advertise_addr = None; // hide-my-ip overrides advertise-addr
+        }
+        if !seeds.is_empty() {
+            self.seed_nodes = seeds;
+        }
+        self.proxy = proxy;
+        // Validate and set advertise addr (only if not hidden/hide-ip)
+        if self.advertise_address {
+            if let Some(addr) = advertise_addr {
+                if is_valid_advertise_addr(&addr) {
+                    self.advertise_addr = Some(addr);
+                }
+                // Invalid advertise addrs are silently dropped (logged at caller)
+            }
+        }
+        self
+    }
+
+    /// Get the address string to send in Hello/GetPeers.
+    /// Returns None if this node should not advertise.
+    pub fn effective_advertise_addr(&self, listen_port: u16) -> Option<String> {
+        if !self.advertise_address {
+            return None;
+        }
+        // Priority 1: explicit --advertise-addr
+        if let Some(addr) = &self.advertise_addr {
+            return Some(addr.to_string());
+        }
+        // Priority 2: no valid address available → don't advertise
+        // (listen addr is typically 0.0.0.0 which is invalid)
+        // Caller should log a warning suggesting --advertise-addr
+        let _ = listen_port;
+        None
+    }
+}
+
+// ─── Full Node Config ───────────────────────────────────────
+
+/// Complete node configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeConfig {
+    pub node_name: String,
+    pub data_dir: String,
+    pub rpc_addr: SocketAddr,
+    pub p2p_addr: SocketAddr,
+    pub static_peers: Vec<SocketAddr>,
+    pub is_proposer: bool,
+    pub validator_index: usize,
+    pub block_time_secs: u64,
+    pub genesis_path: String,
+    pub log_level: String,
+    pub p2p: P2pConfig,
+    pub role: NodeRole,
+    /// Shielded module configuration.
+    /// CEX / exchange operators can set `shielded.enabled = false`
+    /// to run in transparent-only mode.
+    pub shielded: ShieldedNodeConfig,
+}
+
+/// Shielded module node-level configuration.
+/// Maps to `[shielded]` section in node config TOML.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ShieldedNodeConfig {
+    /// Enable or disable the shielded module entirely.
+    /// Default: true (enabled).
+    /// Set to false for CEX / exchange operator nodes.
+    pub enabled: bool,
+    /// Enable proof verification at mempool admission time.
+    /// Default: false (proof is verified at block apply only).
+    /// Enable for stronger DoS protection at higher CPU cost.
+    pub mempool_proof_verify: bool,
+    /// Maximum anchor age in blocks.
+    /// Shielded transfers using a root older than this are rejected.
+    pub max_anchor_age_blocks: u64,
+    /// Minimum fee for shielded transactions (base units).
+    pub min_shielded_fee: u64,
+    /// Testnet/dev bootstrap mode: this is the only runtime condition under
+    /// which shielded stub proofs/backends may be registered.
+    /// MUST be false on mainnet.
+    pub testnet_mode: bool,
+}
+
+impl Default for ShieldedNodeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            mempool_proof_verify: false,
+            max_anchor_age_blocks: 100,
+            min_shielded_fee: 1_000,
+            testnet_mode: false,
+        }
+    }
+}
+
+impl ShieldedNodeConfig {
+    pub fn transparent_only() -> Self {
+        Self {
+            enabled: false,
+            ..Default::default()
+        }
+    }
+
+    pub fn testnet() -> Self {
+        Self {
+            testnet_mode: true,
+            ..Default::default()
+        }
+    }
+}
+
+impl Default for NodeConfig {
+    #[allow(clippy::unwrap_used)] // static string parse never fails
+    fn default() -> Self {
+        Self {
+            node_name: "misaka-node-0".into(),
+            data_dir: "./data".into(),
+            rpc_addr: "127.0.0.1:3001".parse().unwrap(),
+            p2p_addr: "0.0.0.0:6690".parse().unwrap(),
+            static_peers: vec![],
+            is_proposer: false,
+            validator_index: 0,
+            block_time_secs: 60,
+            genesis_path: String::new(),
+            log_level: "info".into(),
+            p2p: P2pConfig::from_mode(NodeMode::Public),
+            role: NodeRole::Archive,
+            shielded: ShieldedNodeConfig::default(),
+        }
+    }
+}
+
+// ─── Tests ──────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_unspecified_addr_rejected() {
+        let addr: SocketAddr = "0.0.0.0:6690".parse().unwrap();
+        assert!(!is_valid_advertise_addr(&addr));
+    }
+
+    #[test]
+    fn test_ipv6_unspecified_rejected() {
+        let addr: SocketAddr = "[::]:6690".parse().unwrap();
+        assert!(!is_valid_advertise_addr(&addr));
+    }
+
+    #[test]
+    fn test_loopback_rejected() {
+        let addr: SocketAddr = "127.0.0.1:6690".parse().unwrap();
+        assert!(!is_valid_advertise_addr(&addr));
+    }
+
+    #[test]
+    fn test_ipv6_loopback_rejected() {
+        let addr: SocketAddr = "[::1]:6690".parse().unwrap();
+        assert!(!is_valid_advertise_addr(&addr));
+    }
+
+    #[test]
+    fn test_valid_public_addr_accepted() {
+        let addr: SocketAddr = "198.51.100.1:6690".parse().unwrap();
+        assert!(is_valid_advertise_addr(&addr));
+    }
+
+    #[test]
+    fn test_private_addr_rejected() {
+        // Public advertisement is fail-closed: private/bogon addresses are not valid.
+        let addr: SocketAddr = "192.168.1.100:6690".parse().unwrap();
+        assert!(!is_valid_advertise_addr(&addr));
+    }
+
+    #[test]
+    fn test_zero_port_rejected() {
+        let addr: SocketAddr = "1.2.3.4:0".parse().unwrap();
+        assert!(!is_valid_advertise_addr(&addr));
+    }
+
+    #[test]
+    fn test_public_mode_no_block_production() {
+        let role = NodeRole::determine(NodeMode::Public, false, 0, 1);
+        assert_eq!(role, NodeRole::Archive);
+        assert!(!role.produces_blocks());
+    }
+
+    #[test]
+    fn test_seed_mode_becomes_relay() {
+        // Seed mode maps to Relay role
+        let role = NodeRole::determine(NodeMode::Seed, true, 0, 1);
+        assert_eq!(role, NodeRole::Relay);
+        assert!(!role.produces_blocks());
+    }
+
+    #[test]
+    fn test_validator_role_requires_explicit_flag() {
+        let role = NodeRole::determine(NodeMode::Public, true, 0, 1);
+        assert_eq!(role, NodeRole::Sr);
+        assert!(role.produces_blocks());
+    }
+
+    #[test]
+    fn test_validator_index_out_of_range_becomes_candidate() {
+        let role = NodeRole::determine(NodeMode::Public, true, 5, 3);
+        assert_eq!(role, NodeRole::Candidate);
+    }
+
+    #[test]
+    fn test_hidden_mode_can_be_sr() {
+        let role = NodeRole::determine(NodeMode::Hidden, true, 0, 4);
+        assert_eq!(role, NodeRole::Sr);
+    }
+
+    #[test]
+    fn test_hide_ip_clears_advertise_addr() {
+        let cfg = P2pConfig::from_mode(NodeMode::Public).with_overrides(
+            None,
+            None,
+            false,
+            true,
+            vec![],
+            None,
+            Some("1.2.3.4:6690".parse().unwrap()),
+        );
+        assert!(!cfg.advertise_address);
+        assert!(cfg.advertise_addr.is_none());
+    }
+
+    #[test]
+    fn test_effective_advertise_with_explicit_addr() {
+        let mut cfg = P2pConfig::from_mode(NodeMode::Public);
+        cfg.advertise_addr = Some("198.51.100.1:6690".parse().unwrap());
+        assert_eq!(
+            cfg.effective_advertise_addr(6690),
+            Some("198.51.100.1:6690".to_string())
+        );
+    }
+
+    #[test]
+    fn test_effective_advertise_no_addr_returns_none() {
+        let cfg = P2pConfig::from_mode(NodeMode::Public);
+        // No explicit advertise addr, listen is 0.0.0.0 → None
+        assert_eq!(cfg.effective_advertise_addr(6690), None);
+    }
+
+    #[test]
+    fn test_hidden_mode_effective_advertise_none() {
+        let cfg = P2pConfig::from_mode(NodeMode::Hidden);
+        assert_eq!(cfg.effective_advertise_addr(6690), None);
+    }
+}
