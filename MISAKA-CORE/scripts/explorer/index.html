@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MISAKA Testnet Explorer</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: 'SF Mono', 'Fira Code', monospace; background: #0a0a0a; color: #e0e0e0; padding: 20px; }
+  .header { text-align: center; padding: 30px 0; border-bottom: 1px solid #333; margin-bottom: 30px; }
+  .header h1 { color: #00ff88; font-size: 28px; letter-spacing: 2px; }
+  .header .sub { color: #888; font-size: 14px; margin-top: 8px; }
+  .status { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 8px; }
+  .status.ok { background: #00ff88; box-shadow: 0 0 8px #00ff88; }
+  .status.err { background: #ff4444; box-shadow: 0 0 8px #ff4444; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; margin-bottom: 30px; }
+  .card { background: #141414; border: 1px solid #2a2a2a; border-radius: 8px; padding: 20px; }
+  .card .label { color: #888; font-size: 12px; text-transform: uppercase; letter-spacing: 1px; }
+  .card .value { color: #fff; font-size: 24px; font-weight: bold; margin-top: 6px; }
+  .card .value.green { color: #00ff88; }
+  .faucet { background: #141414; border: 1px solid #2a2a2a; border-radius: 8px; padding: 24px; max-width: 600px; margin: 0 auto; }
+  .faucet h3 { color: #00ff88; margin-bottom: 16px; }
+  .faucet input { width: 100%; padding: 12px; background: #0a0a0a; border: 1px solid #333; border-radius: 4px; color: #fff; font-family: inherit; font-size: 14px; margin-bottom: 12px; }
+  .faucet button { padding: 12px 24px; background: #00ff88; color: #000; border: none; border-radius: 4px; font-weight: bold; cursor: pointer; font-size: 14px; }
+  .faucet button:hover { background: #00cc66; }
+  .faucet button:disabled { background: #333; color: #666; cursor: not-allowed; }
+  .faucet .result { margin-top: 12px; padding: 10px; border-radius: 4px; font-size: 13px; }
+  .faucet .result.ok { background: #0a2a0a; color: #00ff88; }
+  .faucet .result.err { background: #2a0a0a; color: #ff4444; }
+  .footer { text-align: center; color: #555; font-size: 12px; margin-top: 40px; padding-top: 20px; border-top: 1px solid #222; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>MISAKA TESTNET</h1>
+  <div class="sub">Post-Quantum Native L1 BlockDAG &mdash; Narwhal + Bullshark + 21SR BFT</div>
+  <div class="sub" style="margin-top:12px">
+    <span class="status" id="nodeStatus"></span>
+    <span id="nodeStatusText">Connecting...</span>
+  </div>
+</div>
+
+<div class="grid">
+  <div class="card">
+    <div class="label">Current Round</div>
+    <div class="value" id="currentRound">-</div>
+  </div>
+  <div class="card">
+    <div class="label">Committed Round</div>
+    <div class="value" id="committedRound">-</div>
+  </div>
+  <div class="card">
+    <div class="label">Total Commits</div>
+    <div class="value green" id="committedCount">-</div>
+  </div>
+  <div class="card">
+    <div class="label">Transactions</div>
+    <div class="value" id="txCount">-</div>
+  </div>
+  <div class="card">
+    <div class="label">Blocks / Second</div>
+    <div class="value green" id="bps">-</div>
+  </div>
+  <div class="card">
+    <div class="label">Consensus</div>
+    <div class="value" id="consensus">-</div>
+  </div>
+  <div class="card">
+    <div class="label">Chain ID</div>
+    <div class="value" id="chainId">-</div>
+  </div>
+  <div class="card">
+    <div class="label">Finalized</div>
+    <div class="value" id="finalized">-</div>
+  </div>
+</div>
+
+<div class="faucet">
+  <h3>Testnet Faucet</h3>
+  <input type="text" id="faucetAddr" placeholder="misaka1... (your testnet address)">
+  <button id="faucetBtn" onclick="requestFaucet()">Request 1 MISAKA</button>
+  <div class="result" id="faucetResult" style="display:none"></div>
+</div>
+
+<div class="footer">
+  MISAKA Network &mdash; <a href="https://github.com/user/misaka" style="color:#00ff88">GitHub</a>
+  &mdash; Seed: <code id="seedAddr">163.43.225.27:6690</code>
+</div>
+
+<script>
+const RPC = window.location.origin;
+let prevCount = 0, prevTime = Date.now();
+
+async function poll() {
+  try {
+    const r = await fetch(RPC + '/api/get_chain_info', { method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}' });
+    const d = await r.json();
+
+    document.getElementById('currentRound').textContent = d.currentRound.toLocaleString();
+    document.getElementById('committedRound').textContent = d.lastCommittedRound.toLocaleString();
+    document.getElementById('committedCount').textContent = d.committedCount.toLocaleString();
+    document.getElementById('txCount').textContent = d.txCount.toLocaleString();
+    document.getElementById('consensus').textContent = d.consensus || 'narwhal_bullshark';
+    document.getElementById('chainId').textContent = d.chainId;
+    document.getElementById('finalized').textContent = d.isFinalized ? 'Yes (seq ' + d.lastFinalizedSequence + ')' : 'Pending';
+
+    // BPS calculation
+    const now = Date.now();
+    const dt = (now - prevTime) / 1000;
+    if (dt > 0 && prevCount > 0) {
+      const bps = ((d.committedCount - prevCount) / dt).toFixed(1);
+      document.getElementById('bps').textContent = bps;
+    }
+    prevCount = d.committedCount;
+    prevTime = now;
+
+    document.getElementById('nodeStatus').className = 'status ok';
+    document.getElementById('nodeStatusText').textContent = 'Connected (' + d.nodeName + ')';
+  } catch(e) {
+    document.getElementById('nodeStatus').className = 'status err';
+    document.getElementById('nodeStatusText').textContent = 'Disconnected';
+  }
+}
+
+async function requestFaucet() {
+  const addr = document.getElementById('faucetAddr').value.trim();
+  const btn = document.getElementById('faucetBtn');
+  const res = document.getElementById('faucetResult');
+  if (!addr) { res.textContent = 'Enter an address'; res.className = 'result err'; res.style.display = 'block'; return; }
+  btn.disabled = true;
+  btn.textContent = 'Requesting...';
+  try {
+    const r = await fetch(RPC + '/api/faucet', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({address: addr}) });
+    const d = await r.json();
+    if (d.error) { res.textContent = d.error; res.className = 'result err'; }
+    else { res.textContent = 'Sent! TX: ' + (d.txHash || d.tx_hash || 'queued'); res.className = 'result ok'; }
+  } catch(e) {
+    res.textContent = 'Request failed: ' + e.message; res.className = 'result err';
+  }
+  res.style.display = 'block';
+  btn.disabled = false;
+  btn.textContent = 'Request 1 MISAKA';
+}
+
+poll();
+setInterval(poll, 5000);
+</script>
+</body>
+</html>
