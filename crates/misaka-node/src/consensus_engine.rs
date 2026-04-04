@@ -24,12 +24,14 @@ use tracing::{warn, error};
 // Production: real ML-DSA-65 signature verification + signing.
 use misaka_crypto::signature::{MlDsa65Verifier, MlDsa65Signer};
 
-/// Consensus mode selection.
+/// Consensus mode — Narwhal/Bullshark is the sole production engine.
+/// GhostDAG legacy mode is retained only for backward compatibility testing.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ConsensusMode {
-    /// New Narwhal/Bullshark/21SR engine.
+    /// Narwhal/Bullshark/SR BFT — sole production engine.
     NarwhalBullshark,
-    /// Legacy GhostDAG (deprecated, for backward compat).
+    /// Legacy GhostDAG (deprecated — do not use for production).
+    #[deprecated = "Use NarwhalBullshark. GhostDAG will be removed in a future release."]
     GhostDag,
 }
 
@@ -37,8 +39,12 @@ impl ConsensusMode {
     pub fn from_str(s: &str) -> Self {
         match s.to_lowercase().as_str() {
             "narwhal" | "bullshark" | "nb" => Self::NarwhalBullshark,
-            "ghostdag" | "kaspa" | "legacy" => Self::GhostDag,
-            _ => Self::NarwhalBullshark, // default to new engine
+            "ghostdag" | "kaspa" | "legacy" => {
+                tracing::warn!("GhostDAG mode is DEPRECATED. Use Narwhal/Bullshark.");
+                #[allow(deprecated)]
+                Self::GhostDag
+            }
+            _ => Self::NarwhalBullshark,
         }
     }
 }

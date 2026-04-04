@@ -122,6 +122,7 @@ pub mod pruning;
 
 // ─── Phase 3: Q-DAG-CT Extensions ───
 pub mod atomic_pipeline;
+pub mod parallel_pipeline;
 pub mod daa;
 pub mod decoy_selection;
 pub mod header_validation;

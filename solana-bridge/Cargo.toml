@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "programs/misaka-bridge",
+    "programs/misaka-staking",
 ]
 resolver = "2"
 

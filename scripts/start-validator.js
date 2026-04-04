@@ -145,7 +145,8 @@ const binaryPaths = [
 let binaryPath = null;
 for (const p of binaryPaths) {
   try {
-    require("child_process").execSync(`${p} --version`, { stdio: "pipe" });
+    // SEC-FIX: Use execFileSync to avoid shell injection via binary path.
+    require("child_process").execFileSync(p, ["--version"], { stdio: "pipe" });
     binaryPath = p;
     break;
   } catch (_) {}

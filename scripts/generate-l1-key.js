@@ -21,7 +21,7 @@
  * ⚠  Solana private keys are NOT needed on this VPS.
  */
 
-const { execSync } = require("child_process");
+const { execFileSync } = require("child_process");
 const path = require("path");
 const fs = require("fs");
 
@@ -47,7 +47,7 @@ const binaryPaths = [
 let binaryPath = null;
 for (const p of binaryPaths) {
   try {
-    execSync(`${p} --version`, { stdio: "pipe" });
+    execFileSync(p, ["--version"], { stdio: "pipe" });
     binaryPath = p;
     break;
   } catch (_) {}
@@ -91,18 +91,18 @@ console.log("  🔑 Generating L1 validator key...");
 console.log("");
 
 try {
-  const cmd = [
-    binaryPath,
+  // SEC-FIX: Use execFileSync to prevent command injection via --name or --data-dir.
+  const args = [
     "--keygen-only",
     "--name",
     nodeName,
     "--chain-id",
-    chainId,
+    String(chainId),
     "--data-dir",
     dataDir,
-  ].join(" ");
+  ];
 
-  const output = execSync(cmd, {
+  const output = execFileSync(binaryPath, args, {
     encoding: "utf-8",
     stdio: ["pipe", "pipe", "pipe"],
   });
