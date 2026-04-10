@@ -406,8 +406,14 @@ impl CoreEngine {
 
         self.blocks_processed += 1;
 
-        // Step 1: Verify block (MANDATORY — no bypass possible)
-        if let Err(e) = self.verifier.verify(block.inner()) {
+        // Step 1: Verify block (MANDATORY — no bypass possible).
+        //
+        // v0.5.9 WP8 follow-up: pass the current banned-authorities set
+        // from the equivocation ledger into the verifier so block
+        // ancestor stake calculation excludes any validator that has
+        // already been observed equivocating on a prior slot.
+        let banned = self.ledger.banned_authorities().clone();
+        if let Err(e) = self.verifier.verify_with_banned(block.inner(), &banned) {
             // SLO S2: signature/structural verification failure
             slo_metrics::SIG_VERIFY_FAILURES.inc();
             // SLO N4: block rejected

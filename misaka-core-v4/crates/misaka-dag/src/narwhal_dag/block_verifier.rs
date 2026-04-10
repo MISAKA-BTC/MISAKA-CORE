@@ -161,6 +161,19 @@ impl BlockVerifier {
     /// comparing the resulting UTXO state hash, which belongs in the execution
     /// layer (UtxoExecutor) after commit ordering — not in the DAG verifier.
     pub fn verify(&self, block: &Block) -> Result<VerifiedBlock, BlockVerifyError> {
+        self.verify_with_banned(block, &HashSet::new())
+    }
+
+    /// v0.5.9: same as `verify()` but excludes `banned` authorities from
+    /// the ancestor stake aggregation. Callers pass the current banned
+    /// set from `SlotEquivocationLedger::banned_authorities()` so an
+    /// equivocating validator's ancestors cannot contribute to the
+    /// stake-weighted quorum in this block's `check_ancestors`.
+    pub fn verify_with_banned(
+        &self,
+        block: &Block,
+        banned: &HashSet<AuthorityIndex>,
+    ) -> Result<VerifiedBlock, BlockVerifyError> {
         // Phase 1: cheap O(1) structural checks
         self.check_author(block)?;
         self.check_round(block)?;
@@ -170,7 +183,7 @@ impl BlockVerifier {
         self.check_signature(block)?;
 
         // Phase 3: heavier checks (ancestors stake aggregation, size traversal)
-        self.check_ancestors(block)?;
+        self.check_ancestors_excluding_banned(block, banned)?;
         self.check_timestamp(block)?;
         self.check_size(block)?;
 
@@ -204,7 +217,11 @@ impl BlockVerifier {
         Ok(())
     }
 
-    fn check_ancestors(&self, block: &Block) -> Result<(), BlockVerifyError> {
+    fn check_ancestors_excluding_banned(
+        &self,
+        block: &Block,
+        banned: &HashSet<AuthorityIndex>,
+    ) -> Result<(), BlockVerifyError> {
         // HI-4: Early reject for too many ancestors (DoS protection)
         if block.ancestors.len() > MAX_ANCESTORS {
             return Err(BlockVerifyError::TooManyAncestors {
@@ -260,9 +277,15 @@ impl BlockVerifier {
         // a Byzantine validator can forge quorum using multiple equivocated
         // blocks from one author. Stake-weighted to handle heterogeneous sets.
         // See docs/architecture.md §10 Phase 1 deliverables.
+        //
+        // v0.5.9 WP8 follow-up: exclude banned (equivocating) authorities
+        // from the stake sum. An author that has already been observed
+        // producing conflicting blocks on the same slot cannot contribute
+        // to quorum in any subsequent verification.
         let quorum = self.committee.quorum_threshold();
         let distinct_stake: u64 = distinct_authors
             .iter()
+            .filter(|a| !banned.contains(a))
             .filter_map(|a| self.committee.authority(*a).map(|auth| auth.stake))
             .sum();
         if distinct_stake < quorum {
@@ -494,6 +517,87 @@ mod tests {
         assert!(matches!(
             v.verify(&block),
             Err(BlockVerifyError::DuplicateAncestor(_))
+        ));
+    }
+
+    /// v0.5.9 REGRESSION: a block whose ancestor set includes a banned
+    /// (equivocating) author cannot count that author's stake toward
+    /// the `check_ancestors` quorum. Confirms the WP8 follow-up.
+    #[test]
+    fn banned_authority_excluded_from_ancestor_stake() {
+        use crate::narwhal_types::committee::{Authority, Committee};
+        use crate::narwhal_types::block::{BlockSigner, MlDsa65TestSigner};
+
+        // 4-validator committee, stake = 1 each → quorum = 3.
+        let signers: Vec<_> = (0..4)
+            .map(|_| std::sync::Arc::new(MlDsa65TestSigner::generate()))
+            .collect();
+        let authorities: Vec<Authority> = signers
+            .iter()
+            .enumerate()
+            .map(|(i, s)| Authority {
+                hostname: format!("v-{}", i),
+                stake: 1,
+                public_key: s.public_key(),
+            })
+            .collect();
+        let committee = Committee::new(0, authorities);
+        assert_eq!(committee.quorum_threshold(), 3);
+
+        let chain_ctx = misaka_types::chain_context::ChainContext::new(99, [0u8; 32]);
+        let app_id = misaka_types::intent::AppId::new(99, [0u8; 32]);
+        let verifier = BlockVerifier::new(
+            committee,
+            0,
+            std::sync::Arc::new(MlDsa65Verifier),
+            chain_ctx,
+        );
+
+        // Round-2 block signed by author 0 with 3 distinct ancestors from
+        // authors {0, 1, 2}. Stake sum = 3 = quorum, so without banning
+        // any author the block verifies.
+        let make_block = |author: AuthorityIndex, ancestors: Vec<BlockRef>| {
+            let mut block = Block {
+                epoch: 0,
+                round: 2,
+                author,
+                timestamp_ms: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis() as u64,
+                ancestors,
+                transactions: vec![vec![1, 2, 3]],
+                commit_votes: vec![],
+                tx_reject_votes: vec![],
+                state_root: [0u8; 32],
+                signature: vec![],
+            };
+            let digest = block.signing_digest_v2(app_id.clone());
+            block.signature = BlockSigner::sign(signers[author as usize].as_ref(), &digest.0);
+            block
+        };
+
+        let ancestors = vec![
+            BlockRef::new(1, 0, BlockDigest([0x10; 32])),
+            BlockRef::new(1, 1, BlockDigest([0x11; 32])),
+            BlockRef::new(1, 2, BlockDigest([0x12; 32])),
+        ];
+        let block = make_block(0, ancestors);
+
+        // Empty banned set: quorum reached (3 distinct authors × stake 1 = 3).
+        verifier
+            .verify_with_banned(&block, &HashSet::new())
+            .expect("healthy committee must accept block");
+
+        // Ban author 2: only 2 effective stake → below quorum → reject.
+        let mut banned = HashSet::new();
+        banned.insert(2u32);
+        let err = verifier
+            .verify_with_banned(&block, &banned)
+            .expect_err("banned author must reduce effective stake below quorum");
+        assert!(matches!(
+            err,
+            BlockVerifyError::InsufficientDistinctAncestorAuthors { .. }
         ));
     }
 

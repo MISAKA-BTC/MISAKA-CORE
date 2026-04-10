@@ -77,6 +77,7 @@ pub mod indexer;
 pub mod metrics;
 pub mod rpc_auth;
 pub mod rpc_rate_limit;
+pub mod safe_mode;
 // REMOVED: privacy modules deprecated
 pub mod solana_stake_verify;
 pub mod sr21_election;
@@ -1321,6 +1322,11 @@ async fn start_narwhal_node(cli: Cli) -> anyhow::Result<()> {
         committee.size()
     );
 
+    // v0.5.9: process-global safe-mode flag. Tripped on state_root
+    // mismatch. Polled by the commit loop, propose loop, and write RPC
+    // handlers. Drop-in against v0.5.7/v0.5.8 — no wire changes.
+    let safe_mode = Arc::new(crate::safe_mode::SafeMode::new());
+
     // Phase 1: Spawn propose loop — drains mempool into CoreEngine
     let (mempool_propose_tx, mempool_propose_rx) =
         crate::narwhal_consensus::mempool_propose_channel(10_000);
@@ -1354,6 +1360,7 @@ async fn start_narwhal_node(cli: Cli) -> anyhow::Result<()> {
                 ..crate::narwhal_consensus::ProposeLoopConfig::default()
             },
             propose_state_root,
+            Some(safe_mode.clone()),
         ))
     };
 
@@ -1374,21 +1381,34 @@ async fn start_narwhal_node(cli: Cli) -> anyhow::Result<()> {
     let rpc_router = axum::Router::new()
         .route("/api/health", axum::routing::get({
             let msg_tx = msg_tx_rpc.clone();
+            let safe_mode = safe_mode.clone();
             move || {
                 let msg_tx = msg_tx.clone();
+                let safe_mode = safe_mode.clone();
                 async move {
                     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
                     let _ = msg_tx.try_send(ConsensusMessage::GetStatus(reply_tx));
+                    // v0.5.9: surface safe-mode so operators can detect
+                    // a halted node with a single curl call.
+                    let safe_mode_json = safe_mode.status().map(|(commit, reason)| {
+                        serde_json::json!({
+                            "halted": true,
+                            "haltedAtCommit": commit,
+                            "reason": reason,
+                        })
+                    }).unwrap_or_else(|| serde_json::json!({"halted": false}));
                     match reply_rx.await {
                         Ok(status) => axum::Json(serde_json::json!({
-                            "status": "ok",
+                            "status": if safe_mode.is_halted() { "safe_mode" } else { "ok" },
                             "consensus": "mysticeti-equivalent",
                             "blocks": status.num_blocks,
                             "round": status.highest_accepted_round,
+                            "safeMode": safe_mode_json,
                         })),
                         Err(_) => axum::Json(serde_json::json!({
                             "status": "error",
                             "consensus": "stopped",
+                            "safeMode": safe_mode_json,
                         })),
                     }
                 }
@@ -1447,9 +1467,22 @@ async fn start_narwhal_node(cli: Cli) -> anyhow::Result<()> {
             "/api/submit_tx",
             axum::routing::post({
                 let narwhal_mempool = narwhal_mempool.clone();
+                let safe_mode = safe_mode.clone();
                 move |body: axum::body::Bytes| {
                     let narwhal_mempool = narwhal_mempool.clone();
+                    let safe_mode = safe_mode.clone();
                     async move {
+                        // v0.5.9: refuse writes while the node is halted
+                        // on a state divergence.
+                        if let Some((commit, reason)) = safe_mode.status() {
+                            return axum::Json(serde_json::json!({
+                                "accepted": false,
+                                "safeMode": true,
+                                "haltedAtCommit": commit,
+                                "reason": reason,
+                                "error": "node is in safe mode — write RPC disabled",
+                            }));
+                        }
                         // SECURITY: size limit (128 KiB) to prevent memory DoS
                         if body.len() > 131_072 {
                             return axum::Json(serde_json::json!({
@@ -1988,11 +2021,23 @@ async fn start_narwhal_node(cli: Cli) -> anyhow::Result<()> {
             // Narwhal DAG path: executor starts with a fresh UTXO set.
             // State restoration is handled by the DAG's own persistence layer.
             let mut tx_executor = crate::utxo_executor::UtxoExecutor::new(app_id);
+            // v0.5.9: commit loop holds a handle to the safe-mode flag so
+            // it can break out on state_root mismatch.
+            let safe_mode = safe_mode.clone();
 
             let mut total_committed_txs = 0u64;
             let mut total_accepted_txs = 0u64;
 
             while let Some(output) = commit_rx.recv().await {
+                // v0.5.9: if safe-mode has already been tripped, drop
+                // any further committed sub-dags without applying.
+                if safe_mode.is_halted() {
+                    tracing::warn!(
+                        "safe_mode active — dropping committed sub-dag index={} without applying",
+                        output.commit_index
+                    );
+                    break;
+                }
                 // SEC-FIX: Derive the commit leader's address from their pubkey.
                 // This is used to verify SystemEmission outputs go to the correct
                 // proposer, preventing Byzantine reward redirection.
@@ -2060,8 +2105,19 @@ async fn start_narwhal_node(cli: Cli) -> anyhow::Result<()> {
 
                 // SEC-FIX C-9: Verify state_root against leader's proposed value.
                 // Detects Byzantine proposers embedding false state commitments.
+                //
+                // v0.5.9: on mismatch, trip the process-global safe-mode
+                // flag and stop processing further commits. The propose
+                // loop and write RPC handlers poll the same flag.
                 if let Some(leader_root) = output.leader_state_root {
                     if leader_root != new_root {
+                        let reason = format!(
+                            "state_root mismatch at commit {}: leader proposed {} \
+                             but local execution computed {}",
+                            output.commit_index,
+                            hex::encode(leader_root),
+                            hex::encode(new_root),
+                        );
                         tracing::error!(
                             "STATE ROOT MISMATCH at commit {}: \
                              leader proposed {} but local execution computed {}. \
@@ -2070,7 +2126,11 @@ async fn start_narwhal_node(cli: Cli) -> anyhow::Result<()> {
                             hex::encode(&leader_root[..8]),
                             hex::encode(&new_root[..8]),
                         );
-                        // TODO: Enter safe mode / halt consensus participation
+                        safe_mode.trip(output.commit_index, reason);
+                        // Exit the commit loop. We cannot safely apply
+                        // further committed sub-dags on top of a state
+                        // that has already diverged from the leader.
+                        break;
                     }
                 }
 
