@@ -1,0 +1,16 @@
+[package]
+name = "misaka-addressmanager"
+description = "P2P address manager: peer discovery, banning"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+misaka-database = { path = "../../crates/misaka-database" }
+serde = { workspace = true }
+parking_lot = { workspace = true }
+tracing = { workspace = true }
+rand = { workspace = true }
+
+[lints]
+workspace = true
