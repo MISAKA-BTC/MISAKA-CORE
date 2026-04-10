@@ -4,3 +4,5 @@ misaka-data/
 node.log
 validator.key
 *.key
+# Intentionally tracked: demo keypair matching packaged genesis (authority 0)
+!misaka-core-v4/distribution/public-node/config/bundled-validator.key
