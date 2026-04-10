@@ -1,0 +1,55 @@
+[Unit]
+Description=MISAKA Network Node (Narwhal/Bullshark)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Audit R8: Use dedicated non-root user instead of generic cloud user
+User=misaka
+Group=misaka
+WorkingDirectory=/var/lib/misaka
+ExecStart=/usr/local/bin/misaka-node \
+    --data-dir /var/lib/misaka \
+    --genesis-path /var/lib/misaka/genesis_committee.toml \
+    --rpc-port 3000 \
+    --p2p-port 6690 \
+    --validators 1 \
+    --validator-index 0 \
+    --chain-id ${MISAKA_CHAIN_ID:-2}
+# SEC-FIX: chain-id now read from environment variable.
+# Set MISAKA_CHAIN_ID=1 in /etc/misaka/node.env for mainnet.
+# Default is 2 (testnet) for safety.
+EnvironmentFile=-/etc/misaka/node.env
+Restart=on-failure
+RestartSec=5
+# Audit R8: Exponential backoff for crash loops
+StartLimitBurst=5
+StartLimitIntervalSec=300
+LimitNOFILE=65535
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=misaka-node
+
+# ─── Security Hardening (Audit R8) ───
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/misaka
+PrivateTmp=true
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service ~@privileged ~@resources
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target

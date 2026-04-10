@@ -19,15 +19,31 @@ impl ValidatorSet {
     }
 
     pub fn total_stake(&self) -> u128 {
+        // SEC-FIX M-6: saturating fold to prevent u128 overflow
         self.validators
             .iter()
             .filter(|v| v.is_active)
             .map(|v| v.stake_weight)
-            .sum()
+            .fold(0u128, |acc, w| acc.saturating_add(w))
     }
 
+    /// BFT quorum threshold: `(total_stake * 2) / 3 + 1`.
+    ///
+    /// This ensures strictly more than 2/3 of total stake is required,
+    /// which is the standard BFT safety requirement.
+    ///
+    /// # Safety
+    ///
+    /// With `n` equal-weight validators (stake=1 each):
+    /// - n=4: quorum=3, tolerates 1 Byzantine
+    /// - n=7: quorum=5, tolerates 2 Byzantine
+    /// - n=100: quorum=67, tolerates 33 Byzantine
     pub fn quorum_threshold(&self) -> u128 {
-        self.total_stake() * 2 / 3 + 1
+        let total = self.total_stake();
+        // SEC-FIX NM-4: Avoid (total * 2) which could theoretically overflow u128
+        // with extreme stake values. Use total / 3 * 2 + remainder handling instead.
+        let two_thirds = total / 3 * 2 + (total % 3) * 2 / 3;
+        two_thirds + 1
     }
 
     pub fn get(&self, id: &ValidatorId) -> Option<&ValidatorIdentity> {
@@ -83,7 +99,7 @@ mod tests {
 
     fn make_validator(id_byte: u8, stake: u128) -> (ValidatorIdentity, ValidatorKeypair) {
         let kp = generate_validator_keypair();
-        let mut vid = [0u8; 20];
+        let mut vid = [0u8; 32];
         vid[0] = id_byte;
         (
             ValidatorIdentity {

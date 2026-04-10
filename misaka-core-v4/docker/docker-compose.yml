@@ -1,0 +1,19 @@
+version: "3.8"
+
+services:
+  misaka-node:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: misaka-public-node
+    ports:
+      - "6691:6691"
+      - "3001:3001"
+    volumes:
+      - misaka-data:/data
+    environment:
+      - MISAKA_RPC_AUTH_MODE=open
+    restart: unless-stopped
+
+volumes:
+  misaka-data:

@@ -1,14 +1,20 @@
 //! Block sync engine — applies blocks from peers with FULL verification.
 //!
+//! # No-Rollback Architecture
+//!
+//! This sync engine is forward-only. There is no `reorg()` method.
+//! DAG reorgs (SPC switches) are handled by VirtualState::resolve()
+//! in the misaka-dag crate, not by rolling back and re-applying blocks.
+//!
 //! No skip. No trust. Every block is re-validated.
 
-use crate::block_apply::{execute_block, rollback_last_block, BlockResult};
 use misaka_consensus::block_validation::BlockCandidate;
 use misaka_consensus::block_validation::BlockError;
 use misaka_consensus::validator_set::ValidatorSet;
+use misaka_execution::block_apply::{execute_block, BlockResult};
 use misaka_storage::utxo_set::UtxoSet;
 
-/// Sync state.
+/// Forward-only sync state.
 pub struct SyncEngine {
     pub blocks_synced: u64,
     pub blocks_rejected: u64,
@@ -29,7 +35,6 @@ impl SyncEngine {
         utxo_set: &mut UtxoSet,
         validator_set: Option<&ValidatorSet>,
     ) -> Result<BlockResult, BlockError> {
-        // Height must be sequential
         if block.height != utxo_set.height + 1 {
             self.blocks_rejected += 1;
             return Err(BlockError::Proposer(format!(
@@ -68,41 +73,29 @@ impl SyncEngine {
         Ok(results)
     }
 
-    /// Reorg: rollback N blocks, then apply new chain.
-    pub fn reorg(
-        &mut self,
-        rollback_count: usize,
-        new_blocks: &[BlockCandidate],
-        utxo_set: &mut UtxoSet,
-        validator_set: Option<&ValidatorSet>,
-    ) -> Result<Vec<BlockResult>, BlockError> {
-        // Rollback
-        for _ in 0..rollback_count {
-            rollback_last_block(utxo_set)?;
-        }
-        // Apply new chain
-        self.apply_block_batch(new_blocks, utxo_set, validator_set)
-            .map_err(|(_, e)| e)
-    }
+    // NOTE: reorg() has been deliberately removed.
+    // Protocol-level rollback is forbidden. SPC switches are handled
+    // by VirtualState::resolve() with MAX_SPC_SWITCH_DEPTH limit.
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use misaka_consensus::block_validation::{VerifiedRingProof, VerifiedTx};
-    use misaka_pqc::ki_proof::prove_key_image;
-    use misaka_pqc::pq_ring::*;
-    use misaka_pqc::pq_sign::MlDsaKeypair;
-    use misaka_pqc::{TransactionPrivacyConstraints, TransactionPublicStatement};
+    use misaka_consensus::block_validation::{VerifiedProof, VerifiedTx};
+    use misaka_pqc::pq_ring::SpendingKeypair;
+    use misaka_pqc::pq_sign::{ml_dsa_sign_raw, MlDsaKeypair};
     use misaka_types::utxo::*;
 
-    fn setup() -> (UtxoSet, Vec<SpendingKeypair>, Poly) {
-        let a = derive_public_param(&DEFAULT_A_SEED);
+    fn setup() -> (UtxoSet, Vec<SpendingKeypair>) {
         let mut utxo_set = UtxoSet::new(100);
         let wallets: Vec<SpendingKeypair> = (0..6)
-            .map(|_| SpendingKeypair::from_ml_dsa(MlDsaKeypair::generate().secret_key).unwrap())
+            .map(|_| {
+                let kp = MlDsaKeypair::generate();
+                SpendingKeypair::from_ml_dsa_pair(kp.secret_key, kp.public_key.as_bytes().to_vec())
+                    .unwrap()
+            })
             .collect();
-        for (i, _) in wallets.iter().enumerate() {
+        for (i, wallet) in wallets.iter().enumerate() {
             utxo_set
                 .add_output(
                     OutputRef {
@@ -111,102 +104,69 @@ mod tests {
                     },
                     TxOutput {
                         amount: 10_000,
-                        one_time_address: [0xAA; 32],
-                        pq_stealth: None,
-                        spending_pubkey: None,
+                        address: [0xAA; 32],
+                        spending_pubkey: Some(wallet.ml_dsa_pk().to_vec()),
                     },
                     0,
+                    false,
                 )
                 .unwrap();
         }
-        (utxo_set, wallets, a)
+        (utxo_set, wallets)
     }
 
-    fn make_block(a: &Poly, wallets: &[SpendingKeypair], height: u64) -> BlockCandidate {
-        use misaka_pqc::ki_proof::canonical_strong_ki;
-        let ring_pks: Vec<Poly> = (0..4).map(|i| wallets[i].public_poly.clone()).collect();
-        let (_, strong_ki) = canonical_strong_ki(&wallets[0].public_poly, &wallets[0].secret_poly);
+    fn make_block(wallets: &[SpendingKeypair], height: u64) -> BlockCandidate {
+        let signer = &wallets[0];
         let tx = UtxoTransaction {
-            ring_scheme: RING_SCHEME_LRS,
-            tx_type: TxType::Transfer,
+            tx_type: TxType::TransparentTransfer,
             version: UTXO_TX_VERSION,
-            inputs: vec![RingInput {
-                ring_members: (0..4)
-                    .map(|i| OutputRef {
-                        tx_hash: [(i + 1) as u8; 32],
-                        output_index: 0,
-                    })
-                    .collect(),
-                ring_signature: vec![],
-                key_image: strong_ki,
-                ki_proof: vec![],
+            inputs: vec![TxInput {
+                utxo_refs: vec![OutputRef {
+                    tx_hash: [1; 32],
+                    output_index: 0,
+                }],
+                proof: vec![],
             }],
             outputs: vec![
                 TxOutput {
                     amount: 7000,
-                    one_time_address: [0xBB; 32],
-                    pq_stealth: None,
-                    spending_pubkey: None,
+                    address: [0xBB; 32],
+                    spending_pubkey: Some(signer.ml_dsa_pk().to_vec()),
                 },
                 TxOutput {
                     amount: 2900,
-                    one_time_address: [0xCC; 32],
-                    pq_stealth: None,
-                    spending_pubkey: None,
+                    address: [0xCC; 32],
+                    spending_pubkey: Some(signer.ml_dsa_pk().to_vec()),
                 },
             ],
             fee: 100,
             extra: vec![],
-            zk_proof: None,
+            expiry: 0,
         };
-        let sig = ring_sign(
-            a,
-            &ring_pks,
-            0,
-            &wallets[0].secret_poly,
-            &tx.signing_digest(),
-        )
-        .unwrap();
-        let kip = prove_key_image(
-            a,
-            &wallets[0].secret_poly,
-            &wallets[0].public_poly,
-            &strong_ki,
-        )
-        .unwrap();
+        // Phase 2c-A: TxSignablePayload-based signing for sync test fixture
+        use misaka_types::tx_signable::TxSignablePayload;
+
+        let payload = TxSignablePayload::from(&tx);
+        let intent = misaka_types::intent::IntentMessage::wrap(
+            misaka_types::intent::IntentScope::TransparentTransfer,
+            misaka_types::intent::AppId::new(2, [0u8; 32]), // test fixture
+            &payload,
+        );
+        let sig = ml_dsa_sign_raw(&signer.ml_dsa_sk, &intent.signing_digest()).unwrap();
         let mut tx_final = tx;
-        tx_final.inputs[0].ki_proof = kip.to_bytes();
+        tx_final.inputs[0].proof = sig.as_bytes().to_vec();
         BlockCandidate {
             height,
             slot: height,
             parent_hash: [0; 32],
             transactions: vec![VerifiedTx {
                 tx: tx_final.clone(),
-                ring_pubkeys: vec![ring_pks.clone()],
-                ring_amounts: vec![vec![10_000; 4]], // same-amount ring
-                ring_proofs: vec![VerifiedRingProof::Lrs {
-                    sig,
-                    ki_proof: Some(kip),
+                raw_spending_keys: vec![signer.ml_dsa_pk().to_vec()],
+                ring_pubkeys: vec![vec![signer.public_poly.clone()]],
+                ring_amounts: vec![vec![10_000]],
+                ring_proofs: vec![VerifiedProof::Transparent {
+                    raw_sig: sig.as_bytes().to_vec(),
                 }],
-                privacy_constraints: TransactionPrivacyConstraints::from_tx_and_input_amounts(
-                    &tx_final,
-                    &[10_000],
-                )
-                .ok(),
-                privacy_statement: TransactionPrivacyConstraints::from_tx_and_input_amounts(
-                    &tx_final,
-                    &[10_000],
-                )
-                .ok()
-                .and_then(|constraints| {
-                    TransactionPublicStatement::from_constraints_and_resolved_rings(
-                        &tx_final,
-                        &constraints,
-                        &[ring_pks.clone()],
-                        misaka_pqc::PrivacyBackendFamily::RingSignature,
-                    )
-                    .ok()
-                }),
             }],
             proposer_signature: None,
         }
@@ -214,9 +174,9 @@ mod tests {
 
     #[test]
     fn test_sync_sequential() {
-        let (mut utxo_set, wallets, a) = setup();
+        let (mut utxo_set, wallets) = setup();
         let mut sync = SyncEngine::new();
-        let block = make_block(&a, &wallets, 1);
+        let block = make_block(&wallets, 1);
         let result = sync
             .apply_synced_block(&block, &mut utxo_set, None)
             .unwrap();
@@ -226,9 +186,9 @@ mod tests {
 
     #[test]
     fn test_sync_wrong_height_rejected() {
-        let (mut utxo_set, wallets, a) = setup();
+        let (mut utxo_set, wallets) = setup();
         let mut sync = SyncEngine::new();
-        let block = make_block(&a, &wallets, 5); // wrong height
+        let block = make_block(&wallets, 5);
         assert!(sync
             .apply_synced_block(&block, &mut utxo_set, None)
             .is_err());

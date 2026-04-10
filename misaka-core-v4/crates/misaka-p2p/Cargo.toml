@@ -4,14 +4,31 @@ description = "P2P with ML-KEM-768 key exchange + ML-DSA-65 mutual auth (PQ-only
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+
+[features]
+dev = []
+
 [dependencies]
 misaka-types = { path = "../misaka-types" }
 misaka-crypto = { path = "../misaka-crypto" }
 misaka-pqc = { path = "../misaka-pqc" }
+misaka-dag = { path = "../misaka-dag" }
 sha3 = { workspace = true }
+borsh = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+hex = { workspace = true }
+chrono = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true }
+chacha20poly1305 = { workspace = true }
+rand = { workspace = true }
+bitflags = { version = "2", features = ["serde"] }
+parking_lot = { workspace = true }
+indexmap = { workspace = true }
+smallvec = { workspace = true }
+async-trait = "0.1"
 
 [lints]
 workspace = true

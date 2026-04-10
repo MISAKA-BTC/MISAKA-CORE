@@ -1,0 +1,45 @@
+# MISAKA Genesis Committee Manifest (sample)
+#
+# This file defines the initial validator set for a testnet.
+# Each validator's ML-DSA-65 public key MUST be real (not placeholder).
+#
+# Generate a validator key and print its public key:
+#   ./target/release/misaka-node --emit-validator-pubkey --data-dir ./data
+# Then copy the public_key hex from stdout into this file.
+#
+# For a local 3-node testnet, use scripts/start-testnet.sh which
+# auto-generates keys and this manifest.
+#
+# IMPORTANT: Each validator MUST use a unique network_address port
+# when running on the same host (e.g. localhost).
+#
+# Stakes are intentionally non-uniform to test stake-weighted quorum
+# calculations and ensure consensus logic handles heterogeneous validator sets.
+
+[committee]
+epoch = 0
+
+[[committee.validators]]
+authority_index = 0
+public_key = "0x<PASTE_VALIDATOR_0_PUBLIC_KEY_HEX_3904_CHARS>"
+stake = 10000
+network_address = "validator-0.example.com:16110"
+# solana_stake_account = "optional_solana_pubkey"
+
+[[committee.validators]]
+authority_index = 1
+public_key = "0x<PASTE_VALIDATOR_1_PUBLIC_KEY_HEX_3904_CHARS>"
+stake = 5000
+network_address = "validator-1.example.com:16111"
+
+[[committee.validators]]
+authority_index = 2
+public_key = "0x<PASTE_VALIDATOR_2_PUBLIC_KEY_HEX_3904_CHARS>"
+stake = 5000
+network_address = "validator-2.example.com:16112"
+
+[[committee.validators]]
+authority_index = 3
+public_key = "0x<PASTE_VALIDATOR_3_PUBLIC_KEY_HEX_3904_CHARS>"
+stake = 1000
+network_address = "validator-3.example.com:16113"

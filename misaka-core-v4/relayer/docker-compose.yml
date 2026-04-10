@@ -4,11 +4,10 @@
 # Idempotency keys ensure no duplicate submissions even with concurrent execution.
 #
 # Usage:
-#   docker-compose up -d           # Start 2 relayers
-#   docker-compose logs -f         # Watch logs
-#   docker-compose down            # Stop
-
-version: "3.8"
+#   ../scripts/relayer-bootstrap.sh
+#   docker compose -f docker-compose.yml up -d --build
+#   docker compose -f docker-compose.yml logs -f
+#   docker compose -f docker-compose.yml down
 
 services:
   relayer-1:
@@ -17,19 +16,15 @@ services:
       dockerfile: Dockerfile
     container_name: misaka-relayer-1
     restart: unless-stopped
+    env_file:
+      - ../scripts/relayer.env
     environment:
-      - SOLANA_RPC_URL=https://api.devnet.solana.com
-      - MISAKA_RPC_URL=http://host.docker.internal:3001
-      - BRIDGE_PROGRAM_ID=MBRDGxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-      - RELAYER_KEYPAIR=/keys/relayer.json
-      - POLL_INTERVAL=15
-      - PROCESSED_STORE=/data/relayer-processed.json
-      - RUST_LOG=info
+      POLL_INTERVAL: 15
+      PROCESSED_STORE: /data/relayer-processed.json
+      RUST_LOG: info
     volumes:
       - relayer-data:/data
       - ./keys:/keys:ro
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
 
   relayer-2:
     build:
@@ -37,19 +32,15 @@ services:
       dockerfile: Dockerfile
     container_name: misaka-relayer-2
     restart: unless-stopped
+    env_file:
+      - ../scripts/relayer.env
     environment:
-      - SOLANA_RPC_URL=https://api.devnet.solana.com
-      - MISAKA_RPC_URL=http://host.docker.internal:3001
-      - BRIDGE_PROGRAM_ID=MBRDGxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-      - RELAYER_KEYPAIR=/keys/relayer.json
-      - POLL_INTERVAL=20   # offset to reduce collision
-      - PROCESSED_STORE=/data/relayer-processed.json
-      - RUST_LOG=info
+      POLL_INTERVAL: 20
+      PROCESSED_STORE: /data/relayer-processed.json
+      RUST_LOG: info
     volumes:
       - relayer-data:/data
       - ./keys:/keys:ro
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
 
 volumes:
   relayer-data:

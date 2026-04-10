@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+"""Package MISAKA public node distribution for release."""
 from __future__ import annotations
 
 import argparse
@@ -35,6 +36,32 @@ def ensure_exec(path: Path) -> None:
     path.chmod(mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
 
+PLATFORM_SCRIPTS = {
+    "linux": [
+        "start-public-node.sh",
+        "start-seed-node.sh",
+        "start-self-hosted-testnet.sh",
+        "show-network-guide.sh",
+    ],
+    "macos": [
+        "start-public-node.sh",
+        "start-public-node.command",
+        "start-seed-node.sh",
+        "start-seed-node.command",
+        "start-self-hosted-testnet.sh",
+        "start-self-hosted-testnet.command",
+        "show-network-guide.sh",
+        "show-network-guide.command",
+    ],
+    "windows": [
+        "start-public-node.bat",
+        "start-seed-node.bat",
+        "start-self-hosted-testnet.bat",
+        "show-network-guide.bat",
+    ],
+}
+
+
 def main() -> None:
     args = parse_args()
     version = read_version(args.workspace_root)
@@ -44,22 +71,35 @@ def main() -> None:
 
     if staging_root.exists():
         shutil.rmtree(staging_root)
-    shutil.copytree(skeleton_root, staging_root)
 
-    for base in ("misaka-node", "misaka-launcher"):
-        src = args.binary_dir / binary_name(base, args.platform)
-        dst = staging_root / binary_name(base, args.platform)
-        if not src.exists():
-            raise FileNotFoundError(f"missing binary: {src}")
-        shutil.copy2(src, dst)
-        if args.platform != "windows":
-            ensure_exec(dst)
+    # Copy config
+    config_dst = staging_root / "config"
+    config_src = skeleton_root / "config"
+    shutil.copytree(config_src, config_dst)
 
-    for rel in ("start-public-node.sh", "start-public-node.command"):
-        path = staging_root / rel
-        if path.exists():
-            ensure_exec(path)
+    # Copy README
+    readme_src = skeleton_root / "README.md"
+    if readme_src.exists():
+        shutil.copy2(readme_src, staging_root / "README.md")
 
+    # Copy platform scripts
+    for script in PLATFORM_SCRIPTS.get(args.platform, []):
+        src = skeleton_root / script
+        if src.exists():
+            shutil.copy2(src, staging_root / script)
+            if args.platform != "windows":
+                ensure_exec(staging_root / script)
+
+    # Copy binary
+    src_bin = args.binary_dir / binary_name("misaka-node", args.platform)
+    dst_bin = staging_root / binary_name("misaka-node", args.platform)
+    if not src_bin.exists():
+        raise FileNotFoundError(f"missing binary: {src_bin}")
+    shutil.copy2(src_bin, dst_bin)
+    if args.platform != "windows":
+        ensure_exec(dst_bin)
+
+    # Archive
     archive_base = args.output_dir / package_name
     if args.platform == "windows":
         archive = shutil.make_archive(str(archive_base), "zip", args.output_dir, package_name)

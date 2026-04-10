@@ -64,6 +64,40 @@ pub struct Transaction {
     pub signature: MisakaSignature,
 }
 
+// ═══════════════════════════════════════════════════════════
+//  Hard bounds — Mochimo-inspired wire-level safety
+// ═══════════════════════════════════════════════════════════
+
+/// Maximum inputs per transaction.
+pub const MAX_INPUTS: usize = 256;
+
+/// Maximum actions per transaction.
+pub const MAX_ACTIONS: usize = 64;
+
+/// Maximum args per action.
+pub const MAX_ARGS_PER_ACTION: usize = 32;
+
+/// Maximum total args size per action (bytes).
+pub const MAX_ARGS_TOTAL_BYTES: usize = 65_536;
+
+/// Maximum module name length.
+pub const MAX_MODULE_NAME_LEN: usize = 128;
+
+/// Maximum function name length.
+pub const MAX_FUNCTION_NAME_LEN: usize = 128;
+
+/// Minimum gas price (prevent zero-fee spam).
+pub const MIN_GAS_PRICE: u64 = 1;
+
+/// Maximum gas budget.
+pub const MAX_GAS_BUDGET: u64 = 100_000_000_000; // 100B
+
+/// Expected ML-DSA-65 signature size.
+pub const MLDSA65_SIG_SIZE: usize = 3309;
+
+/// Block-to-live: max epochs ahead for expiration (Mochimo-inspired).
+pub const MAX_EXPIRATION_EPOCHS_AHEAD: u64 = 256;
+
 impl Transaction {
     /// Compute tx_hash = SHA3-256(MCS-1(tx without signature)).
     pub fn tx_hash(&self) -> Digest {
@@ -149,18 +183,113 @@ impl Transaction {
     }
 
     /// Validate structural invariants (no crypto verification).
+    ///
+    /// Mochimo-inspired hard bounds:
+    /// 1. Non-empty inputs and actions
+    /// 2. Hard caps on input/action/args counts
+    /// 3. Size bounds on module/function names and args
+    /// 4. Gas sanity (min price, max budget)
+    /// 5. Signature size matches scheme
+    /// 6. No duplicate inputs
     pub fn validate_structure(&self) -> Result<(), MisakaError> {
+        // ── Non-empty ──
         if self.actions.is_empty() {
             return Err(MisakaError::EmptyActions);
         }
         if self.inputs.is_empty() {
             return Err(MisakaError::EmptyInputs);
         }
-        // Check no duplicate inputs
+
+        // ── Hard caps (Mochimo-inspired) ──
+        if self.inputs.len() > MAX_INPUTS {
+            return Err(MisakaError::TooManyInputs {
+                count: self.inputs.len(),
+                max: MAX_INPUTS,
+            });
+        }
+        if self.actions.len() > MAX_ACTIONS {
+            return Err(MisakaError::TooManyActions {
+                count: self.actions.len(),
+                max: MAX_ACTIONS,
+            });
+        }
+
+        // ── Per-action bounds ──
+        for act in &self.actions {
+            if act.module.len() > MAX_MODULE_NAME_LEN {
+                return Err(MisakaError::ModuleNameTooLong {
+                    len: act.module.len(),
+                    max: MAX_MODULE_NAME_LEN,
+                });
+            }
+            if act.function.len() > MAX_FUNCTION_NAME_LEN {
+                return Err(MisakaError::FunctionNameTooLong {
+                    len: act.function.len(),
+                    max: MAX_FUNCTION_NAME_LEN,
+                });
+            }
+            let total_args_size: usize = act.args.iter().map(|a| a.len()).sum();
+            if total_args_size > MAX_ARGS_TOTAL_BYTES {
+                return Err(MisakaError::ActionArgsTooLarge {
+                    size: total_args_size,
+                    max: MAX_ARGS_TOTAL_BYTES,
+                });
+            }
+        }
+
+        // ── Gas sanity ──
+        if self.gas_price < MIN_GAS_PRICE {
+            return Err(MisakaError::GasPriceTooLow {
+                price: self.gas_price,
+                min: MIN_GAS_PRICE,
+            });
+        }
+        if self.gas_budget > MAX_GAS_BUDGET {
+            return Err(MisakaError::GasBudgetTooHigh {
+                budget: self.gas_budget,
+                max: MAX_GAS_BUDGET,
+            });
+        }
+
+        // ── Signature size check ──
+        let expected_sig_size = match self.signature.scheme {
+            crate::scheme::SignatureScheme::MlDsa65 => MLDSA65_SIG_SIZE,
+            _ => 0, // other schemes validated elsewhere
+        };
+        if expected_sig_size > 0 && self.signature.bytes.len() != expected_sig_size {
+            return Err(MisakaError::SignatureSizeMismatch {
+                expected: expected_sig_size,
+                got: self.signature.bytes.len(),
+            });
+        }
+
+        // ── Duplicate input check ──
         let mut seen = std::collections::HashSet::new();
         for inp in &self.inputs {
             if !seen.insert(inp.object_id) {
                 return Err(MisakaError::DuplicateInput(hex::encode(inp.object_id)));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Validate expiration against current epoch.
+    ///
+    /// Mochimo's "block-to-live" concept: TXs expire after a bounded window.
+    pub fn validate_expiration(&self, current_epoch: u64) -> Result<(), MisakaError> {
+        if let Some(exp) = self.expiration_epoch {
+            if exp < current_epoch {
+                return Err(MisakaError::TransactionExpired {
+                    tx_epoch: exp,
+                    current_epoch,
+                });
+            }
+            if exp > current_epoch + MAX_EXPIRATION_EPOCHS_AHEAD {
+                return Err(MisakaError::TransactionExpired {
+                    tx_epoch: exp,
+                    current_epoch,
+                });
             }
         }
         Ok(())

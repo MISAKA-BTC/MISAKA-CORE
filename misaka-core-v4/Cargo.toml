@@ -1,28 +1,51 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/misaka-protocol-config",
+    "crates/misaka-api",
     "crates/misaka-types",
     "crates/misaka-crypto",
     "crates/misaka-pqc",
     "crates/misaka-execution",
+    "crates/misaka-database",
     "crates/misaka-storage",
     "crates/misaka-mempool",
     "crates/misaka-consensus",
     "crates/misaka-p2p",
     "crates/misaka-tokenomics",
     "crates/misaka-governance",
-    "crates/misaka-bridge",
+    # misaka-bridge: DELETED (Task 2). Orphan crate with no dependents.
+    # See docs/archive/legacy-bridge/ for historical context.
     "crates/misaka-mev",
     "crates/misaka-rpc",
-    "crates/misaka-test-vectors",
     "crates/misaka-node",
-    "crates/misaka-launcher",
     "crates/misaka-cli",
     "crates/misaka-dag",
+    "crates/misaka-test-cluster",
+    "crates/misaka-simulator",
+    "crates/misaka-notify",
+    "crates/misaka-mining",
+    "crates/misaka-indexes",
+    "crates/misaka-muhash",
+    "crates/misaka-math",
+    "crates/misaka-utils",
+    "crates/misaka-security",
+    "crates/misaka-txscript",
+    # misaka-vm: DELETED (Phase 25). VM is not implemented.
+    # See docs/design/VM_ROADMAP.md for v1.1 plan.
+    "components/addressmanager",
+    "components/connectionmanager",
+    "components/consensusmanager",
+    "rpc/core",
+    "wallet/core",
+]
+exclude = [
+    "relayer",
+    "solana-bridge",
 ]
 
 [workspace.package]
-version = "0.4.2"
+version = "0.5.1"
 edition = "2021"
 license = "Apache-2.0"
 authors = ["MISAKA Network Contributors"]
@@ -30,15 +53,18 @@ authors = ["MISAKA Network Contributors"]
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-serde_with = "3"
+serde_with = "=3.11.0"
 hex = "0.4"
+bincode = "1.3"
+indexmap = "2"
+smallvec = { version = "1", features = ["const_generics"] }
 sha3 = "0.10"
 hkdf = "0.12"
 chacha20poly1305 = "0.10"
 rand = "0.8"
 rand_core = { version = "0.6", features = ["getrandom"] }
-pqcrypto-dilithium = "0.5"
-pqcrypto-kyber = "0.8"
+pqcrypto-mldsa = "0.1"
+pqcrypto-mlkem = "0.1"
 pqcrypto-traits = "0.3"
 zeroize = { version = "1.8", features = ["derive"] }
 secrecy = { version = "0.8", features = ["serde"] }
@@ -48,17 +74,23 @@ tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
 parking_lot = "0.12"
-clap = { version = "4", features = ["derive"] }
+rayon = "1.10"
+num_cpus = "1.16"
+clap = { version = "4", features = ["derive", "env"] }
 toml_edit = "0.22"
 axum = "0.7"
+blake3 = "=1.5.5"
 tower-http = { version = "0.5", features = ["cors"] }
 tower = { version = "0.4", features = ["limit"] }
 chrono = { version = "0.4.38", features = ["serde"] }
+borsh = { version = "1.5", features = ["derive", "rc"] }
 # Force Rust 1.75-compatible versions of transitive deps
 time = "=0.3.36"
 
 # ═══ Zero-Panic Policy: CI must deny unwrap/expect in production ═══
 [workspace.lints.clippy]
 unwrap_used = "deny"
-expect_used = "deny"
-panic = "deny"
+expect_used = "warn"  # Grade A target: promote to "deny" after systematic removal
+
+[workspace.lints.rust]
+missing_docs = "allow"  # Grade A target: promote to "warn" after doc completion

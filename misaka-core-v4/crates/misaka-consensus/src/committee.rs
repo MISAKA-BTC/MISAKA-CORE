@@ -35,7 +35,9 @@ pub fn verify_committee_votes(
                 "duplicate vote".into(),
             ));
         }
-        total += verify_vote(vs, v)?;
+        total = total.checked_add(verify_vote(vs, v)?).ok_or_else(|| {
+            MisakaError::SignatureVerificationFailed("vote stake overflow".into())
+        })?;
     }
     Ok(total)
 }
@@ -69,7 +71,9 @@ pub fn verify_dag_checkpoint_votes(
                 "duplicate dag checkpoint vote".into(),
             ));
         }
-        total += verify_dag_checkpoint_vote(vs, v)?;
+        total = total.checked_add(verify_dag_checkpoint_vote(vs, v)?).ok_or_else(|| {
+            MisakaError::SignatureVerificationFailed("dag checkpoint vote stake overflow".into())
+        })?;
     }
     Ok(total)
 }
@@ -82,12 +86,14 @@ mod tests {
     };
     use misaka_types::validator::*;
 
-    fn make_vote(kp: &ValidatorKeypair, vid: [u8; 20], slot: u64, bh: [u8; 32]) -> CommitteeVote {
+    fn make_vote(kp: &ValidatorKeypair, vid: [u8; 32], slot: u64, bh: [u8; 32]) -> CommitteeVote {
         let stub = CommitteeVote {
             slot,
             voter: vid,
             block_hash: bh,
             signature: ValidatorSignature { bytes: vec![] },
+            epoch: 0,
+            chain_id: 0,
         };
         let sig = validator_sign(&stub.signing_bytes(), &kp.secret_key).unwrap();
         CommitteeVote {
@@ -98,13 +104,13 @@ mod tests {
         }
     }
 
-    fn setup() -> (ValidatorSet, Vec<ValidatorKeypair>, Vec<[u8; 20]>) {
+    fn setup() -> (ValidatorSet, Vec<ValidatorKeypair>, Vec<[u8; 32]>) {
         let mut vs = Vec::new();
         let mut kps = Vec::new();
         let mut ids = Vec::new();
         for i in 0..4u8 {
             let kp = generate_validator_keypair();
-            let mut vid = [0u8; 20];
+            let mut vid = [0u8; 32];
             vid[0] = i;
             vs.push(ValidatorIdentity {
                 validator_id: vid,
@@ -162,7 +168,7 @@ mod tests {
 
     fn make_dag_vote(
         kp: &ValidatorKeypair,
-        vid: [u8; 20],
+        vid: [u8; 32],
         target: DagCheckpointTarget,
     ) -> DagCheckpointVote {
         let stub = DagCheckpointVote {
@@ -184,7 +190,7 @@ mod tests {
             block_hash: [0xDD; 32],
             blue_score: 42,
             utxo_root: [0xEE; 32],
-            total_key_images: 7,
+            total_spent_count: 7,
             total_applied_txs: 12,
         }
     }

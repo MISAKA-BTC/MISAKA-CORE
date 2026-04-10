@@ -1,0 +1,18 @@
+# cargo-audit ignore list
+#
+# Advisories listed here are acknowledged but not actionable right now.
+# Each entry must have a justification and a tracked migration path.
+
+[advisories]
+ignore = [
+    # bincode 1.x is unmaintained (RUSTSEC-2025-0141).
+    # Used by misaka-database and misaka-storage for RocksDB value serialization.
+    # Replacing the serializer changes the on-disk format and requires a
+    # database migration. Tracked for the v1.1 storage refactor.
+    "RUSTSEC-2025-0141",
+
+    # paste is unmaintained (RUSTSEC-2024-0436).
+    # Transitive dependency via pqcrypto-mldsa. No CVE, proc-macro only.
+    # Will resolve when upstream releases a new version.
+    "RUSTSEC-2024-0436",
+]

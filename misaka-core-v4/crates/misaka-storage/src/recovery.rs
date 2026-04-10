@@ -26,6 +26,7 @@
 //! | Corrupted CF data                 | Detected → safe shutdown + resync log |
 //! | Missing block_meta at tip height  | Detected → safe shutdown + resync log |
 
+use std::time::Instant;
 use tracing::{error, info};
 
 /// Result of startup integrity verification.
@@ -55,6 +56,7 @@ pub enum StartupCheckResult {
 /// * `StartupCheckResult::Fresh` — first run, create genesis
 pub fn verify_startup_integrity(data_dir: &std::path::Path) -> StartupCheckResult {
     let db_path = data_dir.join("chain.db");
+    let started_at = Instant::now();
 
     // Check if database exists
     if !db_path.exists() {
@@ -98,9 +100,11 @@ pub fn verify_startup_integrity(data_dir: &std::path::Path) -> StartupCheckResul
                 }
             };
             info!(
-                "Startup integrity check PASSED: height={}, state_root={}",
+                "Startup integrity check PASSED in {:?}: height={}, state_root={}, db={}",
+                started_at.elapsed(),
                 height,
-                hex::encode(&state_root[..8])
+                hex::encode(&state_root[..8]),
+                db_path.display()
             );
             StartupCheckResult::Ok { height, state_root }
         }

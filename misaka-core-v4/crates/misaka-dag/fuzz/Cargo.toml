@@ -1,0 +1,22 @@
+[package]
+name = "misaka-dag-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+misaka-dag = { path = "..", features = ["test-utils"] }
+
+[[bin]]
+name = "fuzz_base_committer"
+path = "fuzz_targets/fuzz_base_committer.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_block_verifier"
+path = "fuzz_targets/fuzz_block_verifier.rs"
+doc = false

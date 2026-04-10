@@ -14,10 +14,14 @@ sha3 = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 parking_lot = { workspace = true }
+rayon = { workspace = true }
+num_cpus = { workspace = true }
 
 [features]
 default = []
-stark-stub = ["misaka-consensus/stark-stub"]
+# smart-contracts: DELETED (Phase 25). misaka-vm crate removed.
+# VM support will be added as misaka-vm-wasm in v1.1.
+# See docs/design/VM_ROADMAP.md
 
 [lints]
 workspace = true

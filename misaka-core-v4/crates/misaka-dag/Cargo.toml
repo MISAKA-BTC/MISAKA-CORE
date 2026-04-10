@@ -9,12 +9,21 @@ description = "MISAKA-CORE v2: Privacy BlockDAG — GhostDAG consensus + LogRing
 misaka-types    = { path = "../misaka-types" }
 misaka-storage  = { path = "../misaka-storage" }
 misaka-crypto   = { path = "../misaka-crypto" }
+misaka-protocol-config = { path = "../misaka-protocol-config" }
 misaka-pqc      = { path = "../misaka-pqc", optional = true }
+rocksdb         = { version = "0.22", default-features = false, features = ["snappy"], optional = true }
 
+borsh     = { workspace = true }
 sha3      = { workspace = true }
+blake3    = { workspace = true }
+reqwest   = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 thiserror = { workspace = true }
 tracing   = { workspace = true }
+once_cell = "1"
+rayon     = { workspace = true }
+num_cpus  = { workspace = true }
 hex       = { workspace = true }
+prometheus = "0.14"
 serde     = { workspace = true }
 serde_json = { workspace = true }
 chrono    = { workspace = true }
@@ -22,14 +31,30 @@ tokio     = { workspace = true }
 rand      = { workspace = true }
 
 [features]
-default = []
-# Enable Q-DAG-CT verification (requires misaka-pqc)
-qdag-ct = ["dep:misaka-pqc"]
+default = ["rocksdb"]
+# REMOVED: qdag-ct feature — Q-DAG-CT deprecated in v1.0.
+# Enable RocksDB persistent storage (production) — DEFAULT since Phase 1 store migration.
+rocksdb = ["dep:rocksdb"]
+# JSON file store for dev/test only. MUST NOT be used in production.
+json-store-dev = []
+# Legacy anemo transport glue retained for reference only.
+anemo-legacy = []
+# Enable test utilities (MlDsa65TestSigner, TestValidatorSet, Committee::new_for_test)
+test-utils = ["dep:misaka-pqc"]
 
 [dev-dependencies]
 rand = { workspace = true }
-misaka-pqc = { path = "../misaka-pqc", features = ["stark-stub"] }
+misaka-pqc = { path = "../misaka-pqc" }
 proptest = "1"
+tempfile = "3"
+
+[dev-dependencies.criterion]
+version = "0.5"
+features = ["html_reports"]
+
+[[bench]]
+name = "consensus_bench"
+harness = false
 
 [lints]
 workspace = true

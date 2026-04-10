@@ -4,10 +4,12 @@ MISAKA testnet に初心者でも参加しやすい形で入るための配布 r
 
 ## ダウンロード
 
-- Windows x86_64: [misaka-public-node-windows-x86_64.zip](https://github.com/sasakiyuuu/misaka-test-net/releases/latest/download/misaka-public-node-windows-x86_64.zip)
-- macOS arm64: [misaka-public-node-macos-arm64.tar.gz](https://github.com/sasakiyuuu/misaka-test-net/releases/latest/download/misaka-public-node-macos-arm64.tar.gz)
-- Linux x86_64: [misaka-public-node-linux-x86_64.tar.gz](https://github.com/sasakiyuuu/misaka-test-net/releases/latest/download/misaka-public-node-linux-x86_64.tar.gz)
-- SHA256: [SHA256SUMS](https://github.com/sasakiyuuu/misaka-test-net/releases/latest/download/SHA256SUMS)
+| Platform | File |
+|---|---|
+| Windows x86_64 | `misaka-public-node-windows-x86_64.zip` |
+| macOS arm64 | `misaka-public-node-macos-arm64.tar.gz` |
+| Linux x86_64 | `misaka-public-node-linux-x86_64.tar.gz` |
+| SHA256 | `SHA256SUMS` |
 
 最新 release 一覧: https://github.com/sasakiyuuu/misaka-test-net/releases/latest
 
@@ -16,7 +18,7 @@ MISAKA testnet に初心者でも参加しやすい形で入るための配布 r
 ### Windows
 
 1. zip を展開
-2. `misaka-launcher.exe` をダブルクリック
+2. `start-public-node.bat` をダブルクリック
 
 ### macOS
 
@@ -46,7 +48,7 @@ xattr -dr com.apple.quarantine <展開したフォルダ名>
 
 ## ポート開放の考え方
 
-まず `show-network-guide.*` か `misaka-launcher doctor --profile public` を実行してください。
+まず `show-network-guide.*` を実行してください。
 
 - 参加だけなら router のポート開放は必須ではありません
 - 他ノードから見える public node にしたいなら `TCP 6691`
@@ -63,17 +65,47 @@ router の設定画面は機種ごとに違うので、port forwarding 自体を
 
 ## 含まれているもの
 
-- `misaka-node`
-- `misaka-launcher`
-- `config/public-node.toml`
-- `config/seed-node.toml`
-- `config/validator-node.toml`
-- `config/seeds.txt`
-- `config/self-host-seeds.txt`
-- `config/offline-seeds.txt`
+```
+misaka-public-node-<platform>/
+├── misaka-node(.exe)             # ノードバイナリ
+├── start-public-node.*           # Public node 起動
+├── start-seed-node.*             # Seed node 起動
+├── start-self-hosted-testnet.*   # ローカル 3 validator テスト
+├── show-network-guide.*          # ネットワーク診断
+├── README.md
+└── config/
+    ├── public-node.toml
+    ├── seed-node.toml
+    ├── validator-node.toml
+    ├── seeds.txt
+    ├── self-host-seeds.txt
+    └── offline-seeds.txt
+```
+
+## Docker
+
+```bash
+cd misaka-core-v4/docker
+docker compose up -d
+```
+
+## ビルド (ソースから)
+
+```bash
+cd misaka-core-v4
+cargo build --release -p misaka-node --features dag,testnet
+```
+
+## 技術仕様
+
+- **署名**: ML-DSA-65 (FIPS 204, Post-Quantum)
+- **鍵交換**: ML-KEM-768 (FIPS 203, Post-Quantum)
+- **コンセンサス**: Narwhal DAG-based BFT
+- **ブロック時間**: ~2 秒 (fast lane)
+- **Chain ID**: 2 (testnet)
 
 ## 補足
 
-- 一般参加者向けの入口は launcher です
-- Docker 向け設定と source は [misaka-core-v4](./misaka-core-v4) に入っています
+- 一般参加者向けの入口は `start-public-node.*` です
+- Docker 向け設定と source は `misaka-core-v4` に入っています
 - クロスプラットフォーム build は GitHub Actions で回します

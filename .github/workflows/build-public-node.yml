@@ -6,6 +6,11 @@ on:
     paths:
       - ".github/workflows/build-public-node.yml"
       - "misaka-core-v4/**"
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -13,10 +18,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: ubuntu-latest
+          - runner: ubuntu-22.04
             platform: linux
             arch: x86_64
-          - runner: windows-latest
+          - runner: windows-2022
             platform: windows
             arch: x86_64
           - runner: macos-14
@@ -24,6 +29,7 @@ jobs:
             arch: arm64
 
     runs-on: ${{ matrix.runner }}
+    name: Build (${{ matrix.platform }}-${{ matrix.arch }})
 
     defaults:
       run:
@@ -58,22 +64,51 @@ jobs:
           choco install llvm -y --no-progress
           echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      - name: Build release binaries
-        run: cargo build --release -p misaka-node -p misaka-launcher
+      - name: Build release binary
+        run: cargo build --release -p misaka-node --features dag,testnet
 
       - name: Package public-node distribution
         shell: bash
         run: |
-          python scripts/package_public_node.py \
+          python3 scripts/package_public_node.py \
             --workspace-root . \
             --binary-dir target/release \
             --platform "${{ matrix.platform }}" \
             --arch "${{ matrix.arch }}" \
             --output-dir dist
 
-      - name: Upload packaged artifact
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: misaka-public-node-${{ matrix.platform }}-${{ matrix.arch }}
           path: |
-            misaka-core-v4/dist/*
+            misaka-core-v4/dist/*.tar.gz
+            misaka-core-v4/dist/*.zip
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Generate SHA256 checksums
+        run: |
+          cd artifacts
+          find . -name '*.tar.gz' -o -name '*.zip' | sort | while read f; do
+            sha256sum "$f"
+          done > ../SHA256SUMS
+          cat ../SHA256SUMS
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            artifacts/**/*.tar.gz
+            artifacts/**/*.zip
+            SHA256SUMS

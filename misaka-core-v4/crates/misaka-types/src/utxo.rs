@@ -1,17 +1,20 @@
-//! UTXO Transaction Model — privacy-first PoS.
+//! UTXO Transaction Model — transparent PoS.
 //!
-//! - Sender anonymity: ring signatures (LRS-v1 or ChipmunkRing-v1)
-//! - Receiver anonymity: ML-KEM-768 stealth outputs (v1 or v2)
-//! - Amount: PUBLIC (no confidential transactions)
-//! - Key images: double-spend prevention
+//! Phase 2c-B: privacy layer fully removed. All transfers are transparent
+//! with ML-DSA-65 direct signatures.
 
+use borsh::{BorshDeserialize, BorshSerialize};
 use crate::error::MisakaError;
 use crate::mcs1;
-use crate::stealth::PqStealthData;
+// Phase 2c-B: privacy imports removed.
 use sha3::{Digest as Sha3Digest, Sha3_256};
 
 /// Reference to a previous output (UTXO pointer).
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash,
+    serde::Serialize, serde::Deserialize,
+    BorshSerialize, BorshDeserialize,
+)]
 pub struct OutputRef {
     pub tx_hash: [u8; 32],
     pub output_index: u32,
@@ -24,33 +27,28 @@ impl OutputRef {
     }
 }
 
-/// A ring-signed input: spends one real UTXO hidden among decoys.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct RingInput {
-    /// Ring member references (includes the real spend + decoys).
-    pub ring_members: Vec<OutputRef>,
-    /// Ring signature bytes (scheme-dependent).
-    pub ring_signature: Vec<u8>,
-    /// Key image for double-spend detection (32 bytes, deterministic from sk).
-    pub key_image: [u8; 32],
-    /// Key image correctness proof bytes (Σ-protocol). REQUIRED.
-    pub ki_proof: Vec<u8>,
+/// Transaction input — spends a UTXO with ML-DSA-65 signature.
+///
+/// Phase 2c-B: ring fields deleted.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, BorshSerialize, BorshDeserialize)]
+pub struct TxInput {
+    /// UTXO references being spent.
+    pub utxo_refs: Vec<OutputRef>,
+    /// ML-DSA-65 signature bytes (3309 bytes).
+    pub proof: Vec<u8>,
 }
 
-/// Transaction output with public amount and optional stealth data.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+/// Transaction output — amount + recipient address hash.
+///
+/// Phase 2c-B: privacy fields deleted. Uses `address` directly.
+/// Phase 3 will migrate to P2PKH (script_pubkey_hash: [u8; 32]).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct TxOutput {
     pub amount: u64,
-    /// One-time address.
-    /// v4+ (Q-DAG-CT): full 32 bytes for PQ collision resistance.
-    /// v3 and below: upper 12 bytes are zero-padded on deserialization
-    /// from the legacy 20-byte wire format.
-    pub one_time_address: [u8; 32],
-    pub pq_stealth: Option<PqStealthData>,
-    /// Spending public key (lattice polynomial, serialized).
-    /// REQUIRED for new outputs to be spendable in future transactions.
-    /// Ring member resolution uses this to verify ring signatures.
-    /// If None, the output cannot be used as a ring member (unspendable).
+    /// Recipient address (32 bytes). Phase 3 replaces with script_pubkey_hash.
+    #[serde(default)]
+    pub address: [u8; 32],
+    /// Spending public key (ML-DSA-65, 1952 bytes). REQUIRED for spendability.
     #[serde(default)]
     pub spending_pubkey: Option<Vec<u8>>,
 }
@@ -59,232 +57,183 @@ pub struct TxOutput {
 ///
 /// Replaces the implicit "inputs empty && fee == 0" heuristic for Coinbase
 /// detection, eliminating a class of potential exploits.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TxType {
-    /// Standard value transfer with ring-signed inputs.
-    Transfer,
-    /// Block reward transaction (no inputs, miner/validator receives reward).
-    Coinbase,
+    /// System emission / block reward transaction (no inputs, validator receives reward).
+    /// Previously named "Coinbase" — renamed in Phase 3 (§4.3).
+    #[default]
+    SystemEmission,
     /// Testnet faucet drip (no inputs, rate-limited).
     Faucet,
-}
-
-impl Default for TxType {
-    fn default() -> Self {
-        TxType::Transfer
-    }
+    /// Stake deposit: locks MISAKA into the validator set.
+    /// Input: UTXOs to stake. Output[0]: locked stake receipt.
+    StakeDeposit,
+    /// Stake withdrawal: unlocks MISAKA after unbonding period.
+    /// Input: stake receipt UTXO. Output[0]: unlocked MISAKA.
+    StakeWithdraw,
+    /// Slash evidence: submits proof of validator misbehavior.
+    /// Input: none (evidence is in `extra` field). Output: slash reward to submitter.
+    SlashEvidence,
+    /// Public (transparent) transfer — sender is identifiable, no ring anonymity.
+    /// anonymity_set_size=1 (real UTXO only), ML-DSA direct signature instead of ring sig.
+    /// Phase 2c-B: transparent only. ML-DSA-65 direct signature.
+    TransparentTransfer,
 }
 
 impl TxType {
     /// Stable binary tag used by signing digests and wire encoding.
     pub fn to_byte(self) -> u8 {
         match self {
-            TxType::Transfer => 0,
-            TxType::Coinbase => 1,
+            // Phase 2c-B: Transfer (0) deleted
+            TxType::SystemEmission => 1,
             TxType::Faucet => 2,
+            TxType::StakeDeposit => 3,
+            TxType::StakeWithdraw => 4,
+            TxType::SlashEvidence => 5,
+            TxType::TransparentTransfer => 6,
         }
     }
 
     pub fn from_byte(v: u8) -> Option<Self> {
         match v {
-            0 => Some(TxType::Transfer),
-            1 => Some(TxType::Coinbase),
+            // Phase 2c-B: Transfer (0) deleted
+            1 => Some(TxType::SystemEmission),
             2 => Some(TxType::Faucet),
+            3 => Some(TxType::StakeDeposit),
+            4 => Some(TxType::StakeWithdraw),
+            5 => Some(TxType::SlashEvidence),
+            6 => Some(TxType::TransparentTransfer),
             _ => None,
         }
     }
+
+    /// Whether this tx type requires stake-related validation.
+    pub fn is_staking(&self) -> bool {
+        matches!(self, TxType::StakeDeposit | TxType::StakeWithdraw)
+    }
+
+    /// Whether this is a transparent (public, non-anonymous) transfer.
+    pub fn is_transparent(&self) -> bool {
+        matches!(self, TxType::TransparentTransfer)
+    }
 }
 
-/// Optional transaction-level zero-knowledge proof carrier.
-///
-/// This is intentionally opaque at the transaction-model layer. The actual
-/// proof format is selected by higher-level code (for example, the current
-/// STARK stub on the experimental ZK track).
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct ZeroKnowledgeProofCarrier {
-    /// Backend tag aligned with privacy backend descriptors.
-    pub backend_tag: u8,
-    /// Opaque proof bytes.
-    pub proof_bytes: Vec<u8>,
+impl BorshSerialize for TxType {
+    fn serialize<W: std::io::Write>(&self, writer: &mut W) -> std::io::Result<()> {
+        writer.write_all(&[self.to_byte()])
+    }
 }
+
+impl BorshDeserialize for TxType {
+    fn deserialize_reader<R: std::io::Read>(reader: &mut R) -> std::io::Result<Self> {
+        let mut buf = [0u8; 1];
+        reader.read_exact(&mut buf)?;
+        Self::from_byte(buf[0]).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("unknown TxType tag: {}", buf[0]),
+            )
+        })
+    }
+}
+
+// Phase 2c-B: ZK proof carrier deleted.
 
 /// Complete UTXO transaction.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+///
+/// Phase 2c-B: privacy fields deleted.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct UtxoTransaction {
-    /// Protocol version (0x01 = v1/LRS, 0x02 = v2/ChipmunkRing).
+    /// Protocol version.
     pub version: u8,
-    /// Ring signature scheme tag (0x01=LRS, 0x02=Chipmunk). Defaults to version for v1 compat.
-    #[serde(default = "default_ring_scheme")]
-    pub ring_scheme: u8,
-    /// Transaction type — Transfer, Coinbase, or Faucet.
+    /// Transaction type.
     #[serde(default)]
     pub tx_type: TxType,
-    /// Ring-signed inputs.
-    pub inputs: Vec<RingInput>,
-    /// Outputs with public amounts.
+    /// Inputs (UTXO references + ML-DSA-65 signatures).
+    pub inputs: Vec<TxInput>,
+    /// Outputs.
     pub outputs: Vec<TxOutput>,
-    /// Transaction fee (public).
+    /// Transaction fee.
     pub fee: u64,
     /// Extra data (memo, etc.).
     pub extra: Vec<u8>,
-    /// Optional transaction-level zero-knowledge proof carrier.
-    ///
-    /// The current production path still uses ring signatures. This field
-    /// exists so the experimental ZK track can carry a proof without
-    /// overloading `extra` or changing the ring-signature semantics.
+    /// §4.2 step 4: Block height after which this TX is invalid (0 = no expiry).
+    /// Hard fork field — changes borsh wire format.
     #[serde(default)]
-    pub zk_proof: Option<ZeroKnowledgeProofCarrier>,
+    pub expiry: u64,
 }
 
-fn default_ring_scheme() -> u8 {
-    0x10
-} // UnifiedZKP-v1 is the system default (v4)
+// Phase 2c-B D4b: privacy constants deleted (version constants, anonymity set).
 
 // ── Protocol Versions ──
 
-/// Legacy LRS version.
-pub const UTXO_TX_VERSION: u8 = 0x01;
-/// ChipmunkRing version.
-pub const UTXO_TX_VERSION_V2: u8 = 0x02;
-/// LogRing version (system default).
-pub const UTXO_TX_VERSION_V3: u8 = 0x03;
-/// Q-DAG-CT version (confidential transactions with unified ZKP).
-pub const UTXO_TX_VERSION_V4: u8 = 0x10;
+/// Current version.
+pub const UTXO_TX_VERSION: u8 = 0x02;
 
-/// Ring scheme tags (match RingSchemeVersion in misaka-pqc).
-pub const RING_SCHEME_LRS: u8 = 0x01;
-pub const RING_SCHEME_CHIPMUNK: u8 = 0x02;
-/// LogRing O(log n) — system default.
-pub const RING_SCHEME_LOGRING: u8 = 0x03;
-
-/// Minimum ring size (all schemes).
-pub const MIN_RING_SIZE: usize = 4;
-/// Maximum ring size (v1/LRS: 16, v2/Chipmunk: 32, v3/LogRing: 1024).
-pub const MAX_RING_SIZE_V1: usize = 16;
-pub const MAX_RING_SIZE_V2: usize = 32;
-pub const MAX_RING_SIZE_V3: usize = 1024;
-/// Backwards compat alias (largest supported).
-pub const MAX_RING_SIZE: usize = MAX_RING_SIZE_V3;
 /// Maximum extra data length.
 pub const MAX_EXTRA_LEN: usize = 1024;
 /// Maximum inputs per transaction.
 pub const MAX_INPUTS: usize = 16;
 /// Maximum outputs per transaction.
 pub const MAX_OUTPUTS: usize = 64;
-/// Maximum ring signature bytes per input.
-pub const MAX_RING_SIG_SIZE: usize = 65536; // 64 KiB
-/// Maximum KI proof bytes per input.
-pub const MAX_KI_PROOF_SIZE: usize = 4096;
-/// Maximum optional ZK proof bytes per transaction.
-pub const MAX_ZK_PROOF_SIZE: usize = 1_048_576; // 1 MiB
+/// Maximum ML-DSA-65 signature bytes per input.
+pub const MAX_PROOF_SIZE: usize = 3309;
 
 impl UtxoTransaction {
-    /// Is this a v2 (ChipmunkRing) transaction?
-    pub fn is_v2(&self) -> bool {
-        self.version == UTXO_TX_VERSION_V2 || self.ring_scheme == RING_SCHEME_CHIPMUNK
+    /// Is this a transparent (public) transfer?
+    pub fn is_transparent(&self) -> bool {
+        self.tx_type.is_transparent()
     }
 
-    /// Is this a v3 (LogRing) transaction?
-    pub fn is_logring(&self) -> bool {
-        self.version == UTXO_TX_VERSION_V3 || self.ring_scheme == RING_SCHEME_LOGRING
-    }
-
-    /// Is this a v4 (Q-DAG-CT / UnifiedZKP) transaction?
-    pub fn is_qdag(&self) -> bool {
-        self.version == UTXO_TX_VERSION_V4
-    }
-
-    /// Max ring size for this TX's scheme.
-    pub fn max_ring_size(&self) -> usize {
-        if self.is_logring() {
-            MAX_RING_SIZE_V3
-        } else if self.is_v2() {
-            MAX_RING_SIZE_V2
-        } else {
-            MAX_RING_SIZE_V1
-        }
-    }
-
-    /// Compute the canonical signing digest.
-    /// Includes all consensus-relevant fields EXCEPT signatures.
-    pub fn signing_digest(&self) -> [u8; 32] {
-        let mut buf = Vec::with_capacity(256);
-        mcs1::write_u8(&mut buf, self.version);
-        mcs1::write_u8(&mut buf, self.ring_scheme);
-        mcs1::write_u8(&mut buf, self.tx_type.to_byte());
-
-        // Inputs: ring members + key images (not signatures)
-        mcs1::write_u32(&mut buf, self.inputs.len() as u32);
-        for inp in &self.inputs {
-            mcs1::write_u32(&mut buf, inp.ring_members.len() as u32);
-            for member in &inp.ring_members {
-                member.mcs1_encode(&mut buf);
-            }
-            mcs1::write_fixed(&mut buf, &inp.key_image);
-        }
-
-        // Outputs
-        mcs1::write_u32(&mut buf, self.outputs.len() as u32);
-        for out in &self.outputs {
-            mcs1::write_u64(&mut buf, out.amount);
-            // v4+ (Q-DAG-CT): full 32-byte one_time_address in digest
-            // v1/v2/v3: legacy 20-byte one_time_address (backward compat)
-            if self.version >= UTXO_TX_VERSION_V4 {
-                mcs1::write_fixed(&mut buf, &out.one_time_address);
-            } else {
-                mcs1::write_fixed(&mut buf, &out.one_time_address[..20]);
-            }
-            match &out.pq_stealth {
-                Some(sd) => {
-                    mcs1::write_u8(&mut buf, 1);
-                    sd.mcs1_encode(&mut buf);
-                }
-                None => {
-                    mcs1::write_u8(&mut buf, 0);
-                }
-            }
-            match &out.spending_pubkey {
-                Some(pk) => {
-                    mcs1::write_u8(&mut buf, 1);
-                    mcs1::write_bytes(&mut buf, pk);
-                }
-                None => {
-                    mcs1::write_u8(&mut buf, 0);
-                }
-            }
-        }
-
-        // Fee + extra
-        mcs1::write_u64(&mut buf, self.fee);
-        mcs1::write_bytes(&mut buf, &self.extra);
-
+    // Phase 2c-B D3: signing_digest() and signing_digest_with_chain() DELETED.
+    // Signature verification now uses TxSignablePayload + IntentMessage.
+    /// Compute content hash for tx_hash() — proof-independent.
+    ///
+    /// Uses TxSignablePayload (which excludes proof/signature bytes) so that
+    /// tx_hash is stable regardless of whether proof is filled or empty.
+    fn tx_content_hash_legacy(&self) -> [u8; 32] {
+        use crate::tx_signable::TxSignablePayload;
         let mut h = Sha3_256::new();
-        h.update(&buf);
+        h.update(b"MISAKA-TX-HASH:v2:");
+        let payload = TxSignablePayload::from(self);
+        h.update(&borsh::to_vec(&payload).expect("borsh encode signable payload"));
         h.finalize().into()
     }
 
     /// Structural validation (no crypto checks).
+    ///
+    /// Phase 2c-B: simplified after ring layer deletion.
     pub fn validate_structure(&self) -> Result<(), MisakaError> {
-        // Accept v1, v2, v3 (LogRing), and v4 (Q-DAG-CT).
-        // v4 transactions are normally validated via QdagTransaction::validate_structure()
-        // in misaka-pqc, but we accept them here to avoid rejecting on deserialization.
-        if self.version != UTXO_TX_VERSION
-            && self.version != UTXO_TX_VERSION_V2
-            && self.version != UTXO_TX_VERSION_V3
-            && self.version != UTXO_TX_VERSION_V4
-        {
+        if self.version != UTXO_TX_VERSION {
             return Err(MisakaError::DeserializationError(format!(
                 "unsupported tx version: 0x{:02x}",
                 self.version
             )));
         }
         match self.tx_type {
-            TxType::Transfer => {
+            TxType::TransparentTransfer => {
                 if self.inputs.is_empty() {
                     return Err(MisakaError::EmptyInputs);
                 }
+                // Transparent transfers MUST have anonymity_set_size=1 (no decoys).
+                for (i, inp) in self.inputs.iter().enumerate() {
+                    if inp.utxo_refs.len() != 1 {
+                        return Err(MisakaError::DeserializationError(format!(
+                            "input[{i}]: TransparentTransfer requires anonymity_set_size=1, got {}",
+                            inp.utxo_refs.len()
+                        )));
+                    }
+                }
             }
-            TxType::Coinbase | TxType::Faucet => {
+            TxType::StakeDeposit | TxType::StakeWithdraw => {
+                if self.inputs.is_empty() {
+                    return Err(MisakaError::DeserializationError(format!(
+                        "{:?} tx must have at least one input",
+                        self.tx_type
+                    )));
+                }
+            }
+            TxType::SystemEmission | TxType::Faucet => {
                 if !self.inputs.is_empty() {
                     return Err(MisakaError::DeserializationError(format!(
                         "{:?} tx must have no inputs",
@@ -296,6 +245,23 @@ impl UtxoTransaction {
                         "{:?} tx must have zero fee",
                         self.tx_type
                     )));
+                }
+            }
+            TxType::SlashEvidence => {
+                if !self.inputs.is_empty() {
+                    return Err(MisakaError::DeserializationError(
+                        "SlashEvidence tx must have no inputs".into(),
+                    ));
+                }
+                if self.fee != 0 {
+                    return Err(MisakaError::DeserializationError(
+                        "SlashEvidence tx must have zero fee".into(),
+                    ));
+                }
+                if self.extra.is_empty() {
+                    return Err(MisakaError::DeserializationError(
+                        "SlashEvidence tx must carry evidence in extra".into(),
+                    ));
                 }
             }
         }
@@ -317,51 +283,21 @@ impl UtxoTransaction {
                 max: MAX_OUTPUTS,
             });
         }
-        let max_ring = self.max_ring_size();
+        // Per-input validation
         for (i, inp) in self.inputs.iter().enumerate() {
-            if inp.ring_members.len() < MIN_RING_SIZE {
+            if inp.utxo_refs.is_empty() {
                 return Err(MisakaError::DeserializationError(format!(
-                    "input[{i}]: ring size {} < minimum {MIN_RING_SIZE}",
-                    inp.ring_members.len()
+                    "input[{i}]: must have at least 1 UTXO reference"
                 )));
             }
-            if inp.ring_members.len() > max_ring {
-                return Err(MisakaError::DeserializationError(format!(
-                    "input[{i}]: ring size {} > maximum {max_ring}",
-                    inp.ring_members.len()
-                )));
-            }
-            // ── Bounded: ring signature size ──
-            if inp.ring_signature.len() > MAX_RING_SIG_SIZE {
+            if inp.proof.len() > MAX_PROOF_SIZE {
                 return Err(MisakaError::FieldTooLarge {
-                    field: format!("input[{i}].ring_signature"),
-                    size: inp.ring_signature.len(),
-                    max: MAX_RING_SIG_SIZE,
-                });
-            }
-            // ── Bounded: KI proof size ──
-            if inp.ki_proof.len() > MAX_KI_PROOF_SIZE {
-                return Err(MisakaError::FieldTooLarge {
-                    field: format!("input[{i}].ki_proof"),
-                    size: inp.ki_proof.len(),
-                    max: MAX_KI_PROOF_SIZE,
+                    field: format!("input[{i}].proof"),
+                    size: inp.proof.len(),
+                    max: MAX_PROOF_SIZE,
                 });
             }
         }
-        // Key image uniqueness within tx
-        let mut images = std::collections::HashSet::new();
-        for inp in &self.inputs {
-            if !images.insert(inp.key_image) {
-                return Err(MisakaError::DuplicateInput(hex::encode(inp.key_image)));
-            }
-        }
-        // KI proof handling by scheme:
-        // - LRS: OPTIONAL. Ring sig provides key_image transcript binding.
-        //        Separate KI proof adds algebraic strong binding but is not required.
-        // - LogRing: NOT NEEDED. Link tag is integrated into the signature.
-        // - Chipmunk: REQUIRED. No built-in key_image binding.
-        //
-        // When present, KI proofs are verified at mempool/block_validation level.
         if self.extra.len() > MAX_EXTRA_LEN {
             return Err(MisakaError::FieldTooLarge {
                 field: "extra".into(),
@@ -369,25 +305,7 @@ impl UtxoTransaction {
                 max: MAX_EXTRA_LEN,
             });
         }
-        if let Some(proof) = &self.zk_proof {
-            if proof.backend_tag == 0 {
-                return Err(MisakaError::DeserializationError(
-                    "zk proof carrier backend_tag must be non-zero".into(),
-                ));
-            }
-            if proof.proof_bytes.is_empty() {
-                return Err(MisakaError::DeserializationError(
-                    "zk proof carrier must not be empty".into(),
-                ));
-            }
-            if proof.proof_bytes.len() > MAX_ZK_PROOF_SIZE {
-                return Err(MisakaError::FieldTooLarge {
-                    field: "zk_proof.proof_bytes".into(),
-                    size: proof.proof_bytes.len(),
-                    max: MAX_ZK_PROOF_SIZE,
-                });
-            }
-        }
+        // Phase 2c-B: ZK proof validation deleted
         Ok(())
     }
 
@@ -396,29 +314,10 @@ impl UtxoTransaction {
     /// This is the stable binding hash for statement/proof generation on the
     /// explicit zero-knowledge path, where the proof bytes themselves are not
     /// allowed to perturb the statement being proven.
-    pub fn tx_hash_without_zk_proof(&self) -> [u8; 32] {
-        let mut h = Sha3_256::new();
-        h.update(&self.signing_digest());
-        for inp in &self.inputs {
-            h.update(&inp.ring_signature);
-        }
-        h.finalize().into()
-    }
-
-    /// Compute tx_hash (full transaction including signatures and optional ZK proof).
+    /// Compute tx_hash (canonical transaction identifier).
     pub fn tx_hash(&self) -> [u8; 32] {
-        let mut h = Sha3_256::new();
-        h.update(&self.signing_digest());
-        for inp in &self.inputs {
-            h.update(&inp.ring_signature);
-        }
-        if let Some(proof) = &self.zk_proof {
-            h.update([0x5Au8]);
-            h.update([proof.backend_tag]);
-            h.update((proof.proof_bytes.len() as u32).to_le_bytes());
-            h.update(&proof.proof_bytes);
-        }
-        h.finalize().into()
+        // Phase 2c-B: simplified — no more ZK proof carrier.
+        self.tx_content_hash_legacy()
     }
 
     /// Total output amount.
@@ -433,249 +332,60 @@ impl UtxoTransaction {
 mod tests {
     use super::*;
 
-    fn make_utxo_tx_v1() -> UtxoTransaction {
+    // Phase 2c-B D4b: test fixtures updated for new field set.
+
+    fn make_utxo_tx() -> UtxoTransaction {
         UtxoTransaction {
             version: UTXO_TX_VERSION,
-            ring_scheme: RING_SCHEME_LRS,
-            tx_type: TxType::Transfer,
-            inputs: vec![RingInput {
-                ring_members: vec![
-                    OutputRef {
-                        tx_hash: [1; 32],
-                        output_index: 0,
-                    },
-                    OutputRef {
-                        tx_hash: [2; 32],
-                        output_index: 0,
-                    },
-                    OutputRef {
-                        tx_hash: [3; 32],
-                        output_index: 0,
-                    },
-                    OutputRef {
-                        tx_hash: [4; 32],
-                        output_index: 0,
-                    },
-                ],
-                ring_signature: vec![0xAA; 128],
-                key_image: [0xBB; 32],
-                ki_proof: vec![0xDD; 64],
+            tx_type: TxType::TransparentTransfer,
+            inputs: vec![TxInput {
+                utxo_refs: vec![OutputRef {
+                    tx_hash: [1; 32],
+                    output_index: 0,
+                }],
+                proof: vec![0xAA; 128],
             }],
             outputs: vec![TxOutput {
                 amount: 9900,
-                one_time_address: [0xCC; 32],
-                pq_stealth: None,
+                address: [0xCC; 32],
                 spending_pubkey: None,
             }],
             fee: 100,
             extra: vec![],
-            zk_proof: None,
-        }
-    }
-
-    fn make_utxo_tx_v2() -> UtxoTransaction {
-        UtxoTransaction {
-            version: UTXO_TX_VERSION_V2,
-            ring_scheme: RING_SCHEME_CHIPMUNK,
-            tx_type: TxType::Transfer,
-            inputs: vec![RingInput {
-                ring_members: (0..8)
-                    .map(|i| OutputRef {
-                        tx_hash: [i; 32],
-                        output_index: 0,
-                    })
-                    .collect(),
-                ring_signature: vec![0xAA; 256],
-                key_image: [0xBB; 32],
-                ki_proof: vec![0xDD; 64],
-            }],
-            outputs: vec![TxOutput {
-                amount: 9900,
-                one_time_address: [0xCC; 32],
-                pq_stealth: None,
-                spending_pubkey: None,
-            }],
-            fee: 100,
-            extra: vec![],
-            zk_proof: None,
+            expiry: 0,
         }
     }
 
     #[test]
-    fn test_v1_structure_ok() {
-        make_utxo_tx_v1().validate_structure().unwrap();
+    fn test_structure_ok() {
+        make_utxo_tx().validate_structure().unwrap();
     }
 
     #[test]
-    fn test_v2_structure_ok() {
-        make_utxo_tx_v2().validate_structure().unwrap();
+    fn test_tx_hash_excludes_proof() {
+        let mut tx1 = make_utxo_tx();
+        let mut tx2 = make_utxo_tx();
+        tx1.inputs[0].proof = vec![0x11; 128];
+        tx2.inputs[0].proof = vec![0x22; 128];
+        // tx_hash uses TxSignablePayload which excludes proof,
+        // so different proofs on otherwise-identical txs produce the same hash.
+        assert_eq!(tx1.tx_hash(), tx2.tx_hash());
     }
 
     #[test]
-    fn test_v2_allows_ring_32() {
-        let mut tx = make_utxo_tx_v2();
-        tx.inputs[0].ring_members = (0..32)
-            .map(|i| OutputRef {
-                tx_hash: [i; 32],
-                output_index: 0,
-            })
-            .collect();
-        tx.validate_structure().unwrap();
-    }
-
-    #[test]
-    fn test_v1_rejects_ring_17() {
-        let mut tx = make_utxo_tx_v1();
-        tx.inputs[0].ring_members = (0..17)
-            .map(|i| OutputRef {
-                tx_hash: [i; 32],
-                output_index: 0,
-            })
-            .collect();
-        assert!(tx.validate_structure().is_err());
-    }
-
-    #[test]
-    fn test_signing_digest_deterministic() {
-        let tx = make_utxo_tx_v1();
-        assert_eq!(tx.signing_digest(), tx.signing_digest());
-    }
-
-    #[test]
-    fn test_signing_digest_includes_scheme() {
-        let mut tx1 = make_utxo_tx_v1();
-        let mut tx2 = make_utxo_tx_v1();
-        tx2.ring_scheme = RING_SCHEME_CHIPMUNK;
-        // Different scheme → different digest
-        assert_ne!(tx1.signing_digest(), tx2.signing_digest());
-    }
-
-    #[test]
-    fn test_signing_digest_includes_tx_type() {
-        let tx1 = make_utxo_tx_v1();
-        let mut tx2 = make_utxo_tx_v1();
-        tx2.tx_type = TxType::Faucet;
-        assert_ne!(tx1.signing_digest(), tx2.signing_digest());
-        assert_ne!(tx1.tx_hash(), tx2.tx_hash());
-    }
-
-    #[test]
-    fn test_signing_digest_includes_spending_pubkey() {
-        let tx1 = make_utxo_tx_v1();
-        let mut tx2 = make_utxo_tx_v1();
-        tx2.outputs[0].spending_pubkey = Some(vec![0x42; 48]);
-        assert_ne!(tx1.signing_digest(), tx2.signing_digest());
-        assert_ne!(tx1.tx_hash(), tx2.tx_hash());
-    }
-
-    #[test]
-    fn test_signing_digest_excludes_sig() {
-        let mut tx1 = make_utxo_tx_v1();
-        let mut tx2 = make_utxo_tx_v1();
-        tx1.inputs[0].ring_signature = vec![0x11; 128];
-        tx2.inputs[0].ring_signature = vec![0x22; 128];
-        assert_eq!(tx1.signing_digest(), tx2.signing_digest());
-    }
-
-    #[test]
-    fn test_tx_hash_includes_sig() {
-        let mut tx1 = make_utxo_tx_v1();
-        let mut tx2 = make_utxo_tx_v1();
-        tx1.inputs[0].ring_signature = vec![0x11; 128];
-        tx2.inputs[0].ring_signature = vec![0x22; 128];
-        assert_ne!(tx1.tx_hash(), tx2.tx_hash());
-    }
-
-    #[test]
-    fn test_signing_digest_excludes_zk_proof() {
-        let mut tx1 = make_utxo_tx_v1();
-        let mut tx2 = make_utxo_tx_v1();
-        tx1.zk_proof = Some(ZeroKnowledgeProofCarrier {
-            backend_tag: 0xF1,
-            proof_bytes: vec![0x11; 32],
-        });
-        tx2.zk_proof = Some(ZeroKnowledgeProofCarrier {
-            backend_tag: 0xF1,
-            proof_bytes: vec![0x22; 32],
-        });
-        assert_eq!(tx1.signing_digest(), tx2.signing_digest());
-    }
-
-    #[test]
-    fn test_tx_hash_includes_zk_proof() {
-        let mut tx1 = make_utxo_tx_v1();
-        let mut tx2 = make_utxo_tx_v1();
-        tx1.zk_proof = Some(ZeroKnowledgeProofCarrier {
-            backend_tag: 0xF1,
-            proof_bytes: vec![0x11; 32],
-        });
-        tx2.zk_proof = Some(ZeroKnowledgeProofCarrier {
-            backend_tag: 0xF1,
-            proof_bytes: vec![0x22; 32],
-        });
-        assert_ne!(tx1.tx_hash(), tx2.tx_hash());
-    }
-
-    #[test]
-    fn test_tx_hash_without_zk_proof_ignores_zk_carrier() {
-        let mut tx1 = make_utxo_tx_v1();
-        let mut tx2 = make_utxo_tx_v1();
-        tx1.zk_proof = Some(ZeroKnowledgeProofCarrier {
-            backend_tag: 0xF1,
-            proof_bytes: vec![0x11; 32],
-        });
-        tx2.zk_proof = Some(ZeroKnowledgeProofCarrier {
-            backend_tag: 0xF1,
-            proof_bytes: vec![0x22; 32],
-        });
-        assert_eq!(
-            tx1.tx_hash_without_zk_proof(),
-            tx2.tx_hash_without_zk_proof()
-        );
-    }
-
-    #[test]
-    fn test_is_v2() {
-        assert!(!make_utxo_tx_v1().is_v2());
-        assert!(make_utxo_tx_v2().is_v2());
-    }
-
-    #[test]
-    fn test_validate_duplicate_key_image() {
-        let mut tx = make_utxo_tx_v1();
-        tx.inputs.push(RingInput {
-            ring_members: tx.inputs[0].ring_members.clone(),
-            ring_signature: vec![0xDD; 128],
-            key_image: [0xBB; 32],
-            ki_proof: vec![0xEE; 64],
-        });
-        assert!(tx.validate_structure().is_err());
-    }
-
-    #[test]
-    fn test_default_ring_scheme() {
-        // Deserializing without ring_scheme field → defaults to LogRing (0x03)
-        let json = r#"{"version":1,"inputs":[],"outputs":[],"fee":0,"extra":[]}"#;
-        let tx: UtxoTransaction = serde_json::from_str(json).unwrap();
-        assert_eq!(tx.ring_scheme, RING_SCHEME_LOGRING);
-    }
-
-    #[test]
-    fn test_transfer_requires_inputs() {
+    fn test_transparent_requires_inputs() {
         let tx = UtxoTransaction {
-            version: UTXO_TX_VERSION_V3,
-            ring_scheme: RING_SCHEME_LOGRING,
-            tx_type: TxType::Transfer,
+            version: UTXO_TX_VERSION,
+            tx_type: TxType::TransparentTransfer,
             inputs: vec![],
             outputs: vec![TxOutput {
                 amount: 1,
-                one_time_address: [0x11; 32],
-                pq_stealth: None,
+                address: [0x11; 32],
                 spending_pubkey: None,
             }],
             fee: 0,
             extra: vec![],
-            zk_proof: None,
+            expiry: 0,
         };
         assert!(tx.validate_structure().is_err());
     }
@@ -683,30 +393,63 @@ mod tests {
     #[test]
     fn test_faucet_rejects_non_zero_fee() {
         let tx = UtxoTransaction {
-            version: UTXO_TX_VERSION_V3,
-            ring_scheme: RING_SCHEME_LOGRING,
+            version: UTXO_TX_VERSION,
             tx_type: TxType::Faucet,
             inputs: vec![],
             outputs: vec![TxOutput {
                 amount: 1,
-                one_time_address: [0x11; 32],
-                pq_stealth: None,
+                address: [0x11; 32],
                 spending_pubkey: None,
             }],
             fee: 1,
             extra: vec![],
-            zk_proof: None,
+            expiry: 0,
         };
         assert!(tx.validate_structure().is_err());
     }
 
     #[test]
-    fn test_validate_rejects_empty_zk_proof() {
-        let mut tx = make_utxo_tx_v1();
-        tx.zk_proof = Some(ZeroKnowledgeProofCarrier {
-            backend_tag: 0xF1,
-            proof_bytes: vec![],
-        });
+    fn test_stake_deposit_requires_inputs() {
+        let tx = UtxoTransaction {
+            version: UTXO_TX_VERSION,
+            tx_type: TxType::StakeDeposit,
+            inputs: vec![],
+            outputs: vec![TxOutput {
+                amount: 1,
+                address: [0x11; 32],
+                spending_pubkey: Some(vec![0x22; 32]),
+            }],
+            fee: 0,
+            extra: vec![],
+            expiry: 0,
+        };
         assert!(tx.validate_structure().is_err());
+    }
+
+    #[test]
+    fn test_coinbase_rejects_inputs() {
+        let tx = UtxoTransaction {
+            version: UTXO_TX_VERSION,
+            tx_type: TxType::SystemEmission,
+            inputs: vec![TxInput {
+                utxo_refs: vec![OutputRef { tx_hash: [1; 32], output_index: 0 }],
+                proof: vec![],
+            }],
+            outputs: vec![TxOutput {
+                amount: 1,
+                address: [0x11; 32],
+                spending_pubkey: None,
+            }],
+            fee: 0,
+            extra: vec![],
+            expiry: 0,
+        };
+        assert!(tx.validate_structure().is_err());
+    }
+
+    #[test]
+    fn test_tx_hash_deterministic() {
+        let tx = make_utxo_tx();
+        assert_eq!(tx.tx_hash(), tx.tx_hash());
     }
 }

@@ -114,9 +114,11 @@ impl std::fmt::Display for NodeRole {
 
 /// Check if an IP address is valid for advertising to peers.
 ///
-/// Rejects: unspecified (0.0.0.0, ::), loopback (127.x, ::1).
+/// SEC-FIX [Audit #9]: Rejects all bogon / non-routable addresses using
+/// the same filter as DAG P2P transport (private, link-local, CGNAT,
+/// documentation, multicast, broadcast, etc.).
 pub fn is_valid_advertise_ip(ip: &IpAddr) -> bool {
-    !ip.is_unspecified() && !ip.is_loopback()
+    !ip.is_unspecified() && !ip.is_loopback() && !misaka_p2p::is_bogon_ip(ip)
 }
 
 /// Check if a socket address is valid for advertising.
@@ -144,6 +146,13 @@ pub struct P2pConfig {
     pub seed_nodes: Vec<String>,
     /// SOCKS5 proxy for Tor (future).
     pub proxy: Option<String>,
+    /// SEC-P2P-GUARD: Connection guard settings.
+    ///
+    /// Controls per-IP throttling, half-open limits, subnet diversity, etc.
+    /// Loaded from `[p2p]` section in testnet.toml / mainnet.toml.
+    /// Falls back to compile-time defaults if not specified.
+    #[serde(default)]
+    pub guard: misaka_p2p::GuardConfig,
 }
 
 impl P2pConfig {
@@ -159,6 +168,7 @@ impl P2pConfig {
                 max_outbound_peers: 16,
                 seed_nodes: vec![],
                 proxy: None,
+                guard: misaka_p2p::GuardConfig::default(),
             },
             NodeMode::Hidden => Self {
                 mode,
@@ -169,6 +179,7 @@ impl P2pConfig {
                 max_outbound_peers: 16,
                 seed_nodes: vec![],
                 proxy: None,
+                guard: misaka_p2p::GuardConfig::default(),
             },
             NodeMode::Seed => Self {
                 mode,
@@ -179,6 +190,7 @@ impl P2pConfig {
                 max_outbound_peers: 32,
                 seed_nodes: vec![],
                 proxy: None,
+                guard: misaka_p2p::GuardConfig::default(),
             },
         }
     }
@@ -259,9 +271,12 @@ pub struct NodeConfig {
     pub log_level: String,
     pub p2p: P2pConfig,
     pub role: NodeRole,
+    // REMOVED: ShieldedNodeConfig — privacy module deprecated in v1.0.
+    // See docs/whitepaper_errata.md for details.
 }
 
 impl Default for NodeConfig {
+    #[allow(clippy::unwrap_used)] // static string parse never fails
     fn default() -> Self {
         Self {
             node_name: "misaka-node-0".into(),
@@ -312,15 +327,15 @@ mod tests {
 
     #[test]
     fn test_valid_public_addr_accepted() {
-        let addr: SocketAddr = "133.167.126.51:6690".parse().unwrap();
+        let addr: SocketAddr = "198.51.100.1:6690".parse().unwrap();
         assert!(is_valid_advertise_addr(&addr));
     }
 
     #[test]
-    fn test_private_addr_accepted() {
-        // Private addresses are valid for LANs / testnets
+    fn test_private_addr_rejected() {
+        // Public advertisement is fail-closed: private/bogon addresses are not valid.
         let addr: SocketAddr = "192.168.1.100:6690".parse().unwrap();
-        assert!(is_valid_advertise_addr(&addr));
+        assert!(!is_valid_advertise_addr(&addr));
     }
 
     #[test]
@@ -381,10 +396,10 @@ mod tests {
     #[test]
     fn test_effective_advertise_with_explicit_addr() {
         let mut cfg = P2pConfig::from_mode(NodeMode::Public);
-        cfg.advertise_addr = Some("133.167.126.51:6690".parse().unwrap());
+        cfg.advertise_addr = Some("198.51.100.1:6690".parse().unwrap());
         assert_eq!(
             cfg.effective_advertise_addr(6690),
-            Some("133.167.126.51:6690".to_string())
+            Some("198.51.100.1:6690".to_string())
         );
     }
 

@@ -13,8 +13,8 @@
 use sha3::{Digest as Sha3Digest, Sha3_256};
 
 use misaka_pqc::pq_sign::{
-    ml_dsa_sign_raw, ml_dsa_verify_raw, MlDsaKeypair, MlDsaPublicKey, MlDsaSecretKey,
-    MlDsaSignature, ML_DSA_PK_LEN, ML_DSA_SIG_LEN,
+    ml_dsa_sign_raw, ml_dsa_verify_raw, MlDsaKeypair, MlDsaPublicKey,
+    MlDsaSecretKey, MlDsaSignature, ML_DSA_PK_LEN, ML_DSA_SIG_LEN,
 };
 
 const DOMAIN_TAG: &[u8] = b"MISAKA-PQ-SIG:v2:";
@@ -30,6 +30,24 @@ pub struct ValidatorPqPublicKey {
 impl ValidatorPqPublicKey {
     pub const SIZE: usize = ML_DSA_PK_LEN; // 1952
 
+    /// Create a zeroed public key (sentinel / placeholder).
+    ///
+    /// Used in the handshake transcript when the initiator's identity
+    /// is not yet known to the responder. NEVER represents a real key.
+    pub fn zero() -> Self {
+        Self {
+            pq_pk: vec![0u8; ML_DSA_PK_LEN],
+        }
+    }
+
+    /// Returns `true` if every byte of the public key is zero.
+    ///
+    /// A zero key is the sentinel / placeholder used in handshake transcripts;
+    /// it MUST NOT be accepted as a real validator identity.
+    pub fn is_zero(&self) -> bool {
+        self.pq_pk.iter().all(|&b| b == 0)
+    }
+
     pub fn to_bytes(&self) -> Vec<u8> {
         self.pq_pk.clone()
     }
@@ -37,6 +55,15 @@ impl ValidatorPqPublicKey {
     pub fn from_bytes(data: &[u8]) -> Result<Self, &'static str> {
         if data.len() != ML_DSA_PK_LEN {
             return Err("invalid PQ validator pk length (expected 1952)");
+        }
+        if data.iter().all(|&b| b == 0) {
+            return Err("zero pubkey forbidden (sentinel)");
+        }
+        // SEC-FIX H-8: Validate that the bytes can actually be parsed as
+        // an ML-DSA-65 public key. Reject malformed keys at deserialization
+        // time rather than at signature verification time.
+        if MlDsaPublicKey::from_bytes(data).is_err() {
+            return Err("malformed ML-DSA-65 public key (pqcrypto rejected)");
         }
         Ok(Self {
             pq_pk: data.to_vec(),
@@ -48,7 +75,7 @@ impl ValidatorPqPublicKey {
     /// # Why 32 bytes?
     ///
     /// ML-DSA-65 public keys are 1952 bytes. Truncating the SHA3-256 hash
-    /// to 20 bytes (as done by `to_address()`) reduces collision resistance
+    /// to 20 bytes (removed in v10) reduced collision resistance
     /// to 80 bits classically / 53 bits quantum (Grover).
     ///
     /// Using the full 32-byte SHA3-256 output provides:
@@ -60,50 +87,59 @@ impl ValidatorPqPublicKey {
     pub fn to_canonical_id(&self) -> [u8; 32] {
         crate::sha3_256(&self.pq_pk)
     }
-
-    /// Derive a 20-byte validator address from the PQ public key.
-    ///
-    /// **DEPRECATED**: Use `to_canonical_id()` for consensus/slashing logic.
-    /// This method is retained ONLY for UI display and legacy compatibility.
-    /// It provides only 80-bit collision resistance, insufficient for
-    /// post-quantum security margins.
-    #[deprecated(note = "Use to_canonical_id() for 32-byte PQ-safe ID. This is UI-only.")]
-    pub fn to_address(&self) -> [u8; 20] {
-        let hash = crate::sha3_256(&self.pq_pk);
-        let mut addr = [0u8; 20];
-        addr.copy_from_slice(&hash[..20]);
-        addr
-    }
 }
 
 impl std::fmt::Debug for ValidatorPqPublicKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "ValidatorPqPk({}..)", hex::encode(&self.pq_pk[..8]))
+        let prefix_len = self.pq_pk.len().min(8);
+        write!(
+            f,
+            "ValidatorPqPk({}..)",
+            hex::encode(&self.pq_pk[..prefix_len])
+        )
     }
 }
 
 /// PQ-only validator secret key. Securely zeroized on drop.
 ///
-/// Uses volatile writes to prevent the compiler from optimizing away
-/// the zeroization. In production, prefer the `zeroize` crate.
+/// ML-DSA-65 secret key for validator signing (4032 bytes, fixed size).
+///
+/// SEC-FIX: Uses `Box<[u8; 4032]>` instead of `Vec<u8>` to prevent
+/// reallocation leaving un-zeroized copies in freed heap memory.
+/// Field is private — access via `with_bytes()` scoped accessor only.
+/// Clone is intentionally NOT implemented.
 pub struct ValidatorPqSecretKey {
-    pub pq_sk: Vec<u8>, // 4032 bytes
+    pq_sk: Box<[u8; 4032]>,
+}
+
+impl ValidatorPqSecretKey {
+    /// Create from raw bytes. Returns None if length != 4032.
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() != 4032 {
+            return None;
+        }
+        let mut buf = Box::new([0u8; 4032]);
+        buf.copy_from_slice(bytes);
+        Some(Self { pq_sk: buf })
+    }
+
+    /// Scoped access to the raw key bytes. The closure cannot store
+    /// a reference that outlives the call.
+    pub fn with_bytes<R>(&self, f: impl FnOnce(&[u8]) -> R) -> R {
+        f(&self.pq_sk[..])
+    }
 }
 
 impl Drop for ValidatorPqSecretKey {
     fn drop(&mut self) {
         use zeroize::Zeroize;
-        self.pq_sk.zeroize();
+        self.pq_sk.as_mut_slice().zeroize();
     }
 }
 
-impl Clone for ValidatorPqSecretKey {
-    fn clone(&self) -> Self {
-        Self {
-            pq_sk: self.pq_sk.clone(),
-        }
-    }
-}
+// Clone intentionally removed (ME-5 fix).
+// Each clone creates an un-tracked copy of key material.
+// Pass by reference (&ValidatorPqSecretKey) instead.
 
 impl std::fmt::Debug for ValidatorPqSecretKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -128,6 +164,10 @@ impl ValidatorPqSignature {
         if data.len() != ML_DSA_SIG_LEN {
             return Err("invalid PQ validator sig length (expected 3309)");
         }
+        // SEC-FIX H-8: Validate that bytes can be parsed by pqcrypto.
+        if MlDsaSignature::from_bytes(data).is_err() {
+            return Err("malformed ML-DSA-65 signature (pqcrypto rejected)");
+        }
         Ok(Self {
             pq_sig: data.to_vec(),
         })
@@ -136,7 +176,12 @@ impl ValidatorPqSignature {
 
 impl std::fmt::Debug for ValidatorPqSignature {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "ValidatorPqSig({}..)", hex::encode(&self.pq_sig[..8]))
+        let prefix_len = self.pq_sig.len().min(8);
+        write!(
+            f,
+            "ValidatorPqSig({}..)",
+            hex::encode(&self.pq_sig[..prefix_len])
+        )
     }
 }
 
@@ -166,9 +211,10 @@ pub fn generate_validator_keypair() -> ValidatorKeypair {
         public_key: ValidatorPqPublicKey {
             pq_pk: pq_kp.public_key.as_bytes().to_vec(),
         },
-        secret_key: ValidatorPqSecretKey {
-            pq_sk: pq_kp.secret_key.as_bytes().to_vec(),
-        },
+        secret_key: pq_kp.secret_key.with_bytes(|bytes| {
+            ValidatorPqSecretKey::from_bytes(bytes)
+                .expect("ML-DSA-65 SK is always 4032 bytes")
+        }),
     }
 }
 
@@ -179,10 +225,12 @@ pub fn validator_sign(
 ) -> Result<ValidatorPqSignature, ValidatorVerifyError> {
     let digest = signing_digest(message);
 
-    let pq_sk = MlDsaSecretKey::from_bytes(&sk.pq_sk)
+    let pq_sk = sk.with_bytes(|bytes| MlDsaSecretKey::from_bytes(bytes))
         .map_err(|_| ValidatorVerifyError::InvalidPqSecretKey)?;
-    let pq_sig =
-        ml_dsa_sign_raw(&pq_sk, &digest).map_err(|_| ValidatorVerifyError::InvalidPqSecretKey)?;
+    // Phase 2c-B D5c: domain separation is handled by signing_digest()
+    // which includes DOMAIN_TAG in the hash. No additional domain prefix needed.
+    let pq_sig = ml_dsa_sign_raw(&pq_sk, &digest)
+        .map_err(|_| ValidatorVerifyError::InvalidPqSecretKey)?;
 
     Ok(ValidatorPqSignature {
         pq_sig: pq_sig.as_bytes().to_vec(),
@@ -201,7 +249,12 @@ pub fn validator_verify(
         .map_err(|_| ValidatorVerifyError::InvalidPqPublicKey)?;
     let pq_sig = MlDsaSignature::from_bytes(&sig.pq_sig)
         .map_err(|_| ValidatorVerifyError::InvalidPqSignature)?;
-    ml_dsa_verify_raw(&pq_pk, &digest, &pq_sig).map_err(|_| ValidatorVerifyError::MlDsaFailed)?;
+    ml_dsa_verify_raw(
+        &pq_pk,
+        &digest,
+        &pq_sig,
+    )
+    .map_err(|_| ValidatorVerifyError::MlDsaFailed)?;
 
     Ok(())
 }
@@ -281,9 +334,25 @@ mod tests {
     #[test]
     fn test_address_derivation() {
         let kp = generate_validator_keypair();
-        let addr = kp.public_key.to_address();
-        assert_eq!(addr.len(), 20);
-        assert_eq!(kp.public_key.to_address(), addr); // deterministic
+        let addr = kp.public_key.to_canonical_id();
+        assert_eq!(addr.len(), 32);
+        assert_eq!(kp.public_key.to_canonical_id(), addr); // deterministic
+    }
+
+    #[test]
+    fn test_short_debug_prefix_does_not_panic() {
+        let pk = ValidatorPqPublicKey {
+            pq_pk: vec![0xAA, 0xBB, 0xCC],
+        };
+        let sig = ValidatorPqSignature {
+            pq_sig: vec![0x11, 0x22],
+        };
+
+        let pk_debug = format!("{:?}", pk);
+        let sig_debug = format!("{:?}", sig);
+
+        assert!(pk_debug.contains("ValidatorPqPk("));
+        assert!(sig_debug.contains("ValidatorPqSig("));
     }
 
     #[test]
@@ -293,3 +362,7 @@ mod tests {
         assert_ne!(d1, d2);
     }
 }
+
+// MlDsa65Signer — production block signer.
+// Implemented in misaka-node to avoid circular dep (crypto→dag→crypto).
+// See narwhal_runtime_bridge.rs for the impl.

@@ -1,31 +1,33 @@
+# MISAKA Network — Validator Node
+# バリデータとしてブロック生成に参加する場合の設定。
+#
+# 前提:
+#   1. misakastake.com でステーキング完了
+#   2. --stake-signature でSolana TX署名を渡すか MISAKA_STAKE_SIGNATURE 環境変数をセット
+#   3. --genesis-path で genesis_committee.toml を指定
+
 [chain]
 chain_id = 2
+chain_name = "MISAKA Testnet"
 
 [node]
-name = "misaka-validator-01"
 mode = "public"
-data_dir = "../data/validator"
+data_dir = "./misaka-data"
 log_level = "info"
 
 [p2p]
-port = 6692
-max_inbound_peers = 48
+port = 6690
+max_inbound_peers = 64
 max_outbound_peers = 16
-# advertise_addr = "YOUR_PUBLIC_IP:6692"
+# advertise_addr = "YOUR_PUBLIC_IP:6690"
 
 [rpc]
-port = 3003
+port = 3001
 
 [consensus]
-block_time_secs = 60
-validator = true
-validator_index = 0
-validators = 1
+fast_block_time_secs = 2
 
-[bootstrap]
-seed_nodes = []
-seed_file = "./seeds.txt"
-reconnect_interval_secs = 30
-
-[genesis]
-timestamp_ms = 1773446400000
+[faucet]
+enabled = true
+amount = 1000000000
+cooldown_secs = 300

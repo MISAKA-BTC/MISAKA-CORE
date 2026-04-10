@@ -1,2 +1,3 @@
-# Keep this file empty for isolated self-host tests.
-# The launcher points the local seed profile here when running `self-host`.
+# オフライン確認用 — 外部接続なし
+# ローカルノード同士のみ
+127.0.0.1:6690

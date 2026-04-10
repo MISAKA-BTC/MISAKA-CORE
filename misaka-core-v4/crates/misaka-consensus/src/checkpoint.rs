@@ -2,7 +2,7 @@
 //!
 //! # Problem
 //!
-//! The existing `DagCheckpoint` commits to utxo_root and key_image counts,
+//! The existing `DagCheckpoint` commits to utxo_root and spend counts,
 //! but does NOT commit to:
 //! - The GhostDAG total ordering (validators could disagree on order)
 //! - The next validator set (no rotation binding)
@@ -16,8 +16,8 @@
 //! This binds ordering, state, validator rotation, and pruning into
 //! a single cryptographically signed attestation.
 
-use sha3::{Sha3_256, Digest};
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
+use sha3::{Digest, Sha3_256};
 
 pub type Hash = [u8; 32];
 
@@ -43,7 +43,7 @@ pub const CHECKPOINT_PROTOCOL_VERSION: u32 = 2;
 /// | `protocol_version` | Fork coordination | Version confusion |
 /// | `block_hash` | DAG anchor point | Ambiguous checkpoints |
 /// | `blue_score` | Depth metric | Score inflation |
-/// | `state_root` | UTXO + Nullifier sets | State divergence |
+/// | `state_root` | UTXO + SpendTag sets | State divergence |
 /// | `total_order_hash` | GhostDAG ordering | Order disagreement |
 /// | `validator_set_root` | Next epoch validators | Unauthorized rotation |
 /// | `pruning_horizon` | Safe deletion boundary | Premature pruning |
@@ -61,7 +61,7 @@ pub struct ProductionCheckpoint {
     /// Blue score at this checkpoint.
     pub blue_score: u64,
 
-    /// Cryptographic state root (UTXO + Nullifier commitment).
+    /// Cryptographic state root (UTXO + SpendTag commitment).
     /// Computed via `UtxoSet::compute_state_root()`.
     pub state_root: Hash,
 
@@ -92,8 +92,8 @@ pub struct ProductionCheckpoint {
     /// Cumulative transaction count (for progress tracking).
     pub cumulative_txs: u64,
 
-    /// Cumulative nullifier count.
-    pub cumulative_nullifiers: u64,
+    /// Cumulative spent count.
+    pub cumulative_spent: u64,
 }
 
 impl ProductionCheckpoint {
@@ -114,7 +114,7 @@ impl ProductionCheckpoint {
         h.update(&self.pruning_horizon_hash);
         h.update(self.pruning_horizon_score.to_le_bytes());
         h.update(self.cumulative_txs.to_le_bytes());
-        h.update(self.cumulative_nullifiers.to_le_bytes());
+        h.update(self.cumulative_spent.to_le_bytes());
         h.finalize().into()
     }
 
@@ -215,7 +215,10 @@ impl CheckpointAccumulator {
         let mut height = 0u32;
 
         while self.peaks.len() > 0 && self.peak_height(self.peaks.len() - 1) == height {
-            let left = self.peaks.pop().unwrap();
+            let left = match self.peaks.pop() {
+                Some(v) => v,
+                None => break,
+            };
             current = Self::merge_nodes(&left, &current);
             self.nodes.push(current);
             height += 1;
@@ -267,8 +270,12 @@ impl CheckpointAccumulator {
     }
 
     /// Number of finalized checkpoints in the accumulator.
-    pub fn len(&self) -> u64 { self.leaf_count }
-    pub fn is_empty(&self) -> bool { self.leaf_count == 0 }
+    pub fn len(&self) -> u64 {
+        self.leaf_count
+    }
+    pub fn is_empty(&self) -> bool {
+        self.leaf_count == 0
+    }
 
     /// Hash a checkpoint into a leaf.
     fn checkpoint_leaf(cp: &ProductionCheckpoint) -> Hash {
@@ -298,7 +305,9 @@ impl CheckpointAccumulator {
 }
 
 impl Default for CheckpointAccumulator {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -321,7 +330,7 @@ mod tests {
             pruning_horizon_hash: [0xDD; 32],
             pruning_horizon_score: (epoch.saturating_sub(1)) * 100,
             cumulative_txs: epoch * 50,
-            cumulative_nullifiers: epoch * 30,
+            cumulative_spent: epoch * 30,
         }
     }
 
@@ -340,20 +349,26 @@ mod tests {
 
     #[test]
     fn test_signing_target_includes_total_order() {
-        let mut cp1 = sample_checkpoint(1);
+        let cp1 = sample_checkpoint(1);
         let mut cp2 = sample_checkpoint(1);
         cp2.total_order_hash = [0xFF; 32];
-        assert_ne!(cp1.signing_target(), cp2.signing_target(),
-            "different total_order_hash must change signing target");
+        assert_ne!(
+            cp1.signing_target(),
+            cp2.signing_target(),
+            "different total_order_hash must change signing target"
+        );
     }
 
     #[test]
     fn test_signing_target_includes_validator_set() {
-        let mut cp1 = sample_checkpoint(1);
+        let cp1 = sample_checkpoint(1);
         let mut cp2 = sample_checkpoint(1);
         cp2.validator_set_root = [0xFF; 32];
-        assert_ne!(cp1.signing_target(), cp2.signing_target(),
-            "different validator_set_root must change signing target");
+        assert_ne!(
+            cp1.signing_target(),
+            cp2.signing_target(),
+            "different validator_set_root must change signing target"
+        );
     }
 
     #[test]
@@ -386,7 +401,10 @@ mod tests {
         assert_eq!(acc.len(), 2);
         let root2 = acc.root();
 
-        assert_ne!(root1, root2, "root must change when new checkpoint is added");
+        assert_ne!(
+            root1, root2,
+            "root must change when new checkpoint is added"
+        );
     }
 
     #[test]
@@ -400,8 +418,11 @@ mod tests {
         acc2.append(&sample_checkpoint(1));
         acc2.append(&sample_checkpoint(2));
 
-        assert_eq!(acc1.root(), acc2.root(),
-            "same checkpoints in same order must produce same root");
+        assert_eq!(
+            acc1.root(),
+            acc2.root(),
+            "same checkpoints in same order must produce same root"
+        );
     }
 
     #[test]

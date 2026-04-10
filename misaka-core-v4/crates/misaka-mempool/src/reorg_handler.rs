@@ -6,9 +6,9 @@
 //! "orphaned" — they were applied to state but that state was rolled back.
 //! Naively re-adding these TXs to the mempool creates two dangers:
 //!
-//! 1. **Double-Spend Replay**: A TX whose nullifier is now spent on the new
+//! 1. **Double-Spend Replay**: A TX whose spend-tag is now spent on the new
 //!    branch gets re-added to mempool. If re-included, it causes a
-//!    double-spend (same nullifier recorded twice).
+//!    double-spend (same spend-tag recorded twice).
 //!
 //! 2. **Flood Attack**: An attacker triggers a reorg and floods the mempool
 //!    with thousands of previously-applied TXs, exhausting validator CPU
@@ -19,17 +19,17 @@
 //! Orphaned TXs are NOT immediately re-added to the mempool. Instead:
 //!
 //! 1. **Quarantine**: TXs go into a `ConflictedCache` (time-limited, size-bounded)
-//! 2. **Nullifier Check**: Each TX's nullifiers are checked against the NEW
-//!    nullifier set (post-reorg). Conflicting TXs are permanently dropped.
+//! 2. **SpendTag Check**: Each TX's spent_tags are checked against the NEW
+//!    spent set (post-reorg). Conflicting transactions are permanently dropped.
 //! 3. **Structural Check**: Remaining TXs pass cheap validation again.
 //! 4. **Admission**: Only clean TXs are re-submitted to the mempool.
 //!
 //! # Soundness
 //!
 //! After `handle_reorg()`:
-//! - The mempool contains ZERO TXs whose nullifiers conflict with the new state
+//! - The mempool contains ZERO TXs whose spent_tags conflict with the new state
 //! - The `ConflictedCache` contains all permanently-invalid TXs (not re-broadcastable)
-//! - The nullifier set in the mempool is consistent with the new DAG state
+//! - The spent set in the mempool is consistent with the new DAG state
 
 use std::collections::{HashMap, HashSet};
 
@@ -44,6 +44,25 @@ pub const MAX_QUARANTINE_SIZE: usize = 10_000;
 /// After this, the TX hash is forgotten and could theoretically be re-submitted.
 pub const CONFLICTED_CACHE_TTL_MS: u64 = 600_000; // 10 minutes
 
+/// SEC-FIX-6: Maximum reorg depth (in blocks) we process.
+///
+/// A reorg deeper than this is treated as a catastrophic event:
+/// all orphaned TXs are dropped rather than re-evaluated.
+/// This prevents an attacker from triggering a very deep reorg
+/// (e.g., 1000+ blocks) that forces O(n) expensive re-verification
+/// of every TX in those blocks, exhausting validator CPU.
+///
+/// For comparison: Bitcoin considers 6 blocks "final", Kaspa uses ~100.
+/// We allow up to 128 blocks of re-evaluation before dropping.
+pub const MAX_REORG_EVALUATION_DEPTH: usize = 128;
+
+/// SEC-FIX-6: Maximum CPU budget for orphan re-evaluation (number of TXs).
+///
+/// Even within a valid reorg depth, we cap the total number of orphan
+/// TXs evaluated. This prevents a scenario where each block in a
+/// 100-block reorg has 1000 TXs = 100,000 re-evaluations.
+pub const MAX_REORG_EVALUATION_TX_BUDGET: usize = 5_000;
+
 // ═══════════════════════════════════════════════════════════════
 //  Orphaned TX (from reorg)
 // ═══════════════════════════════════════════════════════════════
@@ -55,8 +74,8 @@ pub const CONFLICTED_CACHE_TTL_MS: u64 = 600_000; // 10 minutes
 pub struct OrphanedTx {
     /// Transaction hash.
     pub tx_hash: Hash,
-    /// Nullifiers this TX would consume.
-    pub nullifiers: Vec<Hash>,
+    /// SpendTags this TX would consume.
+    pub spent_tags: Vec<Hash>,
     /// Was this TX successfully applied on the old branch?
     pub was_applied: bool,
     /// The block this TX was originally in.
@@ -72,7 +91,7 @@ pub struct OrphanedTx {
 pub struct ReorgEvaluationResult {
     /// TXs that passed re-evaluation and were re-submitted to mempool.
     pub readmitted: Vec<Hash>,
-    /// TXs permanently dropped (nullifier conflict with new state).
+    /// TXs permanently dropped (spend-tag conflict with new state).
     pub conflicted: Vec<ConflictedTx>,
     /// TXs dropped for other reasons (structural, size, etc.).
     pub dropped: Vec<(Hash, String)>,
@@ -90,10 +109,10 @@ pub struct ConflictedTx {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConflictReason {
-    /// Nullifier already spent on the new branch.
-    NullifierSpentOnNewBranch,
-    /// Nullifier conflicts with another orphaned TX that was re-admitted first.
-    NullifierConflictWithReadmitted,
+    /// SpendTag already spent on the new branch.
+    SpendTagSpentOnNewBranch,
+    /// SpendTag conflicts with another orphaned TX that was re-admitted first.
+    SpendTagConflictWithReadmitted,
     /// TX exceeds mempool size limits.
     MempoolFull,
 }
@@ -103,7 +122,7 @@ pub enum ConflictReason {
 pub struct ReorgStats {
     pub total_orphaned: usize,
     pub readmitted: usize,
-    pub conflicted_nullifier: usize,
+    pub conflicted_spend_tag: usize,
     pub dropped_other: usize,
     pub reorg_depth: usize,
 }
@@ -133,7 +152,9 @@ impl ConflictedCache {
     pub fn insert(&mut self, tx: ConflictedTx) {
         if self.entries.len() >= self.max_size {
             // Evict oldest entry
-            if let Some(oldest_key) = self.entries.iter()
+            if let Some(oldest_key) = self
+                .entries
+                .iter()
                 .min_by_key(|(_, v)| v.timestamp_ms)
                 .map(|(k, _)| *k)
             {
@@ -150,13 +171,16 @@ impl ConflictedCache {
 
     /// Cleanup expired entries.
     pub fn cleanup(&mut self, now_ms: u64) {
-        self.entries.retain(|_, v| {
-            now_ms.saturating_sub(v.timestamp_ms) < CONFLICTED_CACHE_TTL_MS
-        });
+        self.entries
+            .retain(|_, v| now_ms.saturating_sub(v.timestamp_ms) < CONFLICTED_CACHE_TTL_MS);
     }
 
-    pub fn len(&self) -> usize { self.entries.len() }
-    pub fn is_empty(&self) -> bool { self.entries.is_empty() }
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -173,8 +197,8 @@ impl ConflictedCache {
 /// // After ReorgEngine::execute_reorg():
 /// let result = handler.evaluate_orphans(
 ///     orphaned_txs,
-///     &new_nullifier_set,   // from post-reorg state
-///     &mempool_nullifiers,  // currently in mempool
+///     &new_spent_set,   // from post-reorg state
+///     &mempool_spent_tags,  // currently in mempool
 ///     now_ms,
 /// );
 ///
@@ -202,42 +226,96 @@ impl ReorgHandler {
     /// # Algorithm
     ///
     /// For each orphaned TX (that was previously applied):
-    /// 1. Check if ANY of its nullifiers are in `new_nullifier_set` → CONFLICTED
-    /// 2. Check if ANY of its nullifiers are in `readmitted_nullifiers` → CONFLICTED
-    /// 3. If clean, mark for readmission and track its nullifiers
+    /// 1. Check if ANY of its spent_tags are in `new_spent_set` → CONFLICTED
+    /// 2. Check if ANY of its spent_tags are in `readmitted_spent_tags` → CONFLICTED
+    /// 3. If clean, mark for readmission and track its spent_tags
     ///
     /// TXs that were NOT applied on the old branch (failed validation) are
     /// silently dropped — they were already invalid.
     ///
+    /// # SEC-FIX-6: CPU Budget
+    ///
+    /// If `reorg_depth > MAX_REORG_EVALUATION_DEPTH`, ALL orphans are dropped
+    /// without evaluation. This prevents deep reorg attacks that force
+    /// expensive re-verification of thousands of TXs.
+    ///
+    /// Even within the depth limit, evaluation stops after
+    /// `MAX_REORG_EVALUATION_TX_BUDGET` TXs are processed.
+    ///
     /// # Ordering
     ///
     /// Orphaned TXs are processed in the order they were applied on the old branch.
-    /// This preserves "first seen" priority for nullifier conflicts among orphans.
+    /// This preserves "first seen" priority for spend-tag conflicts among orphans.
     ///
     /// # Soundness
     ///
     /// After this function:
-    /// - `readmitted` contains NO TX whose nullifier is in `new_nullifier_set`
-    /// - `readmitted` contains NO pair of TXs with conflicting nullifiers
+    /// - `readmitted` contains NO TX whose spend-tag is in `new_spent_set`
+    /// - `readmitted` contains NO pair of TXs with conflicting spent_tags
     /// - `conflicted` contains ALL TXs that would cause double-spends
     pub fn evaluate_orphans(
         &self,
         orphans: &[OrphanedTx],
-        new_nullifier_set: &HashSet<Hash>,
-        mempool_nullifiers: &HashSet<Hash>,
+        new_spent_set: &HashSet<Hash>,
+        mempool_spent_tags: &HashSet<Hash>,
         now_ms: u64,
+        reorg_depth: usize,
     ) -> ReorgEvaluationResult {
         let mut readmitted = Vec::new();
         let mut conflicted = Vec::new();
         let mut dropped = Vec::new();
-        let mut readmitted_nullifiers: HashSet<Hash> = HashSet::new();
+        let mut readmitted_spent_tags: HashSet<Hash> = HashSet::new();
 
         let mut stats = ReorgStats {
             total_orphaned: orphans.len(),
+            reorg_depth,
             ..Default::default()
         };
 
+        // SEC-FIX-6: Deep reorg — drop ALL orphans without evaluation.
+        // This is a safety valve against CPU exhaustion attacks.
+        if reorg_depth > MAX_REORG_EVALUATION_DEPTH {
+            tracing::warn!(
+                "SEC-FIX-6: reorg depth {} exceeds MAX_REORG_EVALUATION_DEPTH={}, \
+                 dropping ALL {} orphaned TXs without re-evaluation",
+                reorg_depth,
+                MAX_REORG_EVALUATION_DEPTH,
+                orphans.len(),
+            );
+            for orphan in orphans {
+                dropped.push((
+                    orphan.tx_hash,
+                    format!(
+                        "reorg depth {} exceeds max evaluation depth {}",
+                        reorg_depth, MAX_REORG_EVALUATION_DEPTH
+                    ),
+                ));
+                stats.dropped_other += 1;
+            }
+            return ReorgEvaluationResult {
+                readmitted,
+                conflicted,
+                dropped,
+                stats,
+            };
+        }
+
+        let mut evaluated_count: usize = 0;
+
         for orphan in orphans {
+            // SEC-FIX-6: TX budget — stop evaluation if we've hit the limit.
+            if evaluated_count >= MAX_REORG_EVALUATION_TX_BUDGET {
+                tracing::warn!(
+                    "SEC-FIX-6: TX evaluation budget exhausted ({}/{}), dropping remaining {} orphans",
+                    evaluated_count,
+                    MAX_REORG_EVALUATION_TX_BUDGET,
+                    orphans.len() - evaluated_count,
+                );
+                dropped.push((orphan.tx_hash, "evaluation budget exhausted".into()));
+                stats.dropped_other += 1;
+                continue;
+            }
+
             // Skip TXs that weren't applied (already invalid)
             if !orphan.was_applied {
                 dropped.push((orphan.tx_hash, "was not applied on old branch".into()));
@@ -252,45 +330,53 @@ impl ReorgHandler {
                 continue;
             }
 
-            // Check against the NEW on-chain nullifier set
-            let chain_conflict = orphan.nullifiers.iter()
-                .find(|nf| new_nullifier_set.contains(*nf));
+            evaluated_count += 1;
 
-            if let Some(nf) = chain_conflict {
+            // Check against the NEW on-chain spent set
+            let chain_conflict = orphan
+                .spent_tags
+                .iter()
+                .find(|nf| new_spent_set.contains(*nf));
+
+            if let Some(_nf) = chain_conflict {
                 conflicted.push(ConflictedTx {
                     tx_hash: orphan.tx_hash,
-                    reason: ConflictReason::NullifierSpentOnNewBranch,
+                    reason: ConflictReason::SpendTagSpentOnNewBranch,
                     timestamp_ms: now_ms,
                 });
-                stats.conflicted_nullifier += 1;
+                stats.conflicted_spend_tag += 1;
                 continue;
             }
 
-            // Check against mempool nullifiers
-            let mempool_conflict = orphan.nullifiers.iter()
-                .find(|nf| mempool_nullifiers.contains(*nf));
+            // Check against mempool spent_tags
+            let mempool_conflict = orphan
+                .spent_tags
+                .iter()
+                .find(|nf| mempool_spent_tags.contains(*nf));
 
             if mempool_conflict.is_some() {
                 conflicted.push(ConflictedTx {
                     tx_hash: orphan.tx_hash,
-                    reason: ConflictReason::NullifierConflictWithReadmitted,
+                    reason: ConflictReason::SpendTagConflictWithReadmitted,
                     timestamp_ms: now_ms,
                 });
-                stats.conflicted_nullifier += 1;
+                stats.conflicted_spend_tag += 1;
                 continue;
             }
 
             // Check against already-readmitted orphans
-            let readmit_conflict = orphan.nullifiers.iter()
-                .find(|nf| readmitted_nullifiers.contains(*nf));
+            let readmit_conflict = orphan
+                .spent_tags
+                .iter()
+                .find(|nf| readmitted_spent_tags.contains(*nf));
 
             if readmit_conflict.is_some() {
                 conflicted.push(ConflictedTx {
                     tx_hash: orphan.tx_hash,
-                    reason: ConflictReason::NullifierConflictWithReadmitted,
+                    reason: ConflictReason::SpendTagConflictWithReadmitted,
                     timestamp_ms: now_ms,
                 });
-                stats.conflicted_nullifier += 1;
+                stats.conflicted_spend_tag += 1;
                 continue;
             }
 
@@ -302,8 +388,8 @@ impl ReorgHandler {
             }
 
             // ✅ Clean — readmit
-            for nf in &orphan.nullifiers {
-                readmitted_nullifiers.insert(*nf);
+            for nf in &orphan.spent_tags {
+                readmitted_spent_tags.insert(*nf);
             }
             readmitted.push(orphan.tx_hash);
             stats.readmitted += 1;
@@ -326,10 +412,10 @@ impl ReorgHandler {
 mod tests {
     use super::*;
 
-    fn orphan(id: u8, nullifiers: &[[u8; 32]], applied: bool) -> OrphanedTx {
+    fn orphan(id: u8, spent_tags: &[[u8; 32]], applied: bool) -> OrphanedTx {
         OrphanedTx {
             tx_hash: [id; 32],
-            nullifiers: nullifiers.to_vec(),
+            spent_tags: spent_tags.to_vec(),
             was_applied: applied,
             original_block: [0xFF; 32],
         }
@@ -342,9 +428,10 @@ mod tests {
 
         let result = handler.evaluate_orphans(
             &orphans,
-            &HashSet::new(),    // no on-chain nullifiers
-            &HashSet::new(),    // no mempool nullifiers
+            &HashSet::new(), // no on-chain spent tags
+            &HashSet::new(), // no mempool spent tags
             1000,
+            1, // reorg depth
         );
 
         assert_eq!(result.readmitted.len(), 1);
@@ -358,16 +445,18 @@ mod tests {
         let nf = [0xAA; 32];
         let orphans = vec![orphan(1, &[nf], true)];
 
-        let mut chain_nullifiers = HashSet::new();
-        chain_nullifiers.insert(nf); // Already spent on new branch
+        let mut chain_spent_tags = HashSet::new();
+        chain_spent_tags.insert(nf); // Already spent on new branch
 
-        let result = handler.evaluate_orphans(
-            &orphans, &chain_nullifiers, &HashSet::new(), 1000,
-        );
+        let result =
+            handler.evaluate_orphans(&orphans, &chain_spent_tags, &HashSet::new(), 1000, 1);
 
         assert_eq!(result.readmitted.len(), 0);
         assert_eq!(result.conflicted.len(), 1);
-        assert_eq!(result.conflicted[0].reason, ConflictReason::NullifierSpentOnNewBranch);
+        assert_eq!(
+            result.conflicted[0].reason,
+            ConflictReason::SpendTagSpentOnNewBranch
+        );
     }
 
     #[test]
@@ -375,15 +464,10 @@ mod tests {
         let handler = ReorgHandler::new(100);
         let shared_nf = [0xCC; 32];
 
-        // Two orphans sharing the same nullifier
-        let orphans = vec![
-            orphan(1, &[shared_nf], true),
-            orphan(2, &[shared_nf], true),
-        ];
+        // Two orphans sharing the same spend-tag
+        let orphans = vec![orphan(1, &[shared_nf], true), orphan(2, &[shared_nf], true)];
 
-        let result = handler.evaluate_orphans(
-            &orphans, &HashSet::new(), &HashSet::new(), 1000,
-        );
+        let result = handler.evaluate_orphans(&orphans, &HashSet::new(), &HashSet::new(), 1000, 1);
 
         assert_eq!(result.readmitted.len(), 1, "first-seen wins");
         assert_eq!(result.conflicted.len(), 1, "second is conflicted");
@@ -395,9 +479,7 @@ mod tests {
         let handler = ReorgHandler::new(100);
         let orphans = vec![orphan(1, &[[0xAA; 32]], false)]; // was NOT applied
 
-        let result = handler.evaluate_orphans(
-            &orphans, &HashSet::new(), &HashSet::new(), 1000,
-        );
+        let result = handler.evaluate_orphans(&orphans, &HashSet::new(), &HashSet::new(), 1000, 1);
 
         assert_eq!(result.readmitted.len(), 0);
         assert_eq!(result.dropped.len(), 1);
@@ -411,17 +493,19 @@ mod tests {
         // First reorg: TX 1 is conflicted
         handler.conflicted_cache.insert(ConflictedTx {
             tx_hash: [1; 32],
-            reason: ConflictReason::NullifierSpentOnNewBranch,
+            reason: ConflictReason::SpendTagSpentOnNewBranch,
             timestamp_ms: 500,
         });
 
         // Second reorg: TX 1 is orphaned again, but should be dropped
         let orphans = vec![orphan(1, &[nf], true)];
-        let result = handler.evaluate_orphans(
-            &orphans, &HashSet::new(), &HashSet::new(), 1000,
-        );
+        let result = handler.evaluate_orphans(&orphans, &HashSet::new(), &HashSet::new(), 1000, 1);
 
-        assert_eq!(result.readmitted.len(), 0, "conflicted cache prevents replay");
+        assert_eq!(
+            result.readmitted.len(),
+            0,
+            "conflicted cache prevents replay"
+        );
         assert_eq!(result.dropped.len(), 1);
     }
 
@@ -430,12 +514,102 @@ mod tests {
         let mut cache = ConflictedCache::new(100);
         cache.insert(ConflictedTx {
             tx_hash: [1; 32],
-            reason: ConflictReason::NullifierSpentOnNewBranch,
+            reason: ConflictReason::SpendTagSpentOnNewBranch,
             timestamp_ms: 1000,
         });
 
         assert!(!cache.is_empty());
         cache.cleanup(1000 + CONFLICTED_CACHE_TTL_MS + 1);
         assert!(cache.is_empty(), "expired entries must be cleaned up");
+    }
+
+    // ── SEC-FIX-6 Tests: Reorg Depth & Budget ──
+
+    #[test]
+    fn test_deep_reorg_drops_all_orphans() {
+        let handler = ReorgHandler::new(100);
+        let orphans: Vec<OrphanedTx> = (0..50u8).map(|i| orphan(i, &[[i; 32]], true)).collect();
+
+        // Reorg depth exceeds limit
+        let result = handler.evaluate_orphans(
+            &orphans,
+            &HashSet::new(),
+            &HashSet::new(),
+            1000,
+            MAX_REORG_EVALUATION_DEPTH + 1,
+        );
+
+        assert_eq!(
+            result.readmitted.len(),
+            0,
+            "deep reorg must drop ALL orphans"
+        );
+        assert_eq!(result.dropped.len(), 50);
+        assert_eq!(result.stats.dropped_other, 50);
+    }
+
+    #[test]
+    fn test_reorg_at_exact_depth_limit_still_evaluates() {
+        let handler = ReorgHandler::new(100);
+        let orphans = vec![orphan(1, &[[0xAA; 32]], true)];
+
+        // Reorg depth == limit → still evaluated
+        let result = handler.evaluate_orphans(
+            &orphans,
+            &HashSet::new(),
+            &HashSet::new(),
+            1000,
+            MAX_REORG_EVALUATION_DEPTH,
+        );
+
+        assert_eq!(
+            result.readmitted.len(),
+            1,
+            "reorg at exact depth limit should still evaluate"
+        );
+    }
+
+    #[test]
+    fn test_tx_budget_caps_evaluation() {
+        let handler = ReorgHandler::new(100_000);
+
+        // Create more orphans than the budget allows
+        let count = MAX_REORG_EVALUATION_TX_BUDGET + 100;
+        let orphans: Vec<OrphanedTx> = (0..count)
+            .map(|i| {
+                let mut hash = [0u8; 32];
+                hash[..4].copy_from_slice(&(i as u32).to_le_bytes());
+                OrphanedTx {
+                    tx_hash: hash,
+                    spent_tags: vec![hash], // unique spend-tag per TX
+                    was_applied: true,
+                    original_block: [0xFF; 32],
+                }
+            })
+            .collect();
+
+        let result = handler.evaluate_orphans(
+            &orphans,
+            &HashSet::new(),
+            &HashSet::new(),
+            1000,
+            10, // normal depth
+        );
+
+        // Total readmitted + dropped should equal total orphans
+        let total = result.readmitted.len() + result.dropped.len() + result.conflicted.len();
+        assert_eq!(total, count);
+
+        // Should have hit the budget
+        assert!(
+            result.readmitted.len() <= MAX_REORG_EVALUATION_TX_BUDGET,
+            "readmitted ({}) must not exceed budget ({})",
+            result.readmitted.len(),
+            MAX_REORG_EVALUATION_TX_BUDGET,
+        );
+        assert!(
+            result.dropped.len() > 0,
+            "some TXs must be dropped due to budget"
+        );
     }
 }

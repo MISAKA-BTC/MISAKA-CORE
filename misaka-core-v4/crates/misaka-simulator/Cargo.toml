@@ -1,0 +1,23 @@
+[package]
+name = "misaka-simulator"
+description = "MISAKA lightweight deterministic consensus simulator"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+misaka-dag = { path = "../misaka-dag", features = ["test-utils"] }
+misaka-types = { path = "../misaka-types" }
+misaka-protocol-config = { path = "../misaka-protocol-config" }
+misaka-pqc = { path = "../misaka-pqc" }
+tokio = { workspace = true }
+rand = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+
+[dev-dependencies]
+rand = { workspace = true }
+
+[lints.clippy]
+unwrap_used = "allow"
+expect_used = "allow"

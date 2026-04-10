@@ -16,7 +16,7 @@ pub struct ChainProfile {
     /// Minimum ring size.
     pub min_ring_size: usize,
     /// Maximum ring size.
-    pub max_ring_size: usize,
+    pub max_anonymity_set: usize,
     /// Block time target (seconds).
     pub block_time_secs: u64,
     /// Maximum txs per block.
@@ -32,8 +32,8 @@ impl ChainProfile {
             pq_tx_required: true,
             ki_proof_required: true,
             min_ring_size: 4,
-            max_ring_size: 16,
-            block_time_secs: 60,
+            max_anonymity_set: 16,
+            block_time_secs: 2, // Fast lane default (ZKP lane: 30s)
             max_txs_per_block: 1000,
         }
     }
@@ -46,8 +46,8 @@ impl ChainProfile {
             pq_tx_required: true,
             ki_proof_required: true,
             min_ring_size: 4,
-            max_ring_size: 16,
-            block_time_secs: 60,
+            max_anonymity_set: 16,
+            block_time_secs: 2, // Fast lane default (ZKP lane: 30s)
             max_txs_per_block: 1000,
         }
     }
@@ -77,8 +77,7 @@ impl GenesisConfig {
             initial_utxos: vec![GenesisUtxo {
                 output: TxOutput {
                     amount: 10_000_000_000, // 10B MISAKA
-                    one_time_address: [0x01; 32],
-                    pq_stealth: None,
+                    address: [0x01; 32],
                     spending_pubkey: None,
                 },
                 label: "treasury".into(),
@@ -88,9 +87,55 @@ impl GenesisConfig {
     }
 }
 
+// ────────────────────────────────────────────────────────────────
+//  Phase 2c-A: Genesis hash computation
+// ────────────────────────────────────────────────────────────────
+
+/// Domain prefix for genesis hash computation.
+pub const GENESIS_HASH_DOMAIN: &[u8] = b"MISAKA-GENESIS:v1:";
+
+/// Compute the canonical genesis hash from chain_id and committee public keys.
+///
+/// This function MUST produce identical output for the same inputs across
+/// all components (node, CLI, wallet, relayer). Any callsite that constructs
+/// an AppId for cross-component verification must use this function.
+///
+/// `committee_pks` MUST be in canonical order (same as `committee.authorities`).
+pub fn compute_genesis_hash(chain_id: u32, committee_pks: &[Vec<u8>]) -> [u8; 32] {
+    use sha3::{Digest, Sha3_256};
+    let mut h = Sha3_256::new();
+    h.update(GENESIS_HASH_DOMAIN);
+    h.update(chain_id.to_le_bytes());
+    for pk in committee_pks {
+        h.update(pk);
+    }
+    h.finalize().into()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn genesis_hash_deterministic() {
+        let pks = vec![vec![0xAA; 1952], vec![0xBB; 1952]];
+        let h1 = compute_genesis_hash(2, &pks);
+        let h2 = compute_genesis_hash(2, &pks);
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn genesis_hash_chain_id_separation() {
+        let pks = vec![vec![0xAA; 1952]];
+        assert_ne!(compute_genesis_hash(1, &pks), compute_genesis_hash(2, &pks));
+    }
+
+    #[test]
+    fn genesis_hash_pk_order_matters() {
+        let pks_a = vec![vec![0xAA; 1952], vec![0xBB; 1952]];
+        let pks_b = vec![vec![0xBB; 1952], vec![0xAA; 1952]];
+        assert_ne!(compute_genesis_hash(2, &pks_a), compute_genesis_hash(2, &pks_b));
+    }
 
     #[test]
     fn test_testnet_profile() {

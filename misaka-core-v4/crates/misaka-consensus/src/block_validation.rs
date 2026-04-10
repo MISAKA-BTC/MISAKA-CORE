@@ -1,4 +1,14 @@
-//! Block Validation — Mainnet P0 grade.
+//! Block Validation — Legacy (non-DAG) path.
+//!
+//! # SEC-FIX WARNING
+//!
+//! This module uses `tx.tx_hash()` as the signing digest (line ~229), whereas
+//! the DAG executor (`utxo_executor.rs`) uses `IntentMessage::wrap().signing_digest()`.
+//! Transactions signed by the CLI (which uses IntentMessage) will FAIL verification
+//! in this path. This module is only valid for the legacy non-DAG execution mode.
+//!
+//! In DAG mode, all transaction execution goes through `UtxoExecutor` which uses
+//! the correct IntentMessage-based digest. This module should NOT be called in DAG mode.
 //!
 //! # Security Properties
 //!
@@ -8,22 +18,12 @@
 //! 4. **Same-Amount Ring**: All members must have equal amounts (Item 3 fix)
 //! 5. **Block Hash Binding**: proposal.block_hash == canonical hash (Item 2 fix)
 
-use misaka_pqc::ki_proof::KiProof;
-use misaka_pqc::pq_ring::{derive_public_param, Poly, RingSig, DEFAULT_A_SEED};
-#[cfg(feature = "stark-stub")]
-use misaka_pqc::verify_zero_knowledge_tx_with_statement;
-use misaka_pqc::{
-    select_privacy_backend, validate_public_statement, verify_ring_family_input,
-    PrivacyBackendPreference, RingFamilyVerifyError, RingFamilyVerifyInput,
-    TransactionPrivacyConstraints, TransactionPublicStatement,
-};
+use misaka_pqc::key_derivation::Poly;
 use misaka_storage::utxo_set::{BlockDelta, UtxoError, UtxoSet};
 use misaka_types::utxo::*;
 use misaka_types::validator::Proposal;
 use sha3::{Digest, Sha3_256};
-use std::collections::HashSet;
 
-use super::validation_pipeline::validate_resolved_privacy_constraints;
 use super::validator_set::ValidatorSet;
 
 // ═══ Error Types ══════════════════════════════════════════════
@@ -42,10 +42,6 @@ pub enum BlockError {
     TxStructural { index: usize, reason: String },
     #[error("tx[{index}] ring sig: {reason}")]
     TxRingSig { index: usize, reason: String },
-    #[error("tx[{index}] key image proof: {reason}")]
-    TxKiProof { index: usize, reason: String },
-    #[error("tx[{index}] key image conflict: {ki}")]
-    TxKeyImageConflict { index: usize, ki: String },
     #[error("tx[{index}] ring member not found: {member}")]
     TxRingMemberNotFound { index: usize, member: String },
     #[error("tx[{index}] ring amounts not uniform: input[{input}] has amounts {amounts:?}")]
@@ -60,20 +56,14 @@ pub enum BlockError {
         inputs: u64,
         required: u64,
     },
-    #[error("tx[{index}] privacy constraints mismatch: {reason}")]
-    TxPrivacyConstraints { index: usize, reason: String },
-    #[error("tx[{index}] public statement mismatch: {reason}")]
-    TxPublicStatement { index: usize, reason: String },
     #[error("tx[{index}] zero-knowledge proof: {reason}")]
     TxZeroKnowledge { index: usize, reason: String },
     #[error("tx[{index}] unsupported ring scheme: 0x{scheme:02x}")]
     TxUnsupportedScheme { index: usize, scheme: u8 },
-    #[error("tx[{index}] logring link_tag mismatch")]
-    TxLinkTagMismatch { index: usize },
-    #[error("block: duplicate nullifier: {ki}")]
-    BlockDuplicateKeyImage { ki: String },
     #[error("utxo: {0}")]
     Utxo(#[from] UtxoError),
+    #[error("total fees overflow")]
+    FeeOverflow,
 }
 
 // ═══ Canonical Block Hash ════════════════════════════════════
@@ -93,7 +83,8 @@ pub fn canonical_block_hash(block: &BlockCandidate) -> [u8; 32] {
     // TX root: hash of all tx digests
     let mut tx_h = Sha3_256::new();
     for vtx in &block.transactions {
-        tx_h.update(&vtx.tx.signing_digest());
+        // Phase 2c-B: signing_digest deleted; use tx_hash for v1 compat
+        tx_h.update(&vtx.tx.tx_hash());
     }
     h.update(&tx_h.finalize());
 
@@ -102,26 +93,15 @@ pub fn canonical_block_hash(block: &BlockCandidate) -> [u8; 32] {
 
 // ═══ Transaction Container ══════════════════════════════════
 
-/// Scheme-aware ring proof — eliminates dummy RingSig values.
+/// Proof type for verified transactions.
 ///
-/// Each variant carries exactly the data needed for that scheme's verification.
-/// The validator MUST `match` this enum, ensuring compile-time exhaustiveness
-/// when new schemes are added.
+/// SEC-FIX: Legacy LRS and LogRing variants have been removed.
+/// All transactions use TransparentTransfer (ML-DSA-65 direct signatures)
+/// as of Phase 2c-B. The LRS code contained a key image forgery vulnerability.
 #[derive(Debug, Clone)]
-pub enum VerifiedRingProof {
-    /// LRS-v1: parsed RingSig + mandatory KiProof.
-    Lrs {
-        sig: RingSig,
-        ki_proof: Option<KiProof>,
-    },
-    /// LogRing-v1: raw bytes (parsed lazily by block_validation).
-    LogRing { raw_sig: Vec<u8> },
-    /// ChipmunkRing: raw bytes (parsed lazily by block_validation).
-    #[cfg(feature = "chipmunk")]
-    Chipmunk {
-        raw_sig: Vec<u8>,
-        raw_ki_proof: Vec<u8>,
-    },
+pub enum VerifiedProof {
+    /// Transparent: ML-DSA-65 direct signature (the only supported scheme).
+    Transparent { raw_sig: Vec<u8> },
 }
 
 /// Pre-verified transaction. NO real_input_refs.
@@ -130,21 +110,14 @@ pub struct VerifiedTx {
     pub tx: UtxoTransaction,
     /// ring_pubkeys[i] = pubkeys for input i's ring members.
     pub ring_pubkeys: Vec<Vec<Poly>>,
+    /// Raw spending key bytes per input (ML-DSA-65 pk for transparent, Poly bytes for legacy).
+    /// Used by ML-DSA direct signature verification.
+    pub raw_spending_keys: Vec<Vec<u8>>,
     /// ring_amounts[i][j] = amount of ring member j for input i.
     /// MUST be uniform (all equal) per same-amount ring rule.
     pub ring_amounts: Vec<Vec<u64>>,
     /// Per-input ring proofs, typed by scheme.
-    pub ring_proofs: Vec<VerifiedRingProof>,
-    /// Optional common privacy statement derived from resolved inputs.
-    ///
-    /// This does not replace scheme-specific verification. It exists so the
-    /// current LogRing path and a future ZKP path can talk about the same
-    /// transaction-level statement.
-    pub privacy_constraints: Option<TransactionPrivacyConstraints>,
-    /// Public statement built from resolved rings and tx bindings.
-    ///
-    /// This is the future-facing seam for ZK membership/nullifier proofs.
-    pub privacy_statement: Option<TransactionPublicStatement>,
+    pub ring_proofs: Vec<VerifiedProof>,
 }
 
 /// Block candidate.
@@ -160,41 +133,26 @@ pub struct BlockCandidate {
 
 // ═══ Core Validation ═════════════════════════════════════════
 
-/// Maximum transactions per block (DoS protection).
-pub const MAX_TXS_PER_BLOCK: usize = 256;
+/// Maximum transactions per block — SSOT from misaka-types.
+pub const MAX_TXS_PER_BLOCK: usize = misaka_types::constants::MAX_TXS_PER_BLOCK;
 
+/// SEC-FIX H-3: This function uses `tx.tx_hash()` as the signing digest,
+/// which differs from the DAG executor's `IntentMessage::wrap().signing_digest()`.
+/// Calling this in DAG mode will cause valid transactions to be rejected.
+/// Use `UtxoExecutor` for DAG mode instead.
+#[deprecated(note = "Legacy non-DAG path — do NOT use in DAG mode. Use UtxoExecutor instead.")]
 pub fn validate_and_apply_block(
     block: &BlockCandidate,
     utxo_set: &mut UtxoSet,
     validator_set: Option<&ValidatorSet>,
 ) -> Result<BlockDelta, BlockError> {
-    validate_and_apply_block_with_backend(
-        block,
-        utxo_set,
-        validator_set,
-        PrivacyBackendPreference::RingSignature,
-    )
+    validate_and_apply_block_inner(block, utxo_set, validator_set)
 }
 
-#[cfg(feature = "stark-stub")]
-pub fn validate_and_apply_block_zero_knowledge(
+fn validate_and_apply_block_inner(
     block: &BlockCandidate,
     utxo_set: &mut UtxoSet,
     validator_set: Option<&ValidatorSet>,
-) -> Result<BlockDelta, BlockError> {
-    validate_and_apply_block_with_backend(
-        block,
-        utxo_set,
-        validator_set,
-        PrivacyBackendPreference::ZeroKnowledge,
-    )
-}
-
-fn validate_and_apply_block_with_backend(
-    block: &BlockCandidate,
-    utxo_set: &mut UtxoSet,
-    validator_set: Option<&ValidatorSet>,
-    backend_preference: PrivacyBackendPreference,
 ) -> Result<BlockDelta, BlockError> {
     // ═══ 0a. Structural bounds ═══
     if block.transactions.len() > MAX_TXS_PER_BLOCK {
@@ -261,19 +219,26 @@ fn validate_and_apply_block_with_backend(
         .map_err(|e| BlockError::Proposer(format!("sig verify: {e}")))?;
     }
 
+    // ═══ SEC-FIX: Reject system-only tx types in user blocks (defense-in-depth) ═══
+    for (idx, vtx) in block.transactions.iter().enumerate() {
+        if matches!(
+            vtx.tx.tx_type,
+            misaka_types::utxo::TxType::SystemEmission
+                | misaka_types::utxo::TxType::Faucet
+        ) {
+            return Err(BlockError::TxStructural {
+                index: idx,
+                reason: "SystemEmission/Faucet transactions cannot appear in user blocks"
+                    .into(),
+            });
+        }
+    }
+
     // ═══ 1. Transaction Validation ═══
     let mut delta = BlockDelta::new(block.height);
-    let mut seen_nullifiers: HashSet<[u8; 32]> = HashSet::new();
-    let a = derive_public_param(&DEFAULT_A_SEED);
 
     for (tx_idx, vtx) in block.transactions.iter().enumerate() {
         let tx = &vtx.tx;
-        let selected_backend = select_privacy_backend(tx, backend_preference).map_err(|e| {
-            BlockError::TxStructural {
-                index: tx_idx,
-                reason: format!("backend selection failed: {e}"),
-            }
-        })?;
 
         // Structural validation
         tx.validate_structure()
@@ -285,25 +250,13 @@ fn validate_and_apply_block_with_backend(
         let mut sum_input_amount: u64 = 0;
 
         for (in_idx, input) in tx.inputs.iter().enumerate() {
-            let ki_hex = hex::encode(input.key_image);
-
-            // ── Nullifier checks ──
-            if !seen_nullifiers.insert(input.key_image) {
-                return Err(BlockError::BlockDuplicateKeyImage { ki: ki_hex });
-            }
-            if utxo_set.has_key_image(&input.key_image) {
-                return Err(BlockError::TxKeyImageConflict {
-                    index: tx_idx,
-                    ki: ki_hex,
-                });
-            }
-
             // ── Ring member existence ──
-            let pks = &vtx.ring_pubkeys[in_idx];
+            let _pks = &vtx.ring_pubkeys[in_idx];
             let amounts = &vtx.ring_amounts[in_idx];
-            let digest = tx.signing_digest();
+            // Phase 2c-B: signing_digest deleted; use tx_hash for v1 compat
+            let digest = tx.tx_hash();
 
-            for (m_idx, member) in input.ring_members.iter().enumerate() {
+            for (m_idx, member) in input.utxo_refs.iter().enumerate() {
                 if utxo_set.get(member).is_none() {
                     return Err(BlockError::TxRingMemberNotFound {
                         index: tx_idx,
@@ -322,7 +275,7 @@ fn validate_and_apply_block_with_backend(
             // the signer's UTXO has the same amount as every decoy.
             if !amounts.is_empty() {
                 let ring_amount = amounts[0];
-                for (j, &amt) in amounts.iter().enumerate().skip(1) {
+                for (_j, &amt) in amounts.iter().enumerate().skip(1) {
                     if amt != ring_amount {
                         return Err(BlockError::TxRingAmountsNotUniform {
                             index: tx_idx,
@@ -340,72 +293,57 @@ fn validate_and_apply_block_with_backend(
                 })?;
             }
 
-            if selected_backend.backend_family == misaka_pqc::PrivacyBackendFamily::RingSignature {
-                let (raw_sig, raw_ki_proof) = match &vtx.ring_proofs[in_idx] {
-                    VerifiedRingProof::LogRing { raw_sig } => (raw_sig.clone(), Vec::new()),
-                    VerifiedRingProof::Lrs { sig, ki_proof } => (
-                        sig.to_bytes(),
-                        ki_proof
-                            .as_ref()
-                            .map(|proof| proof.to_bytes())
-                            .unwrap_or_default(),
-                    ),
-                    #[cfg(feature = "chipmunk")]
-                    VerifiedRingProof::Chipmunk {
-                        raw_sig,
-                        raw_ki_proof,
-                    } => (raw_sig.clone(), raw_ki_proof.clone()),
+            // ── ML-DSA-65 direct signature verification (transparent mode) ──
+            {
+                let raw_sig = match &vtx.ring_proofs[in_idx] {
+                    VerifiedProof::Transparent { raw_sig } => raw_sig.clone(),
+                    _ => {
+                        return Err(BlockError::TxRingSig {
+                            index: tx_idx,
+                            reason: "transparent tx requires VerifiedProof::Transparent".into(),
+                        });
+                    }
                 };
 
-                let verify = RingFamilyVerifyInput {
-                    a_param: &a,
-                    ring_pubkeys: pks,
-                    signing_digest: &digest,
-                    input_key_image: &input.key_image,
-                    raw_ring_signature: &raw_sig,
-                    raw_ki_proof: &raw_ki_proof,
-                };
+                // Get ML-DSA-65 public key from resolved spending key
+                let ml_dsa_pk_bytes = &vtx.raw_spending_keys[in_idx];
+                let ml_dsa_pk = misaka_pqc::pq_sign::MlDsaPublicKey::from_bytes(ml_dsa_pk_bytes)
+                    .map_err(|_| BlockError::TxRingSig {
+                        index: tx_idx,
+                        reason: "invalid ML-DSA-65 public key in UTXO".into(),
+                    })?;
+                let ml_dsa_sig = misaka_pqc::pq_sign::MlDsaSignature::from_bytes(&raw_sig)
+                    .map_err(|_| BlockError::TxRingSig {
+                        index: tx_idx,
+                        reason: "invalid ML-DSA-65 signature".into(),
+                    })?;
 
-                verify_ring_family_input(&selected_backend, tx, in_idx, &verify).map_err(|e| {
-                    match e {
-                        RingFamilyVerifyError::ProofParse(reason) => BlockError::TxRingSig {
-                            index: tx_idx,
-                            reason,
-                        },
-                        RingFamilyVerifyError::SignatureInvalid(reason) => BlockError::TxRingSig {
-                            index: tx_idx,
-                            reason,
-                        },
-                        RingFamilyVerifyError::SpendIdentifierMismatch(_) => {
-                            BlockError::TxLinkTagMismatch { index: tx_idx }
-                        }
-                        RingFamilyVerifyError::MissingKeyImageProof => BlockError::TxKiProof {
-                            index: tx_idx,
-                            reason: "KI proof is REQUIRED for this backend but was None".into(),
-                        },
-                        RingFamilyVerifyError::KeyImageProofInvalid(reason) => {
-                            BlockError::TxKiProof {
-                                index: tx_idx,
-                                reason,
-                            }
-                        }
-                        RingFamilyVerifyError::WrongBackendFamily(family) => {
-                            BlockError::TxRingSig {
-                                index: tx_idx,
-                                reason: format!(
-                                    "wrong backend family for block validation: {:?}",
-                                    family
-                                ),
-                            }
-                        }
-                        RingFamilyVerifyError::UnsupportedScheme(scheme) => {
-                            BlockError::TxUnsupportedScheme {
-                                index: tx_idx,
-                                scheme,
-                            }
-                        }
+                // Verify ML-DSA-65 signature (NIST FIPS 204, deterministic, no timing leak)
+                misaka_pqc::pq_sign::ml_dsa_verify_raw(&ml_dsa_pk, &digest, &ml_dsa_sig).map_err(
+                    |_| BlockError::TxRingSig {
+                        index: tx_idx,
+                        reason: "ML-DSA-65 signature verification failed".into(),
+                    },
+                )?;
+
+                // KI proof is optional for transparent (UTXO reference prevents double-spend)
+                // Key image is still tracked for state manager compatibility.
+            }
+        }
+
+        // ── Audit #19: Consume input UTXOs (prevent double-spend in block_validation path) ──
+        let mut spent_entries: Vec<([u8; 32], OutputRef, TxOutput)> = Vec::new();
+        for input in &tx.inputs {
+            if let Some(spent_outref) = input.utxo_refs.first() {
+                let entry = utxo_set.get(spent_outref).ok_or_else(|| {
+                    BlockError::TxRingMemberNotFound {
+                        index: tx_idx,
+                        member: format!("input UTXO already spent in this block"),
                     }
                 })?;
+                let output = entry.output.clone();
+                utxo_set.remove_output(spent_outref);
+                spent_entries.push(([0u8; 32], spent_outref.clone(), output));
             }
         }
 
@@ -435,86 +373,24 @@ fn validate_and_apply_block_with_backend(
             });
         }
 
-        if let Some(ref constraints) = vtx.privacy_constraints {
-            validate_resolved_privacy_constraints(
-                constraints,
-                tx,
-                sum_input_amount,
-                sum_outputs,
-                selected_backend.backend_family,
-            )
-            .map_err(|e| BlockError::TxPrivacyConstraints {
-                index: tx_idx,
-                reason: e.to_string(),
-            })?;
-            if let Some(ref statement) = vtx.privacy_statement {
-                validate_public_statement(
-                    statement,
-                    tx,
-                    constraints,
-                    selected_backend.backend_family,
-                )
-                .map_err(|e| BlockError::TxPublicStatement {
-                    index: tx_idx,
-                    reason: e.to_string(),
-                })?;
-            }
-            if selected_backend.backend_family == misaka_pqc::PrivacyBackendFamily::ZeroKnowledge {
-                #[cfg(feature = "stark-stub")]
-                {
-                    let statement = vtx.privacy_statement.as_ref().ok_or_else(|| {
-                        BlockError::TxZeroKnowledge {
-                            index: tx_idx,
-                            reason: "zero-knowledge path requires public statement".into(),
-                        }
-                    })?;
-                    verify_zero_knowledge_tx_with_statement(
-                        &selected_backend,
-                        tx,
-                        constraints,
-                        statement,
-                    )
-                    .map_err(|e| BlockError::TxZeroKnowledge {
-                        index: tx_idx,
-                        reason: e.to_string(),
-                    })?;
-                }
-                #[cfg(not(feature = "stark-stub"))]
-                return Err(BlockError::TxZeroKnowledge {
-                    index: tx_idx,
-                    reason: "zero-knowledge backend unavailable without stark-stub feature".into(),
-                });
-            }
-        } else if selected_backend.backend_family == misaka_pqc::PrivacyBackendFamily::ZeroKnowledge
-        {
-            return Err(BlockError::TxZeroKnowledge {
-                index: tx_idx,
-                reason: "zero-knowledge path requires resolved privacy constraints".into(),
-            });
-        }
-
-        // ── Apply: nullifiers + outputs + spending keys ──
+        // ── Apply: outputs + spending keys ──
         let tx_hash = tx.tx_hash();
         let mut tx_delta = BlockDelta::new(block.height);
-
-        for input in &tx.inputs {
-            utxo_set
-                .record_nullifier(input.key_image)
-                .map_err(BlockError::Utxo)?;
-            tx_delta.key_images_added.push(input.key_image);
-        }
+        tx_delta.spent = spent_entries;
 
         for (idx, output) in tx.outputs.iter().enumerate() {
             let outref = OutputRef {
                 tx_hash,
                 output_index: idx as u32,
             };
-            utxo_set.add_output(outref.clone(), output.clone(), block.height)?;
+            utxo_set.add_output(outref.clone(), output.clone(), block.height, false)?;
 
             // Phase 1.2 fix: Auto-register spending pubkey so this UTXO can be
             // used as a ring member in future transactions.
             if let Some(ref spk_bytes) = output.spending_pubkey {
-                utxo_set.register_spending_key(outref.clone(), spk_bytes.clone());
+                if let Err(e) = utxo_set.register_spending_key(outref.clone(), spk_bytes.clone()) {
+                    tracing::warn!("spending key registration failed for {:?}: {}", outref, e);
+                }
             }
 
             tx_delta.created.push(outref);
@@ -523,7 +399,7 @@ fn validate_and_apply_block_with_backend(
         delta.merge(tx_delta);
     }
 
-    // Update UTXO set height and store delta for rollback support
+    // Update UTXO set height and store delta for SPC switch support
     utxo_set
         .apply_block(delta.clone())
         .map_err(|e| BlockError::Utxo(e))?;
@@ -531,7 +407,11 @@ fn validate_and_apply_block_with_backend(
     Ok(delta)
 }
 
-/// Rollback the last applied block.
-pub fn rollback_block(utxo_set: &mut UtxoSet) -> Result<BlockDelta, BlockError> {
-    utxo_set.rollback_block().map_err(BlockError::from)
+/// Undo the last applied block (for SPC switch only).
+///
+/// This is NOT a protocol-level rollback. It is used during shallow
+/// Selected Parent Chain switches when DAG ordering changes.
+/// The caller MUST verify finality boundaries before calling.
+pub fn undo_last_block(utxo_set: &mut UtxoSet) -> Result<BlockDelta, BlockError> {
+    utxo_set.undo_last_delta().map_err(BlockError::from)
 }

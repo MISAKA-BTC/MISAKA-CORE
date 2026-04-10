@@ -1,12 +1,21 @@
 //! UTXO Set — tracks unspent outputs and spent key images.
 //!
+//! # No-Rollback Architecture
+//!
+//! Protocol-level rollback is forbidden. The delta stack is retained
+//! only for shallow SPC (Selected Parent Chain) switches during DAG
+//! ordering updates. Max depth is limited to `MAX_SPC_SWITCH_DEPTH`.
+//!
+//! For full state recovery, use rebuild-from-checkpoint.
+//!
 //! Supports:
 //! - Add new outputs (from block)
 //! - Spend outputs (mark as consumed via key image)
-//! - Rollback (undo a block's state changes)
+//! - Shallow SPC switch undo (internal, limited depth)
 //! - Query existence and lookup
 
-use misaka_types::utxo::{OutputRef, TxOutput, UtxoTransaction};
+use misaka_muhash::MuHash;
+use misaka_types::utxo::{OutputRef, TxOutput, TxType, UtxoTransaction};
 use std::collections::{HashMap, HashSet};
 
 /// A stored UTXO entry.
@@ -16,6 +25,9 @@ pub struct UtxoEntry {
     pub output: TxOutput,
     /// Block height at which this UTXO was created.
     pub created_at: u64,
+    /// §4.4: Whether this UTXO was created by a SystemEmission/Coinbase transaction.
+    /// Emission outputs require 300-block maturity before spending.
+    pub is_emission: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -24,23 +36,39 @@ pub struct StoredUtxoSnapshot {
     pub output: TxOutput,
     pub created_at: u64,
     pub spending_pubkey: Option<Vec<u8>>,
+    /// §4.4: Whether this UTXO was created by SystemEmission.
+    #[serde(default)]
+    pub is_emission: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct UtxoSetSnapshot {
     pub height: u64,
     pub unspent: Vec<StoredUtxoSnapshot>,
-    pub key_images: Vec<[u8; 32]>,
+    // Phase 2c-B D4c: spend_ids deleted
+
+    /// SEC-FIX: Persisted burn IDs for bridge replay protection across restarts.
+    /// Without this, `UtxoExecutor::check_burn_replay()` is ineffective after
+    /// a node restart — the same Solana burn tx can be replayed for double-mint.
+    /// Uses `#[serde(default)]` for backward compatibility with existing snapshots.
+    #[serde(default)]
+    pub processed_burns: Vec<[u8; 32]>,
+
+    /// SEC-FIX CRITICAL: Cumulative total emission amount for supply cap enforcement.
+    /// Without persistence, `total_emitted` resets to 0 on restart, allowing
+    /// unlimited SystemEmission beyond MAX_TOTAL_SUPPLY.
+    #[serde(default)]
+    pub total_emitted: u64,
 }
 
-/// State changes from applying one block (for rollback).
+/// State changes from applying one block (for SPC switch undo).
 ///
-/// # Anonymous Nullifier Model
+/// # Anonymous SpendTag Model
 ///
 /// In the current model, the validator does NOT know which specific UTXO
-/// was consumed by a ring signature — only the nullifier (key image) is
+/// was consumed by a ML-DSA signature — only the spend identifier is
 /// recorded. Therefore `spent` is always empty. Rollback can undo:
-/// - Key image additions (remove nullifiers)
+/// - Spend tag additions (remove spent tags)
 /// - Output creations (remove new UTXOs)
 ///
 /// It CANNOT restore "spent" UTXOs because the real spender is unknown.
@@ -51,33 +79,32 @@ pub struct BlockDelta {
     pub height: u64,
     /// UTXOs created in this block.
     pub created: Vec<OutputRef>,
-    /// DEPRECATED in anonymous nullifier model — always empty.
+    /// DEPRECATED in transparent model — always empty.
     /// Retained for type compatibility; will be removed in v0.5.
     pub spent: Vec<([u8; 32], OutputRef, TxOutput)>,
-    /// Key images (nullifiers) added in this block.
-    pub key_images_added: Vec<[u8; 32]>,
+    // Phase 2c-B D4c: spend_ids_added deleted
 }
 
 impl BlockDelta {
-    /// Create an empty delta for a given block height.
     pub fn new(height: u64) -> Self {
         Self {
             height,
             created: Vec::new(),
             spent: Vec::new(),
-            key_images_added: Vec::new(),
         }
     }
 
-    /// Merge another delta into this one (for per-tx → per-block aggregation).
     pub fn merge(&mut self, other: BlockDelta) {
         self.created.extend(other.created);
         self.spent.extend(other.spent);
-        self.key_images_added.extend(other.key_images_added);
     }
 }
 
-/// UTXO Set with rollback support.
+/// Maximum SPC switch depth. Must be >= 2x max finality lag to handle
+/// legitimate DAG reorgs. Previously 36, expanded to 1000 per audit HIGH #12.
+pub const MAX_SPC_SWITCH_DEPTH: usize = 1000;
+
+/// UTXO Set with shallow SPC switch support.
 ///
 /// # Spending Key Persistence (FIX-3)
 ///
@@ -88,17 +115,42 @@ impl BlockDelta {
 pub struct UtxoSet {
     /// Unspent outputs indexed by OutputRef.
     unspent: HashMap<OutputRef, UtxoEntry>,
-    /// All spent key images.
-    key_images: HashSet<[u8; 32]>,
+    // Phase 2c-B D4c: spend_ids HashSet deleted (ring removed)
     /// Spending pubkey for each UTXO (serialized Poly bytes).
     /// Persistent: survives restart. Required for ring member resolution.
     spending_pubkeys: HashMap<OutputRef, Vec<u8>>,
-    /// Block deltas for rollback (last N blocks).
+    /// Block deltas for SPC switch undo (last N blocks).
     deltas: Vec<BlockDelta>,
     /// Maximum delta history (for pruning).
     max_delta_history: usize,
     /// Current chain height.
     pub height: u64,
+    /// Phase 3 C6: MuHash incremental accumulator for state root.
+    /// Replaces the Merkle-based compute_state_root (HARD FORK).
+    muhash: MuHash,
+    /// Cached total amount across all UTXOs (JSON-RPC DoS prevention).
+    /// Updated incrementally on add_output / remove_output.
+    cached_total_amount: u64,
+}
+
+/// Phase 3 C6: Compute the canonical byte representation of a UTXO element
+/// for MuHash accumulation. Uses borsh encoding for determinism.
+fn utxo_element_bytes(outref: &OutputRef, output: &TxOutput, height: u64) -> Vec<u8> {
+    use borsh::BorshSerialize;
+    let mut buf = Vec::with_capacity(128);
+    buf.extend_from_slice(b"MISAKA:muhash:utxo:v1:");
+    // SEC-FIX CRITICAL: borsh failures MUST panic, not silently skip.
+    // Previously `if let Ok(...)` silently dropped failed serializations,
+    // causing the MuHash accumulator to produce incorrect state roots.
+    // Different nodes could compute different roots for the same UTXO set.
+    let outref_bytes = borsh::to_vec(outref)
+        .expect("OutputRef borsh serialization must not fail — type is fixed-size");
+    buf.extend_from_slice(&outref_bytes);
+    let output_bytes = borsh::to_vec(output)
+        .expect("TxOutput borsh serialization must not fail");
+    buf.extend_from_slice(&output_bytes);
+    buf.extend_from_slice(&height.to_le_bytes());
+    buf
 }
 
 /// UTXO set errors.
@@ -110,23 +162,42 @@ pub enum UtxoError {
     OutputAlreadyExists(String),
     #[error("key image already spent: {0}")]
     KeyImageSpent(String),
-    #[error("key image not found for rollback: {0}")]
+    #[error("key image not found for SPC switch undo: {0}")]
     KeyImageNotFound(String),
-    #[error("no delta for rollback at height {0}")]
+    #[error("no delta for SPC switch undo at height {0}")]
     NoDeltaForRollback(u64),
     #[error("amount mismatch: inputs={inputs}, outputs={outputs}, fee={fee}")]
     AmountMismatch { inputs: u64, outputs: u64, fee: u64 },
+    #[error("snapshot I/O error: {0}")]
+    SnapshotIo(String),
+    #[error("snapshot integrity check failed: {0}")]
+    SnapshotIntegrity(String),
+}
+
+/// Errors from `register_spending_key`.
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum SpendingKeyError {
+    #[error("spending key already registered for outref {outref:?}")]
+    AlreadyRegistered { outref: OutputRef },
+    #[error("invalid key length: expected {expected}, got {got}")]
+    InvalidKeyLength { expected: usize, got: usize },
 }
 
 impl UtxoSet {
+    /// Create a new empty UTXO set.
+    ///
+    /// `max_delta_history` is clamped to `MAX_SPC_SWITCH_DEPTH` (36).
+    /// This prevents deep rollback — only shallow SPC switches are supported.
     pub fn new(max_delta_history: usize) -> Self {
+        let clamped = max_delta_history.min(MAX_SPC_SWITCH_DEPTH);
         Self {
             unspent: HashMap::new(),
-            key_images: HashSet::new(),
             spending_pubkeys: HashMap::new(),
             deltas: Vec::new(),
-            max_delta_history,
+            max_delta_history: clamped,
             height: 0,
+            muhash: MuHash::new(),
+            cached_total_amount: 0,
         }
     }
 
@@ -135,8 +206,31 @@ impl UtxoSet {
     /// Register a spending public key for a UTXO.
     /// Called when outputs are created (genesis, block apply, faucet).
     /// The key is stored persistently alongside the UTXO.
-    pub fn register_spending_key(&mut self, outref: OutputRef, pubkey_bytes: Vec<u8>) {
+    ///
+    /// # Security (Audit #11)
+    /// - Rejects duplicate registration for the same outref (prevents UTXO hijack)
+    /// - Validates key length (must be ML-DSA-65 = 1952 bytes)
+    /// - Returns Err if validation fails
+    pub fn register_spending_key(
+        &mut self,
+        outref: OutputRef,
+        pubkey_bytes: Vec<u8>,
+    ) -> Result<(), SpendingKeyError> {
+        // Length validation: ML-DSA-65 public key is exactly 1952 bytes
+        if pubkey_bytes.len() != 1952 {
+            return Err(SpendingKeyError::InvalidKeyLength {
+                expected: 1952,
+                got: pubkey_bytes.len(),
+            });
+        }
+
+        // Duplicate check: reject if this outref already has a registered key
+        if self.spending_pubkeys.contains_key(&outref) {
+            return Err(SpendingKeyError::AlreadyRegistered { outref });
+        }
+
         self.spending_pubkeys.insert(outref, pubkey_bytes);
+        Ok(())
     }
 
     /// Get the spending public key for a UTXO.
@@ -171,15 +265,7 @@ impl UtxoSet {
         self.unspent.get(outref).map(|e| &e.output)
     }
 
-    /// Check if a key image has been spent (alias: `is_key_image_spent`).
-    pub fn has_key_image(&self, ki: &[u8; 32]) -> bool {
-        self.key_images.contains(ki)
-    }
-
-    /// Check if a key image has been spent.
-    pub fn is_key_image_spent(&self, ki: &[u8; 32]) -> bool {
-        self.key_images.contains(ki)
-    }
+    // Phase 2c-B D4c: has_spend_tag / is_spend_tag_spent / record_spend_tag deleted
 
     /// Number of unspent outputs.
     pub fn len(&self) -> usize {
@@ -190,57 +276,109 @@ impl UtxoSet {
         self.unspent.is_empty()
     }
 
+    /// Total amount across all unspent outputs (for supply tracking).
+    /// Total amount across all unspent outputs.
+    /// Uses cached value maintained incrementally by add_output/remove_output.
+    /// O(1) instead of O(N).
+    pub fn total_amount(&self) -> u64 {
+        self.cached_total_amount
+    }
+
     // ─── Mutate ─────────────────────────────────────────
 
     /// Add a UTXO (from a new block's outputs).
+    ///
+    /// `is_emission`: true if this output was created by a SystemEmission transaction.
+    /// Emission outputs require 300-block maturity before spending (§4.4).
     pub fn add_output(
         &mut self,
         outref: OutputRef,
         output: TxOutput,
         height: u64,
+        is_emission: bool,
     ) -> Result<(), UtxoError> {
         if self.unspent.contains_key(&outref) {
             return Err(UtxoError::OutputAlreadyExists(format!("{:?}", outref)));
         }
+        let amount = output.amount;
+        // Phase 3 C6: Update MuHash accumulator incrementally.
+        let elem = utxo_element_bytes(&outref, &output, height);
+        self.muhash.add_element(&elem);
         self.unspent.insert(
             outref.clone(),
             UtxoEntry {
                 outref,
                 output,
                 created_at: height,
+                is_emission,
             },
         );
+        self.cached_total_amount = self.cached_total_amount.saturating_add(amount);
         Ok(())
     }
 
-    /// Record a nullifier (key_image / link_tag) as spent.
+    /// Remove a spent UTXO from the set and its spending key index.
+    /// Called by block producer after a TX consumes this output.
+    pub fn remove_output(&mut self, outref: &OutputRef) {
+        if let Some(entry) = self.unspent.remove(outref) {
+            // Phase 3 C6: Remove from MuHash accumulator.
+            let elem = utxo_element_bytes(outref, &entry.output, entry.created_at);
+            self.muhash.remove_element(&elem);
+            self.cached_total_amount = self.cached_total_amount.saturating_sub(entry.output.amount);
+        }
+        self.spending_pubkeys.remove(outref);
+    }
+
+    /// Record a spend identifier / link_tag) as spent.
     ///
     /// MAINNET: This is the primary spend mechanism. We do NOT mark
-    /// specific UTXOs as consumed — only the nullifier is recorded.
+    /// specific UTXOs as consumed — spend tracking is handled transparently.
     /// This preserves anonymity: the validator cannot determine which
-    /// ring member was the real spender.
-    pub fn record_nullifier(&mut self, key_image: [u8; 32]) -> Result<(), UtxoError> {
-        if self.key_images.contains(&key_image) {
-            return Err(UtxoError::KeyImageSpent(hex::encode(key_image)));
-        }
-        self.key_images.insert(key_image);
-        Ok(())
-    }
+    // Phase 2c-B D4c: record_spend_tag deleted (ring removed)
 
-    /// Apply a transaction using the anonymous nullifier model.
+    /// Apply a transaction — consume inputs and create outputs.
     ///
-    /// Records nullifiers for all inputs and creates outputs.
-    /// Does NOT consume specific UTXOs (anonymity preserved).
-    pub fn apply_transaction_anonymous(
+    /// SECURITY: Each input UTXO is removed from the unspent set.
+    /// This is the fundamental double-spend prevention mechanism.
+    pub fn apply_transaction(
         &mut self,
         tx: &UtxoTransaction,
     ) -> Result<BlockDelta, UtxoError> {
         let mut delta = BlockDelta::new(self.height);
 
-        // Record nullifiers (NOT spending specific UTXOs)
+        // SEC-FIX: Defense-in-depth — reject multi-ref inputs at storage layer.
+        // The executor already checks this (FIX 98), but enforce here too
+        // to prevent any bypass path from consuming unowned UTXOs.
+        for (i, input) in tx.inputs.iter().enumerate() {
+            if input.utxo_refs.len() > 1 {
+                return Err(UtxoError::OutputNotFound(format!(
+                    "input[{}]: multi-ref inputs not allowed (got {} refs) — signature bypass risk",
+                    i, input.utxo_refs.len()
+                )));
+            }
+        }
+
+        // Consume inputs: remove each referenced UTXO from the unspent set
         for input in &tx.inputs {
-            self.record_nullifier(input.key_image)?;
-            delta.key_images_added.push(input.key_image);
+            for outref in &input.utxo_refs {
+                if self.unspent.contains_key(outref) {
+                    // Record spent UTXO in delta for potential rollback
+                    if let Some(entry) = self.unspent.get(outref) {
+                        delta.spent.push((
+                            outref.tx_hash,
+                            outref.clone(),
+                            entry.output.clone(),
+                        ));
+                    }
+                    self.remove_output(outref);
+                } else {
+                    return Err(UtxoError::OutputNotFound(format!(
+                        "input UTXO {}:{} not found (already spent or never existed)",
+                        hex::encode(&outref.tx_hash[..8]),
+                        outref.output_index,
+                    )));
+                }
+            }
         }
 
         // Create outputs
@@ -250,7 +388,18 @@ impl UtxoSet {
                 tx_hash,
                 output_index: idx as u32,
             };
-            self.add_output(outref.clone(), output.clone(), self.height)?;
+            self.add_output(outref.clone(), output.clone(), self.height, false)?;
+
+            // SEC-FIX CRITICAL: Register spending_pubkey for new outputs.
+            // Without this, get_spending_key() returns None for all DAG-committed
+            // outputs, causing validate_transparent_transfer() to reject every
+            // subsequent spend of these outputs (chain functionality failure).
+            // Previously only the legacy block_producer path called register_spending_key().
+            if let Some(ref spk) = output.spending_pubkey {
+                // Ignore errors (key already registered from snapshot restore, etc.)
+                let _ = self.register_spending_key(outref.clone(), spk.clone());
+            }
+
             delta.created.push(outref);
         }
 
@@ -258,10 +407,14 @@ impl UtxoSet {
     }
 
     // Legacy spend() and apply_transaction(real_input_refs) have been
-    // permanently removed. Use record_nullifier() and
+    // permanently removed. Use record_spend_tag() and
     // apply_transaction_anonymous() for the anonymous UTXO model.
 
-    /// Apply a pre-computed block delta (record for rollback).
+    /// Apply a pre-computed block delta (record for SPC switch diff).
+    ///
+    /// Delta history is limited to `max_delta_history` entries.
+    /// This is sufficient for shallow Selected Parent Chain switches
+    /// but intentionally prevents deep rollback.
     pub fn apply_block(&mut self, delta: BlockDelta) -> Result<(), UtxoError> {
         self.height = delta.height;
         self.deltas.push(delta);
@@ -271,40 +424,53 @@ impl UtxoSet {
         Ok(())
     }
 
-    /// Rollback the most recent block.
+    /// Undo the most recent block delta (for SPC switch only).
+    ///
+    /// # Purpose
+    ///
+    /// This is NOT a protocol-level rollback. It is used exclusively by
+    /// VirtualState during shallow Selected Parent Chain switches when
+    /// DAG ordering changes. The depth is limited by `max_delta_history`
+    /// which is clamped to `MAX_SPC_SWITCH_DEPTH` (36).
+    ///
+    /// # No-Rollback Invariant
+    ///
+    /// This function MUST NOT be called to revert finalized state.
+    /// The caller MUST verify that the undo target is above the
+    /// last finalized checkpoint before calling this.
     ///
     /// # Anonymous Model Limitation
     ///
-    /// In the anonymous nullifier model, rollback can undo nullifier additions
-    /// and output creations, but CANNOT restore consumed UTXOs (because the
-    /// validator doesn't know which specific UTXO was spent). For full reorg
-    /// support, replay from a checkpoint is required.
-    pub fn rollback(&mut self) -> Result<BlockDelta, UtxoError> {
+    /// In the transparent model, undo can remove spend-tag additions
+    /// and output creations, but CANNOT restore consumed UTXOs. For full
+    /// state recovery, use rebuild-from-checkpoint.
+    pub fn undo_last_delta(&mut self) -> Result<BlockDelta, UtxoError> {
         let delta = self
             .deltas
             .pop()
             .ok_or_else(|| UtxoError::NoDeltaForRollback(self.height))?;
 
-        // Undo key images (nullifiers)
-        for ki in &delta.key_images_added {
-            self.key_images.remove(ki);
+        // Phase 2c-B D4c: spend-tag undo deleted
+
+        // Audit R7: Restore spent UTXOs (previously skipped, causing state divergence on reorg)
+        // SEC-FIX H-12: Propagate restore failures instead of logging and continuing.
+        // A failed UTXO restore means corrupted state; must abort the undo.
+        for (_tx_hash, outref, output) in &delta.spent {
+            let height = delta.height;
+            self.add_output(outref.clone(), output.clone(), height, false)
+                .map_err(|e| {
+                    tracing::error!("undo_last_delta: failed to restore spent UTXO {:?}: {}", outref, e);
+                    e
+                })?;
         }
 
-        // NOTE: delta.spent is always empty in anonymous model.
-        // No UTXO restoration possible without knowing the real spender.
-
-        // Remove created UTXOs
+        // Remove created UTXOs (and update MuHash)
         for outref in &delta.created {
-            self.unspent.remove(outref);
+            self.remove_output(outref);
         }
 
         self.height = delta.height.saturating_sub(1);
         Ok(delta)
-    }
-
-    /// Alias for `rollback` — used by consensus module.
-    pub fn rollback_block(&mut self) -> Result<BlockDelta, UtxoError> {
-        self.rollback()
     }
 
     // ─── Verification helpers ───────────────────────────
@@ -355,86 +521,26 @@ impl UtxoSet {
         Ok(())
     }
 
-    /// Compute a deterministic state root over the entire UTXO set + nullifier set.
+    /// Phase 3 C6: Compute the state root using MuHash (HARD FORK).
     ///
-    /// This replaces the placeholder `SHA3(height || parent_hash)` that was previously
-    /// used in block headers. The state root now commits to:
+    /// Replaces the O(n log n) Merkle-based computation with O(1) MuHash finalize.
+    /// The MuHash accumulator is maintained incrementally on add_output/remove_output.
     ///
-    /// 1. Every unspent output (sorted deterministically by OutputRef)
-    /// 2. Every spent key image (sorted lexicographically)
-    /// 3. The current height
+    /// Domain: "MISAKA:state_root:v3:" -- bumped from v2 for hard fork.
     ///
     /// # Determinism Guarantee
     ///
-    /// Two UTXO sets with identical content always produce the same root.
-    /// Different content always produces different roots (collision resistance of SHA3-256).
-    ///
-    /// # Performance
-    ///
-    /// O(n log n) due to sorting. For mainnet scale, replace with incremental JMT.
+    /// MuHash is order-independent: same UTXO set always produces the same root
+    /// regardless of insertion order.
     pub fn compute_state_root(&self) -> [u8; 32] {
         use sha3::{Digest, Sha3_256};
 
-        // ── UTXO leaf hashes (deterministic order: sort by OutputRef) ──
-        let mut utxo_entries: Vec<(&OutputRef, &UtxoEntry)> = self.unspent.iter().collect();
-        utxo_entries.sort_by(|a, b| {
-            a.0.tx_hash
-                .cmp(&b.0.tx_hash)
-                .then_with(|| a.0.output_index.cmp(&b.0.output_index))
-        });
+        let muhash_digest = self.muhash.finalize();
 
-        let utxo_leaves: Vec<[u8; 32]> = utxo_entries
-            .iter()
-            .map(|(outref, entry)| {
-                let mut h = Sha3_256::new();
-                h.update(b"MISAKA:state:utxo:v1:");
-                h.update(&outref.tx_hash);
-                h.update(outref.output_index.to_le_bytes());
-                h.update(entry.output.amount.to_le_bytes());
-                h.update(&entry.output.one_time_address);
-                h.update(entry.created_at.to_le_bytes());
-                h.finalize().into()
-            })
-            .collect();
-
-        let utxo_root = if utxo_leaves.is_empty() {
-            let mut h = Sha3_256::new();
-            h.update(b"MISAKA:state:utxo:empty");
-            let result: [u8; 32] = h.finalize().into();
-            result
-        } else {
-            misaka_crypto::hash::merkle_root(&utxo_leaves)
-        };
-
-        // ── Nullifier leaf hashes (deterministic order: sort lexicographically) ──
-        let mut kis: Vec<&[u8; 32]> = self.key_images.iter().collect();
-        kis.sort();
-
-        let ki_leaves: Vec<[u8; 32]> = kis
-            .iter()
-            .map(|ki| {
-                let mut h = Sha3_256::new();
-                h.update(b"MISAKA:state:nullifier:v1:");
-                h.update(*ki);
-                h.finalize().into()
-            })
-            .collect();
-
-        let ki_root = if ki_leaves.is_empty() {
-            let mut h = Sha3_256::new();
-            h.update(b"MISAKA:state:nullifier:empty");
-            let result: [u8; 32] = h.finalize().into();
-            result
-        } else {
-            misaka_crypto::hash::merkle_root(&ki_leaves)
-        };
-
-        // ── Combine into final state root ──
         let mut h = Sha3_256::new();
-        h.update(b"MISAKA:state_root:v1:");
+        h.update(b"MISAKA:state_root:v3:");
         h.update(self.height.to_le_bytes());
-        h.update(utxo_root);
-        h.update(ki_root);
+        h.update(muhash_digest);
         h.finalize().into()
     }
 
@@ -452,6 +558,7 @@ impl UtxoSet {
                 output: entry.output.clone(),
                 created_at: entry.created_at,
                 spending_pubkey: self.spending_pubkeys.get(outref).cloned(),
+                is_emission: entry.is_emission,
             })
             .collect();
         unspent.sort_by(|a, b| {
@@ -461,14 +568,22 @@ impl UtxoSet {
                 .then_with(|| a.outref.output_index.cmp(&b.outref.output_index))
         });
 
-        let mut key_images: Vec<[u8; 32]> = self.key_images.iter().copied().collect();
-        key_images.sort();
-
         UtxoSetSnapshot {
             height: self.height,
             unspent,
-            key_images,
+            processed_burns: Vec::new(), // Populated by UtxoExecutor before save
+            total_emitted: 0, // Populated by UtxoExecutor before save
         }
+    }
+
+    /// SEC-FIX: Export snapshot with processed burn IDs for persistence.
+    ///
+    /// The caller (UtxoExecutor) provides the burn IDs since they are tracked
+    /// by the executor, not the UTXO set itself.
+    pub fn export_snapshot_with_burns(&self, burn_ids: Vec<[u8; 32]>) -> UtxoSetSnapshot {
+        let mut snapshot = self.export_snapshot();
+        snapshot.processed_burns = burn_ids;
+        snapshot
     }
 
     /// Restore an in-memory UTXO set from a previously exported snapshot.
@@ -481,12 +596,17 @@ impl UtxoSet {
 
         for stored in snapshot.unspent {
             let outref = stored.outref;
+            // Phase 3 C6: Rebuild MuHash from all UTXOs during snapshot restore.
+            let elem = utxo_element_bytes(&outref, &stored.output, stored.created_at);
+            set.muhash.add_element(&elem);
+            set.cached_total_amount = set.cached_total_amount.saturating_add(stored.output.amount);
             set.unspent.insert(
                 outref.clone(),
                 UtxoEntry {
                     outref: outref.clone(),
                     output: stored.output,
                     created_at: stored.created_at,
+                    is_emission: stored.is_emission,
                 },
             );
             if let Some(pubkey) = stored.spending_pubkey {
@@ -494,12 +614,270 @@ impl UtxoSet {
             }
         }
 
-        for ki in snapshot.key_images {
-            set.key_images.insert(ki);
-        }
+        // Phase 2c-B D4c: spend_ids restore deleted
 
         set
     }
+
+    /// SEC-FIX: Restore from snapshot AND return processed burn IDs.
+    ///
+    /// `processed_burns` are stored in the snapshot but not part of the UTXO set
+    /// itself — they belong to the UtxoExecutor. This method returns them so the
+    /// caller can pass them to `UtxoExecutor::load_processed_burns()`.
+    /// SEC-FIX: Returns (UtxoSet, burn_ids, total_emitted) for full executor restoration.
+    pub fn from_snapshot_with_burns(
+        snapshot: UtxoSetSnapshot,
+        max_delta_history: usize,
+    ) -> (Self, Vec<[u8; 32]>, u64) {
+        let burns = snapshot.processed_burns.clone();
+        let total_emitted = snapshot.total_emitted;
+        let set = Self::from_snapshot(snapshot, max_delta_history);
+        (set, burns, total_emitted)
+    }
+
+    // ─── File Persistence ────────────────────────────────────
+
+    /// Maximum snapshot file size (4 GB). Prevents OOM on corrupted files.
+    const MAX_SNAPSHOT_FILE_SIZE: u64 = 4 * 1024 * 1024 * 1024;
+
+    /// Save the current UTXO set state to a file.
+    ///
+    /// # Integrity Protection (C4 FIX)
+    ///
+    /// The saved file contains a SHA3-256 content hash of the payload.
+    /// On load, the hash is recomputed and verified. Any disk-level
+    /// corruption or tampering is detected.
+    ///
+    /// # Crash Safety (L1 FIX)
+    ///
+    /// 1. Write to .tmp file
+    /// 2. fsync the .tmp file (ensures bytes are on disk)
+    /// 3. Atomic rename .tmp → target
+    /// 4. fsync parent directory (ensures rename is durable)
+    pub fn save_to_file(&self, path: &std::path::Path) -> Result<(), UtxoError> {
+        use sha3::{Digest, Sha3_256};
+        use std::io::Write;
+
+        let snapshot = self.export_snapshot();
+        let payload = serde_json::to_vec(&snapshot)
+            .map_err(|e| UtxoError::SnapshotIo(format!("serialize failed: {}", e)))?;
+
+        // Compute integrity hash over the raw payload
+        let content_hash: [u8; 32] = Sha3_256::digest(&payload).into();
+
+        // Build envelope: [32-byte hash][payload]
+        let mut envelope = Vec::with_capacity(32 + payload.len());
+        envelope.extend_from_slice(&content_hash);
+        envelope.extend_from_slice(&payload);
+
+        // Atomic write with proper fsync
+        let tmp_path = path.with_extension("tmp");
+        {
+            let file = std::fs::File::create(&tmp_path).map_err(|e| {
+                UtxoError::SnapshotIo(format!("failed to create {}: {}", tmp_path.display(), e))
+            })?;
+            let mut writer = std::io::BufWriter::new(file);
+            writer
+                .write_all(&envelope)
+                .map_err(|e| UtxoError::SnapshotIo(format!("write failed: {}", e)))?;
+            writer
+                .flush()
+                .map_err(|e| UtxoError::SnapshotIo(format!("flush failed: {}", e)))?;
+            // L1 FIX: fsync BEFORE rename — ensures bytes are on disk
+            writer
+                .get_ref()
+                .sync_all()
+                .map_err(|e| UtxoError::SnapshotIo(format!("fsync failed: {}", e)))?;
+        }
+
+        // Atomic rename
+        std::fs::rename(&tmp_path, path).map_err(|e| {
+            UtxoError::SnapshotIo(format!(
+                "rename {} → {}: {}",
+                tmp_path.display(),
+                path.display(),
+                e
+            ))
+        })?;
+
+        // L1 FIX: fsync parent directory — ensures rename is durable
+        if let Some(parent) = path.parent() {
+            let dir = std::fs::File::open(parent)
+                .map_err(|e| UtxoError::SnapshotIo(format!("open parent dir: {}", e)))?;
+            dir.sync_all()
+                .map_err(|e| UtxoError::SnapshotIo(format!("dir fsync: {}", e)))?;
+        }
+
+        Ok(())
+    }
+
+    /// Load a UTXO set from a previously saved snapshot file.
+    ///
+    /// # Integrity Verification (C4 FIX)
+    ///
+    /// The first 32 bytes of the file are a SHA3-256 hash of the remaining
+    /// payload. If the recomputed hash doesn't match, the file is rejected
+    /// as corrupted or tampered.
+    ///
+    /// # Size Limit (H4 FIX)
+    ///
+    /// Files exceeding `MAX_SNAPSHOT_FILE_SIZE` are rejected to prevent OOM.
+    ///
+    /// Returns `None` if the file does not exist.
+    /// Returns `Err` if the file exists but is corrupt, tampered, or too large.
+    pub fn load_from_file(
+        path: &std::path::Path,
+        max_delta_history: usize,
+    ) -> Result<Option<Self>, UtxoError> {
+        use sha3::{Digest, Sha3_256};
+
+        if !path.exists() {
+            return Ok(None);
+        }
+
+        // H4 FIX: Check file size before reading
+        let meta = std::fs::metadata(path).map_err(|e| {
+            UtxoError::SnapshotIo(format!(
+                "metadata read failed for {}: {}",
+                path.display(),
+                e
+            ))
+        })?;
+        if meta.len() > Self::MAX_SNAPSHOT_FILE_SIZE {
+            return Err(UtxoError::SnapshotIntegrity(format!(
+                "snapshot file {} is {} bytes — exceeds {} byte limit",
+                path.display(),
+                meta.len(),
+                Self::MAX_SNAPSHOT_FILE_SIZE
+            )));
+        }
+
+        let data = std::fs::read(path).map_err(|e| {
+            UtxoError::SnapshotIo(format!(
+                "failed to read snapshot from {}: {}",
+                path.display(),
+                e
+            ))
+        })?;
+
+        // C4 FIX: Verify integrity hash
+        if data.len() < 32 {
+            // Legacy format (no hash prefix) — attempt direct JSON parse
+            // This provides backward compatibility with pre-C4 snapshots.
+            let snapshot: UtxoSetSnapshot = serde_json::from_slice(&data).map_err(|e| {
+                UtxoError::SnapshotIntegrity(format!(
+                    "snapshot too small ({} bytes) and not valid JSON: {}",
+                    data.len(),
+                    e
+                ))
+            })?;
+            return Ok(Some(Self::from_snapshot(snapshot, max_delta_history)));
+        }
+
+        let stored_hash: [u8; 32] = match data[..32].try_into() {
+            Ok(h) => h,
+            Err(_) => {
+                return Err(UtxoError::SnapshotIntegrity(
+                    "snapshot hash prefix too short".to_string(),
+                ));
+            }
+        };
+        let payload = &data[32..];
+
+        // Check if this is the new authenticated format (hash prefix)
+        // or legacy format (starts with JSON '{')
+        let computed_hash: [u8; 32] = Sha3_256::digest(payload).into();
+        if stored_hash == computed_hash {
+            // Authenticated format — integrity verified
+            let snapshot: UtxoSetSnapshot = serde_json::from_slice(payload).map_err(|e| {
+                UtxoError::SnapshotIntegrity(format!(
+                    "integrity hash valid but JSON parse failed: {}",
+                    e
+                ))
+            })?;
+            Ok(Some(Self::from_snapshot(snapshot, max_delta_history)))
+        } else {
+            // Might be legacy format (no hash prefix) — try full data as JSON
+            match serde_json::from_slice::<UtxoSetSnapshot>(&data) {
+                Ok(snapshot) => Ok(Some(Self::from_snapshot(snapshot, max_delta_history))),
+                Err(_) => Err(UtxoError::SnapshotIntegrity(format!(
+                    "content hash mismatch: stored={}, computed={} — \
+                     file may be corrupted or tampered",
+                    hex::encode(&stored_hash[..8]),
+                    hex::encode(&computed_hash[..8]),
+                ))),
+            }
+        }
+    }
+
+    /// SEC-FIX: Load UTXO set AND processed burn IDs from snapshot.
+    ///
+    /// Returns `(UtxoSet, Vec<burn_id>)` where burn_ids should be passed to
+    /// `UtxoExecutor::load_processed_burns()` at startup.
+    pub fn load_from_file_with_burns(
+        path: &std::path::Path,
+        max_delta_history: usize,
+    ) -> Result<Option<(Self, Vec<[u8; 32]>, u64)>, UtxoError> {
+        use sha3::{Digest, Sha3_256};
+
+        if !path.exists() {
+            return Ok(None);
+        }
+
+        let meta = std::fs::metadata(path).map_err(|e| {
+            UtxoError::SnapshotIo(format!("metadata read failed for {}: {}", path.display(), e))
+        })?;
+        if meta.len() > Self::MAX_SNAPSHOT_FILE_SIZE {
+            return Err(UtxoError::SnapshotIntegrity(format!(
+                "snapshot file {} is {} bytes — exceeds {} byte limit",
+                path.display(), meta.len(), Self::MAX_SNAPSHOT_FILE_SIZE
+            )));
+        }
+
+        let data = std::fs::read(path).map_err(|e| {
+            UtxoError::SnapshotIo(format!("failed to read snapshot from {}: {}", path.display(), e))
+        })?;
+
+        let parse_snapshot = |bytes: &[u8]| -> Result<UtxoSetSnapshot, UtxoError> {
+            serde_json::from_slice(bytes).map_err(|e| {
+                UtxoError::SnapshotIntegrity(format!("JSON parse failed: {}", e))
+            })
+        };
+
+        let snapshot = if data.len() < 32 {
+            parse_snapshot(&data)?
+        } else {
+            let stored_hash: [u8; 32] = data[..32].try_into().map_err(|_| {
+                UtxoError::SnapshotIntegrity("hash prefix too short".into())
+            })?;
+            let payload = &data[32..];
+            let computed_hash: [u8; 32] = Sha3_256::digest(payload).into();
+            if stored_hash == computed_hash {
+                parse_snapshot(payload)?
+            } else {
+                parse_snapshot(&data).map_err(|_| {
+                    UtxoError::SnapshotIntegrity(format!(
+                        "content hash mismatch: stored={}, computed={}",
+                        hex::encode(&stored_hash[..8]),
+                        hex::encode(&computed_hash[..8]),
+                    ))
+                })?
+            }
+        };
+
+        let (set, burns, total_emitted) = Self::from_snapshot_with_burns(snapshot, max_delta_history);
+        Ok(Some((set, burns, total_emitted)))
+    }
+
+    /// Persist every N blocks (caller decides the cadence).
+    ///
+    /// Typical usage in block producer loop:
+    /// ```ignore
+    /// if new_height % SNAPSHOT_INTERVAL == 0 {
+    ///     utxo_set.save_to_file(&snapshot_path)?;
+    /// }
+    /// ```
+    pub const RECOMMENDED_SNAPSHOT_INTERVAL: u64 = 100;
 }
 
 // ─── Tests ──────────────────────────────────────────────
@@ -518,8 +896,7 @@ mod tests {
     fn make_output(amount: u64) -> TxOutput {
         TxOutput {
             amount,
-            one_time_address: [0xAA; 32],
-            pq_stealth: None,
+            address: [0xCC; 32],
             spending_pubkey: None,
         }
     }
@@ -528,50 +905,22 @@ mod tests {
     fn test_add_and_get() {
         let mut set = UtxoSet::new(100);
         let outref = make_outref(1, 0);
-        set.add_output(outref.clone(), make_output(1000), 1)
+        set.add_output(outref.clone(), make_output(1000), 1, false)
             .unwrap();
         assert!(set.get(&outref).is_some());
         assert_eq!(set.get(&outref).unwrap().output.amount, 1000);
         assert_eq!(set.get_output(&outref).unwrap().amount, 1000);
     }
 
-    #[test]
-    fn test_record_nullifier() {
-        let mut set = UtxoSet::new(100);
-        let outref = make_outref(1, 0);
-        set.add_output(outref.clone(), make_output(1000), 1)
-            .unwrap();
-
-        let ki = [0xBB; 32];
-        set.record_nullifier(ki).unwrap();
-        // In anonymous model, UTXO is NOT removed — only nullifier is recorded.
-        // The validator doesn't know which UTXO was consumed.
-        assert!(set.get(&outref).is_some());
-        assert!(set.has_key_image(&ki));
-        assert!(set.is_key_image_spent(&ki));
-    }
-
-    #[test]
-    fn test_double_spend_rejected() {
-        let mut set = UtxoSet::new(100);
-        let outref = make_outref(1, 0);
-        set.add_output(outref.clone(), make_output(1000), 1)
-            .unwrap();
-
-        let ki = [0xBB; 32];
-        set.record_nullifier(ki).unwrap();
-
-        // Same key image again must fail
-        assert!(set.record_nullifier(ki).is_err());
-    }
+    // Phase 2c-B D4c: test_record_spend_tag and test_double_spend_rejected deleted
 
     #[test]
     fn test_amount_conservation() {
         let mut set = UtxoSet::new(100);
         let o1 = make_outref(1, 0);
         let o2 = make_outref(1, 1);
-        set.add_output(o1.clone(), make_output(7000), 1).unwrap();
-        set.add_output(o2.clone(), make_output(3000), 1).unwrap();
+        set.add_output(o1.clone(), make_output(7000), 1, false).unwrap();
+        set.add_output(o2.clone(), make_output(3000), 1, false).unwrap();
 
         let outputs = vec![make_output(9500)];
         set.verify_amount_conservation(&[o1.clone(), o2.clone()], &outputs, 500)
@@ -585,57 +934,50 @@ mod tests {
     fn test_block_delta_new_and_merge() {
         let mut d1 = BlockDelta::new(1);
         d1.created.push(make_outref(1, 0));
-        d1.key_images_added.push([0xAA; 32]);
 
         let mut d2 = BlockDelta::new(1);
         d2.created.push(make_outref(2, 0));
-        d2.key_images_added.push([0xBB; 32]);
 
         d1.merge(d2);
         assert_eq!(d1.created.len(), 2);
-        assert_eq!(d1.key_images_added.len(), 2);
     }
 
     #[test]
-    fn test_rollback_undoes_nullifiers_and_outputs() {
+    fn test_undo_last_delta_undoes_spent_tags_and_outputs() {
         let mut set = UtxoSet::new(100);
         let outref = make_outref(1, 0);
-        set.add_output(outref.clone(), make_output(1000), 0)
+        set.add_output(outref.clone(), make_output(1000), 0, false)
             .unwrap();
 
-        // Record a nullifier and create a new output in a block delta
-        let ki = [0xCC; 32];
-        set.record_nullifier(ki).unwrap();
+        // Create a new output in a block delta
         let created_outref = make_outref(99, 0);
-        set.add_output(created_outref.clone(), make_output(900), 1)
+        set.add_output(created_outref.clone(), make_output(900), 1, false)
             .unwrap();
 
         let delta = BlockDelta {
             height: 1,
             created: vec![created_outref.clone()],
-            spent: vec![], // Always empty in anonymous model
-            key_images_added: vec![ki],
+            spent: vec![],
         };
         set.apply_block(delta).unwrap();
         assert_eq!(set.height, 1);
 
-        // Rollback
-        set.rollback().unwrap();
+        // Undo (SPC switch, not rollback)
+        set.undo_last_delta().unwrap();
         assert_eq!(set.height, 0);
         // Original UTXO still exists (anonymous model: validator doesn't know what was spent)
         assert!(set.get(&outref).is_some());
         // Created UTXO is removed
         assert!(set.get(&created_outref).is_none());
-        // Key image (nullifier) is removed
-        assert!(!set.has_key_image(&ki));
+        // Phase 2c-B: spend-tag assertion deleted
     }
 
     #[test]
-    fn test_rollback_block_alias() {
+    fn test_undo_last_delta_returns_delta() {
         let mut set = UtxoSet::new(100);
         let delta = BlockDelta::new(1);
         set.apply_block(delta).unwrap();
-        set.rollback_block().unwrap();
+        set.undo_last_delta().unwrap();
         assert_eq!(set.height, 0);
     }
 
@@ -646,9 +988,9 @@ mod tests {
         let mut a = UtxoSet::new(100);
         let mut b = UtxoSet::new(100);
         // Identical insertions → identical roots
-        a.add_output(make_outref(1, 0), make_output(1000), 0)
+        a.add_output(make_outref(1, 0), make_output(1000), 0, false)
             .unwrap();
-        b.add_output(make_outref(1, 0), make_output(1000), 0)
+        b.add_output(make_outref(1, 0), make_output(1000), 0, false)
             .unwrap();
         assert_eq!(a.compute_state_root(), b.compute_state_root());
     }
@@ -657,24 +999,14 @@ mod tests {
     fn test_state_root_differs_on_different_state() {
         let mut a = UtxoSet::new(100);
         let mut b = UtxoSet::new(100);
-        a.add_output(make_outref(1, 0), make_output(1000), 0)
+        a.add_output(make_outref(1, 0), make_output(1000), 0, false)
             .unwrap();
-        b.add_output(make_outref(1, 0), make_output(2000), 0)
+        b.add_output(make_outref(1, 0), make_output(2000), 0, false)
             .unwrap(); // different amount
         assert_ne!(a.compute_state_root(), b.compute_state_root());
     }
 
-    #[test]
-    fn test_state_root_differs_with_nullifier() {
-        let mut a = UtxoSet::new(100);
-        let mut b = UtxoSet::new(100);
-        a.add_output(make_outref(1, 0), make_output(1000), 0)
-            .unwrap();
-        b.add_output(make_outref(1, 0), make_output(1000), 0)
-            .unwrap();
-        b.record_nullifier([0xBB; 32]).unwrap();
-        assert_ne!(a.compute_state_root(), b.compute_state_root());
-    }
+    // Phase 3 C6: test_state_root_differs_with_spend_tag deleted (spend tags removed).
 
     #[test]
     fn test_state_root_empty() {
@@ -687,9 +1019,9 @@ mod tests {
     fn test_state_root_height_matters() {
         let mut a = UtxoSet::new(100);
         let mut b = UtxoSet::new(100);
-        a.add_output(make_outref(1, 0), make_output(1000), 0)
+        a.add_output(make_outref(1, 0), make_output(1000), 0, false)
             .unwrap();
-        b.add_output(make_outref(1, 0), make_output(1000), 0)
+        b.add_output(make_outref(1, 0), make_output(1000), 0, false)
             .unwrap();
         a.height = 1;
         b.height = 2;
@@ -700,10 +1032,9 @@ mod tests {
     fn test_snapshot_roundtrip_preserves_outputs_and_spending_keys() {
         let mut set = UtxoSet::new(100);
         let outref = make_outref(7, 1);
-        set.add_output(outref.clone(), make_output(4242), 3)
+        set.add_output(outref.clone(), make_output(4242), 3, false)
             .unwrap();
-        set.register_spending_key(outref.clone(), vec![0xAB; 16]);
-        set.record_nullifier([0xCD; 32]).unwrap();
+        set.register_spending_key(outref.clone(), vec![0xAB; 1952]).unwrap();
         set.height = 9;
 
         let snapshot = set.export_snapshot();
@@ -711,8 +1042,7 @@ mod tests {
 
         assert_eq!(restored.height, 9);
         assert_eq!(restored.get(&outref).unwrap().output.amount, 4242);
-        assert_eq!(restored.get_spending_key(&outref).unwrap(), &[0xAB; 16]);
-        assert!(restored.is_key_image_spent(&[0xCD; 32]));
+        assert_eq!(restored.get_spending_key(&outref).unwrap(), &[0xAB; 1952][..]);
         assert_eq!(restored.compute_state_root(), set.compute_state_root());
     }
 }
@@ -722,7 +1052,7 @@ impl UtxoSet {
 
     /// Apply an entire block atomically.
     ///
-    /// All nullifier records and output creations succeed together
+    /// All spend records and output creations succeed together
     /// or none are applied. This prevents partial state on crash.
     ///
     /// # Atomicity Model
@@ -731,16 +1061,51 @@ impl UtxoSet {
     /// 2. Validate ALL operations can succeed (dry-run)
     /// 3. Apply all mutations in one pass
     /// 4. If any step fails, no state is modified
+    /// Phase 2c-B D4c: spend_ids parameter removed.
     pub fn apply_block_atomic(
         &mut self,
-        transactions: &[(misaka_types::utxo::UtxoTransaction, Vec<[u8; 32]>)], // (tx, key_images)
+        transactions: &[misaka_types::utxo::UtxoTransaction],
         height: u64,
     ) -> Result<BlockDelta, UtxoError> {
-        // Phase 1: Validate — check all nullifiers and references
-        for (tx, key_images) in transactions {
-            for ki in key_images {
-                if self.key_images.contains(ki) {
-                    return Err(UtxoError::KeyImageSpent(hex::encode(ki)));
+        let mut seen_outrefs: std::collections::HashSet<OutputRef> =
+            std::collections::HashSet::new();
+
+        for tx in transactions {
+            // SEC-FIX CRITICAL: Reject non-emission tx types.
+            // apply_block_atomic only creates outputs — it does NOT consume inputs.
+            // If a TransparentTransfer were passed here, input UTXOs would remain
+            // unspent, enabling double-spending. Restrict to emission-only types.
+            if !matches!(
+                tx.tx_type,
+                misaka_types::utxo::TxType::SystemEmission
+                    | misaka_types::utxo::TxType::Faucet
+            ) {
+                return Err(UtxoError::OutputNotFound(format!(
+                    "apply_block_atomic: rejected tx_type {:?} — only SystemEmission/Faucet allowed",
+                    tx.tx_type
+                )));
+            }
+
+            // Output ref pre-validation (C-T7-4 fix)
+            let tx_hash = tx.tx_hash();
+            for idx in 0..tx.outputs.len() {
+                let outref = OutputRef {
+                    tx_hash,
+                    output_index: idx as u32,
+                };
+                if self.unspent.contains_key(&outref) {
+                    return Err(UtxoError::OutputAlreadyExists(format!(
+                        "{}:{} (already in UTXO set)",
+                        hex::encode(&outref.tx_hash[..8]),
+                        outref.output_index,
+                    )));
+                }
+                if !seen_outrefs.insert(outref) {
+                    return Err(UtxoError::OutputAlreadyExists(format!(
+                        "{}:{} (intra-block duplicate output)",
+                        hex::encode(&tx_hash[..8]),
+                        idx,
+                    )));
                 }
             }
         }
@@ -748,19 +1113,15 @@ impl UtxoSet {
         // Phase 2: Apply — all validations passed, commit mutations
         let mut delta = BlockDelta::new(height);
 
-        for (tx, key_images) in transactions {
-            for ki in key_images {
-                self.key_images.insert(*ki);
-                delta.key_images_added.push(*ki);
-            }
-
+        for tx in transactions {
+            let is_emission = tx.tx_type == TxType::SystemEmission;
             let tx_hash = tx.tx_hash();
             for (idx, output) in tx.outputs.iter().enumerate() {
                 let outref = OutputRef {
                     tx_hash,
                     output_index: idx as u32,
                 };
-                self.add_output(outref.clone(), output.clone(), height)?;
+                self.add_output(outref.clone(), output.clone(), height, is_emission)?;
                 delta.created.push(outref);
             }
         }

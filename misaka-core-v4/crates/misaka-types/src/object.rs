@@ -63,7 +63,7 @@ mod tests {
             id: [0xAA; 32],
             version: 1,
             owner_kind: OwnerKind::AddressOwner,
-            owner: [0xBB; 20],
+            owner: [0xBB; 32],
             type_tag: "coin".into(),
             data: vec![1, 2, 3],
         };
