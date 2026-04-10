@@ -26,7 +26,7 @@ pub mod domains {
     pub const DIFFICULTY: &[u8] = b"misaka:difficulty:v1";
     pub const COINBASE: &[u8] = b"misaka:coinbase:v1";
     pub const SPEND_TAG: &[u8] = b"misaka:spend-tag:v1"; // wire compat
-    // REMOVED: SHIELDED_NOTE — privacy module deprecated in v1.0.
+                                                         // REMOVED: SHIELDED_NOTE — privacy module deprecated in v1.0.
     pub const PQC_SIG_DOMAIN: &[u8] = b"misaka:pqc:sig:v1";
     pub const SCRIPT_HASH: &[u8] = b"misaka:script:hash:v1";
     pub const PAYLOAD_HASH: &[u8] = b"misaka:payload:v1";

@@ -539,7 +539,9 @@ impl ScriptEngine {
                 // SEC-FIX T3-H9: sig_context is required for timelock checks.
                 // Without it, the check would silently pass, making CLTV ineffective.
                 let ctx = self.sig_context.as_ref().ok_or_else(|| {
-                    TxScriptError::MissingSigContext("OP_CHECKLOCKTIMEVERIFY requires sig_context".into())
+                    TxScriptError::MissingSigContext(
+                        "OP_CHECKLOCKTIMEVERIFY requires sig_context".into(),
+                    )
                 })?;
                 if lock_time > ctx.lock_time {
                     return Err(TxScriptError::UnsatisfiedLockTime);
@@ -557,7 +559,9 @@ impl ScriptEngine {
                 let sequence = sequence as u64;
                 // SEC-FIX T3-H9: sig_context is required for timelock checks.
                 let ctx = self.sig_context.as_ref().ok_or_else(|| {
-                    TxScriptError::MissingSigContext("OP_CHECKSEQUENCEVERIFY requires sig_context".into())
+                    TxScriptError::MissingSigContext(
+                        "OP_CHECKSEQUENCEVERIFY requires sig_context".into(),
+                    )
                 })?;
                 if sequence > ctx.sequence {
                     return Err(TxScriptError::UnsatisfiedLockTime);

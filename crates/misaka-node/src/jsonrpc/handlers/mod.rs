@@ -10,8 +10,8 @@ pub mod misaka;
 pub mod tx;
 pub mod wallet;
 
-use serde_json::Value;
 use crate::dag_rpc::DagRpcState;
+use serde_json::Value;
 
 /// Handler result: Ok(result_value) or Err(code, message, optional_data).
 pub type HandlerResult = Result<Value, (i32, String, Option<Value>)>;
@@ -69,7 +69,9 @@ pub async fn handle(rpc: &DagRpcState, method: &str, params: &Value) -> HandlerR
 
         // ── Private MISAKA extensions ──
         "misaka_getAnonymitySet" => misaka::get_anonymity_set(rpc, params).await,
-        "misaka_getAddressHistory" => misaka::not_implemented("address_history_index_not_yet_wired"),
+        "misaka_getAddressHistory" => {
+            misaka::not_implemented("address_history_index_not_yet_wired")
+        }
         "misaka_getBlocksRange" => misaka::get_blocks_range(rpc, params).await,
         "misaka_getTxsRange" => misaka::get_txs_range(rpc, params).await,
 

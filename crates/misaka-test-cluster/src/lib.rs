@@ -88,13 +88,12 @@ impl TestClusterBuilder {
 
     /// Build and start the test cluster.
     pub async fn build(self) -> TestCluster {
-        // TestCluster is an in-process test harness that intentionally runs
-        // validators without a persistent WAL store. The runtime panics in
-        // non-test builds (where `cfg(test)` is not set because misaka-dag is
-        // a dependency, not the crate under test) unless this escape hatch
-        // is set. Safe here — this code only runs in test binaries.
-        std::env::set_var("MISAKA_ALLOW_NO_WAL", "1");
-
+        // TestCluster intentionally runs validators without a persistent
+        // WAL store. The runtime's WAL-less guard is gated on
+        // `cfg(not(any(test, feature = "test-utils")))`, and this crate
+        // enables misaka-dag's `test-utils` feature in Cargo.toml, so the
+        // guard is compiled out when reached through TestCluster. No env
+        // var escape hatch required.
         let _guard = tracing_subscriber::fmt()
             .with_env_filter("info")
             .with_test_writer()
@@ -280,21 +279,16 @@ impl TestCluster {
     pub fn all_healthy(&self) -> bool {
         self.validators.iter().all(|vh| {
             vh.stopped
-                || vh
-                    .node
-                    .as_ref()
-                    .map_or(false, |n| {
-                        n.state() == misaka_dag::narwhal_dag::authority_node::AuthorityNodeState::Running
-                    })
+                || vh.node.as_ref().map_or(false, |n| {
+                    n.state()
+                        == misaka_dag::narwhal_dag::authority_node::AuthorityNodeState::Running
+                })
         })
     }
 
     /// Get the number of currently running validators.
     pub fn running_count(&self) -> usize {
-        self.validators
-            .iter()
-            .filter(|vh| !vh.stopped)
-            .count()
+        self.validators.iter().filter(|vh| !vh.stopped).count()
     }
 
     /// Stop all validators gracefully.

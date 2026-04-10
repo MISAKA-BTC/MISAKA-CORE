@@ -191,7 +191,10 @@ pub fn distribute_epoch_rewards(
     entries.sort_by(|a, b| a.0.cmp(&b.0));
 
     // Step 3: Compute total weight (SEC-FIX: saturating to prevent overflow)
-    let total_reward_weight: u128 = entries.iter().map(|e| e.4).fold(0u128, |a, b| a.saturating_add(b));
+    let total_reward_weight: u128 = entries
+        .iter()
+        .map(|e| e.4)
+        .fold(0u128, |a, b| a.saturating_add(b));
 
     if total_reward_weight == 0 {
         let breakdowns = entries
@@ -230,7 +233,8 @@ pub fn distribute_epoch_rewards(
                 // avoids intermediate overflow while preserving precision.
                 let q = validator_pool_total / total_reward_weight;
                 let r = validator_pool_total % total_reward_weight;
-                let uncapped = q.saturating_mul(*weight)
+                let uncapped = q
+                    .saturating_mul(*weight)
                     .saturating_add(r.saturating_mul(*weight) / total_reward_weight);
                 let max_individual = validator_pool_total / 3; // 33% cap
                 uncapped.min(max_individual)

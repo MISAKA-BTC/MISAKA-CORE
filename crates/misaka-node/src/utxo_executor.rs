@@ -14,9 +14,9 @@
 
 use borsh::BorshDeserialize;
 use misaka_pqc::pq_sign::ml_dsa_verify_raw;
+use misaka_storage::utxo_set::{BlockDelta, UtxoSet};
 use misaka_types::intent::{AppId, IntentMessage, IntentScope};
 use misaka_types::utxo::{OutputRef, TxOutput, TxType, UtxoTransaction};
-use misaka_storage::utxo_set::{BlockDelta, UtxoSet};
 use std::collections::HashSet;
 use tracing::{error, info, warn};
 
@@ -69,7 +69,11 @@ pub enum TxExecutionError {
     #[error("transaction expired: expiry={expiry}, current_height={current}")]
     Expired { expiry: u64, current: u64 },
     #[error("emission output not mature: created_at={created_at}, current={current}, required_maturity={required}")]
-    EmissionNotMature { created_at: u64, current: u64, required: u64 },
+    EmissionNotMature {
+        created_at: u64,
+        current: u64,
+        required: u64,
+    },
     #[error("P2PKH pubkey mismatch at input {input_index}")]
     PubkeyMismatch { input_index: usize },
     #[error("output {output_index} address/spending_pubkey binding failed: address != SHA3-256(spending_pubkey)")]
@@ -120,7 +124,13 @@ impl UtxoExecutor {
     /// Create from an existing UTXO set (crash recovery).
     pub fn with_utxo_set(utxo_set: UtxoSet, app_id: AppId) -> Self {
         let height = utxo_set.height;
-        Self { app_id, utxo_set, height, processed_burns: HashSet::new(), total_emitted: 0 }
+        Self {
+            app_id,
+            utxo_set,
+            height,
+            processed_burns: HashSet::new(),
+            total_emitted: 0,
+        }
     }
 
     /// Execute a committed batch from Narwhal.
@@ -165,17 +175,19 @@ impl UtxoExecutor {
         let mut emission_count = 0usize;
 
         for (tx_idx, raw) in raw_transactions.iter().take(MAX_TXS_PER_COMMIT).enumerate() {
-            match self.validate_and_apply_tx(raw, &mut delta, &mut emission_count, leader_address.as_ref()) {
+            match self.validate_and_apply_tx(
+                raw,
+                &mut delta,
+                &mut emission_count,
+                leader_address.as_ref(),
+            ) {
                 Ok(fee) => {
                     accepted += 1;
                     total_fees = total_fees.saturating_add(fee);
                 }
                 Err(e) => {
                     rejected += 1;
-                    warn!(
-                        "commit {} tx {} rejected: {}",
-                        commit_index, tx_idx, e
-                    );
+                    warn!("commit {} tx {} rejected: {}", commit_index, tx_idx, e);
                 }
             }
         }
@@ -229,7 +241,10 @@ impl UtxoExecutor {
     ) -> Result<u64, TxExecutionError> {
         // §4.2 step 4: expiry check
         if tx.expiry > 0 && tx.expiry < self.height {
-            return Err(TxExecutionError::Expired { expiry: tx.expiry, current: self.height });
+            return Err(TxExecutionError::Expired {
+                expiry: tx.expiry,
+                current: self.height,
+            });
         }
 
         // D4b: spend-tag uniqueness check removed (field deleted from TxInput).
@@ -301,10 +316,13 @@ impl UtxoExecutor {
             }
 
             let outref = &input.utxo_refs[0];
-            let pk_bytes = self.utxo_set.get_spending_key(outref)
-                .ok_or_else(|| TxExecutionError::UtxoNotFound(
-                    format!("{}:{}", hex::encode(&outref.tx_hash[..8]), outref.output_index),
-                ))?;
+            let pk_bytes = self.utxo_set.get_spending_key(outref).ok_or_else(|| {
+                TxExecutionError::UtxoNotFound(format!(
+                    "{}:{}",
+                    hex::encode(&outref.tx_hash[..8]),
+                    outref.output_index
+                ))
+            })?;
 
             // §4.2 step 5b: P2PKH pubkey match
             use sha3::{Digest, Sha3_256};
@@ -319,7 +337,8 @@ impl UtxoExecutor {
                 }
 
                 // §4.4: 300-block maturity for emission outputs
-                if utxo_entry.is_emission && self.height < utxo_entry.created_at + EMISSION_MATURITY {
+                if utxo_entry.is_emission && self.height < utxo_entry.created_at + EMISSION_MATURITY
+                {
                     return Err(TxExecutionError::EmissionNotMature {
                         created_at: utxo_entry.created_at,
                         current: self.height,
@@ -329,23 +348,27 @@ impl UtxoExecutor {
             }
 
             // Parse and verify ML-DSA-65 signature over IntentMessage digest
-            let pk = misaka_pqc::pq_sign::MlDsaPublicKey::from_bytes(&pk_bytes)
-                .map_err(|e| TxExecutionError::SignatureInvalid {
+            let pk = misaka_pqc::pq_sign::MlDsaPublicKey::from_bytes(&pk_bytes).map_err(|e| {
+                TxExecutionError::SignatureInvalid {
                     input_index: i,
                     reason: format!("invalid public key: {e}"),
-                })?;
-            let sig = misaka_pqc::pq_sign::MlDsaSignature::from_bytes(&input.proof)
-                .map_err(|e| TxExecutionError::SignatureInvalid {
-                    input_index: i,
-                    reason: format!("invalid signature: {e}"),
+                }
+            })?;
+            let sig =
+                misaka_pqc::pq_sign::MlDsaSignature::from_bytes(&input.proof).map_err(|e| {
+                    TxExecutionError::SignatureInvalid {
+                        input_index: i,
+                        reason: format!("invalid signature: {e}"),
+                    }
                 })?;
             // Verify with empty domain prefix — IntentMessage digest already
             // provides full domain separation.
-            ml_dsa_verify_raw(&pk, &signing_digest, &sig)
-                .map_err(|e| TxExecutionError::SignatureInvalid {
+            ml_dsa_verify_raw(&pk, &signing_digest, &sig).map_err(|e| {
+                TxExecutionError::SignatureInvalid {
                     input_index: i,
                     reason: format!("ML-DSA-65 verify failed: {e}"),
-                })?;
+                }
+            })?;
         }
 
         // 6. Amount balance check
@@ -353,17 +376,20 @@ impl UtxoExecutor {
         for input in &tx.inputs {
             for outref in &input.utxo_refs {
                 if let Some(output) = self.utxo_set.get_output(outref) {
-                    input_sum = input_sum.checked_add(output.amount)
+                    input_sum = input_sum
+                        .checked_add(output.amount)
                         .ok_or(TxExecutionError::AmountOverflow)?;
                 }
             }
         }
         let mut output_sum: u64 = 0;
         for output in &tx.outputs {
-            output_sum = output_sum.checked_add(output.amount)
+            output_sum = output_sum
+                .checked_add(output.amount)
                 .ok_or(TxExecutionError::AmountOverflow)?;
         }
-        let outputs_plus_fee = output_sum.checked_add(tx.fee)
+        let outputs_plus_fee = output_sum
+            .checked_add(tx.fee)
             .ok_or(TxExecutionError::AmountOverflow)?;
         if input_sum < outputs_plus_fee {
             return Err(TxExecutionError::InsufficientFunds {
@@ -373,7 +399,9 @@ impl UtxoExecutor {
         }
 
         // 7. Apply state changes — consume input UTXOs (double-spend prevention)
-        let tx_delta = self.utxo_set.apply_transaction(&tx)
+        let tx_delta = self
+            .utxo_set
+            .apply_transaction(&tx)
             .map_err(|e| TxExecutionError::UtxoNotFound(e.to_string()))?;
         delta.merge(tx_delta);
 
@@ -417,15 +445,13 @@ impl UtxoExecutor {
         if let Some(expected_addr) = leader_address {
             for (idx, output) in tx.outputs.iter().enumerate() {
                 if output.address != *expected_addr {
-                    return Err(TxExecutionError::StructuralInvalid(
-                        format!(
-                            "SystemEmission output[{}]: address {} does not match \
+                    return Err(TxExecutionError::StructuralInvalid(format!(
+                        "SystemEmission output[{}]: address {} does not match \
                              commit leader address {}",
-                            idx,
-                            hex::encode(&output.address[..8]),
-                            hex::encode(&expected_addr[..8]),
-                        ),
-                    ));
+                        idx,
+                        hex::encode(&output.address[..8]),
+                        hex::encode(&expected_addr[..8]),
+                    )));
                 }
             }
         } else if self.app_id.chain_id == 1 {
@@ -445,7 +471,8 @@ impl UtxoExecutor {
         // Amount cap (reuse PHASE2_MAX_COINBASE_PER_BLOCK for now)
         let mut total: u64 = 0;
         for output in &tx.outputs {
-            total = total.checked_add(output.amount)
+            total = total
+                .checked_add(output.amount)
                 .ok_or(TxExecutionError::AmountOverflow)?;
         }
         if total > PHASE2_MAX_COINBASE_PER_BLOCK {
@@ -455,15 +482,15 @@ impl UtxoExecutor {
         // SEC-FIX: Enforce total supply cap (MAX_TOTAL_SUPPLY).
         // Previously only per-block cap existed; SupplyTracker had max_supply
         // but was not connected to the execution layer.
-        let new_total = self.total_emitted.checked_add(total)
+        let new_total = self
+            .total_emitted
+            .checked_add(total)
             .ok_or(TxExecutionError::AmountOverflow)?;
         if new_total > MAX_TOTAL_SUPPLY {
-            return Err(TxExecutionError::StructuralInvalid(
-                format!(
-                    "SystemEmission would exceed MAX_TOTAL_SUPPLY: emitted {} + new {} > cap {}",
-                    self.total_emitted, total, MAX_TOTAL_SUPPLY
-                ),
-            ));
+            return Err(TxExecutionError::StructuralInvalid(format!(
+                "SystemEmission would exceed MAX_TOTAL_SUPPLY: emitted {} + new {} > cap {}",
+                self.total_emitted, total, MAX_TOTAL_SUPPLY
+            )));
         }
         self.total_emitted = new_total;
 
@@ -476,9 +503,12 @@ impl UtxoExecutor {
             };
             self.utxo_set
                 .add_output(outref.clone(), output.clone(), self.height, true)
-                .map_err(|e| TxExecutionError::StructuralInvalid(
-                    format!("SystemEmission output add failed: {}", e),
-                ))?;
+                .map_err(|e| {
+                    TxExecutionError::StructuralInvalid(format!(
+                        "SystemEmission output add failed: {}",
+                        e
+                    ))
+                })?;
             delta.created.push(outref);
         }
         Ok(0)
@@ -497,19 +527,25 @@ impl UtxoExecutor {
                     h.finalize().into()
                 };
                 if output.address != expected_addr {
-                    return Err(TxExecutionError::OutputPubkeyBindingFailed {
-                        output_index: idx,
-                    });
+                    return Err(TxExecutionError::OutputPubkeyBindingFailed { output_index: idx });
                 }
             }
         }
         Ok(())
     }
 
-    pub fn height(&self) -> u64 { self.height }
-    pub fn utxo_count(&self) -> usize { self.utxo_set.len() }
-    pub fn utxo_set(&self) -> &UtxoSet { &self.utxo_set }
-    pub fn app_id(&self) -> &AppId { &self.app_id }
+    pub fn height(&self) -> u64 {
+        self.height
+    }
+    pub fn utxo_count(&self) -> usize {
+        self.utxo_set.len()
+    }
+    pub fn utxo_set(&self) -> &UtxoSet {
+        &self.utxo_set
+    }
+    pub fn app_id(&self) -> &AppId {
+        &self.app_id
+    }
 
     /// Phase 3 C7: Return the current state root (MuHash of UTXO set).
     pub fn state_root(&self) -> [u8; 32] {
@@ -555,18 +591,27 @@ impl UtxoExecutor {
             address: leader_address,
             spending_pubkey: leader_pubkey,
         };
-        if let Err(e) = self.utxo_set.add_output(outref.clone(), output, self.height, true) {
+        if let Err(e) = self
+            .utxo_set
+            .add_output(outref.clone(), output, self.height, true)
+        {
             tracing::error!("Failed to create block reward UTXO: {}", e);
             return 0;
         }
         // Register spending key if provided
-        if let Some(spk) = self.utxo_set.get(&outref).and_then(|e| e.output.spending_pubkey.clone()) {
+        if let Some(spk) = self
+            .utxo_set
+            .get(&outref)
+            .and_then(|e| e.output.spending_pubkey.clone())
+        {
             let _ = self.utxo_set.register_spending_key(outref, spk);
         }
         self.total_emitted = new_total;
         tracing::debug!(
             "Block reward: {} base units to {} (total_emitted={})",
-            reward, hex::encode(&leader_address[..8]), new_total
+            reward,
+            hex::encode(&leader_address[..8]),
+            new_total
         );
         reward
     }
@@ -578,9 +623,9 @@ impl UtxoExecutor {
     /// Returns Err(BurnAlreadyProcessed) if the burn_id was already seen.
     pub fn check_burn_replay(&mut self, burn_id: [u8; 32]) -> Result<(), TxExecutionError> {
         if !self.processed_burns.insert(burn_id) {
-            return Err(TxExecutionError::BurnAlreadyProcessed(
-                hex::encode(&burn_id[..8]),
-            ));
+            return Err(TxExecutionError::BurnAlreadyProcessed(hex::encode(
+                &burn_id[..8],
+            )));
         }
         Ok(())
     }

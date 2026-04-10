@@ -624,9 +624,7 @@ pub struct ValidatorStakeInfo {
 ///
 /// Returns the total staked amount (in base units) or an error.
 /// This is used to set the validator's consensus weight.
-pub async fn query_validator_stake_weight(
-    l1_public_key_hex: &str,
-) -> Result<u64> {
+pub async fn query_validator_stake_weight(l1_public_key_hex: &str) -> Result<u64> {
     let all_stakes = scrape_all_validator_stakes().await?;
 
     if let Some(info) = all_stakes.get(l1_public_key_hex) {

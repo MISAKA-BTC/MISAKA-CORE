@@ -102,20 +102,14 @@ impl AuthorityService {
                 warn!("Consensus message channel full — dropping incoming block");
                 BlockResponse::Unavailable
             }
-            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                BlockResponse::Unavailable
-            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => BlockResponse::Unavailable,
         }
     }
 
     /// Handle a block fetch request from a peer.
     ///
     /// Returns blocks in the requested round range.
-    pub async fn handle_fetch_blocks(
-        &self,
-        since_round: Round,
-        limit: usize,
-    ) -> Vec<Block> {
+    pub async fn handle_fetch_blocks(&self, since_round: Round, limit: usize) -> Vec<Block> {
         let limit = limit.min(1000); // cap
         let dag = self.dag_state.read().await;
         let highest = dag.highest_accepted_round();
@@ -173,8 +167,8 @@ impl AuthorityService {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::dag_state::DagStateConfig;
+    use super::*;
 
     #[tokio::test]
     async fn test_reject_invalid_author() {
@@ -278,7 +272,11 @@ mod tests {
             signature: vec![], // will be replaced by real signature
         };
         vs.sign_block(0, &mut block);
-        assert_eq!(block.signature.len(), 3309, "ML-DSA-65 signature must be 3309 bytes");
+        assert_eq!(
+            block.signature.len(),
+            3309,
+            "ML-DSA-65 signature must be 3309 bytes"
+        );
 
         let resp = service.handle_send_block(block.clone()).await;
         assert!(matches!(resp, BlockResponse::Accepted));

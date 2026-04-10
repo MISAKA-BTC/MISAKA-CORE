@@ -482,15 +482,21 @@ impl Router {
         // SEC-FIX TM-5: Per-type message rate limiting.
         {
             let mut tracker = self.rate_tracker.lock();
-            if let RateCheckResult::Exceeded { msg_type: mt, count, limit } = tracker.check_rate(&type_label) {
+            if let RateCheckResult::Exceeded {
+                msg_type: mt,
+                count,
+                limit,
+            } = tracker.check_rate(&type_label)
+            {
                 warn!(
                     peer = %self,
                     "P2P message rate limit exceeded for {}: {}/{} per minute",
                     mt, count, limit
                 );
-                return Err(ProtocolError::MessageValidationFailed(
-                    format!("rate limit exceeded for {}", mt),
-                ));
+                return Err(ProtocolError::MessageValidationFailed(format!(
+                    "rate limit exceeded for {}",
+                    mt
+                )));
             }
         }
 

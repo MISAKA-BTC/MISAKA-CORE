@@ -171,12 +171,7 @@ impl HeaderProcessor {
             // SECURITY: Domain-separated header signature verification.
             // The "MISAKA-v1:header:" prefix prevents a TX or VRF signature
             // from being replayed as a valid header signature.
-            misaka_pqc::pq_sign::ml_dsa_verify_raw(
-                &pk,
-                &header.hash,
-                &sig,
-            )
-            .map_err(|e| {
+            misaka_pqc::pq_sign::ml_dsa_verify_raw(&pk, &header.hash, &sig).map_err(|e| {
                 HeaderProcessingError::ValidationFailed(format!(
                     "ML-DSA-65 verification failed: {}",
                     e

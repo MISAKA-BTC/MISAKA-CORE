@@ -16,8 +16,16 @@ pub const PQ_STEALTH_VERSION: u8 = 0x01;
 /// - KEM ciphertext for shared-secret derivation
 /// - Scan tag for cheap rejection
 /// - AEAD-encrypted amount and payload
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize,
-         borsh::BorshSerialize, borsh::BorshDeserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    borsh::BorshSerialize,
+    borsh::BorshDeserialize,
+)]
 pub struct PqStealthData {
     /// Protocol version (currently 0x01).
     pub version: u8,

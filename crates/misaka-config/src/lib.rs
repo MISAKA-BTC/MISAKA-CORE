@@ -11,15 +11,15 @@
 //! - `ConfigError`: structured validation errors
 //! - `load_config()`: load and validate from file path
 
+pub mod error;
 pub mod node_config;
 pub mod toml_config;
 pub mod validation;
-pub mod error;
 
+pub use error::ConfigError;
 pub use node_config::NodeConfig;
 pub use toml_config::TomlConfig;
 pub use validation::TestnetConfig;
-pub use error::ConfigError;
 
 /// Load a node configuration from a JSON or TOML file.
 ///

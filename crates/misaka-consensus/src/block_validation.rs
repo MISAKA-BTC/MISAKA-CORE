@@ -223,13 +223,11 @@ fn validate_and_apply_block_inner(
     for (idx, vtx) in block.transactions.iter().enumerate() {
         if matches!(
             vtx.tx.tx_type,
-            misaka_types::utxo::TxType::SystemEmission
-                | misaka_types::utxo::TxType::Faucet
+            misaka_types::utxo::TxType::SystemEmission | misaka_types::utxo::TxType::Faucet
         ) {
             return Err(BlockError::TxStructural {
                 index: idx,
-                reason: "SystemEmission/Faucet transactions cannot appear in user blocks"
-                    .into(),
+                reason: "SystemEmission/Faucet transactions cannot appear in user blocks".into(),
             });
         }
     }
@@ -335,12 +333,13 @@ fn validate_and_apply_block_inner(
         let mut spent_entries: Vec<([u8; 32], OutputRef, TxOutput)> = Vec::new();
         for input in &tx.inputs {
             if let Some(spent_outref) = input.utxo_refs.first() {
-                let entry = utxo_set.get(spent_outref).ok_or_else(|| {
-                    BlockError::TxRingMemberNotFound {
-                        index: tx_idx,
-                        member: format!("input UTXO already spent in this block"),
-                    }
-                })?;
+                let entry =
+                    utxo_set
+                        .get(spent_outref)
+                        .ok_or_else(|| BlockError::TxRingMemberNotFound {
+                            index: tx_idx,
+                            member: format!("input UTXO already spent in this block"),
+                        })?;
                 let output = entry.output.clone();
                 utxo_set.remove_output(spent_outref);
                 spent_entries.push(([0u8; 32], spent_outref.clone(), output));

@@ -227,7 +227,8 @@ fn test_double_recovery_idempotent() {
     store.write_batch(&batch).unwrap();
 
     // Recover twice
-    let dag1 = recover_dag_state(&store, committee.clone(), DagStateConfig::default(), None).unwrap();
+    let dag1 =
+        recover_dag_state(&store, committee.clone(), DagStateConfig::default(), None).unwrap();
     let dag2 = recover_dag_state(&store, committee, DagStateConfig::default(), None).unwrap();
 
     assert_eq!(dag1.num_blocks(), dag2.num_blocks());

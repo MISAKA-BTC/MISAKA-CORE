@@ -45,7 +45,7 @@ exclude = [
 ]
 
 [workspace.package]
-version = "0.5.5"
+version = "0.5.6"
 edition = "2021"
 license = "Apache-2.0"
 authors = ["MISAKA Network Contributors"]
@@ -94,3 +94,16 @@ expect_used = "warn"  # Grade A target: promote to "deny" after systematic remov
 
 [workspace.lints.rust]
 missing_docs = "allow"  # Grade A target: promote to "warn" after doc completion
+
+# ═══ Release profile: size-conscious, symbols stripped ═══
+# `strip = "symbols"` removes debug symbols and the `.debug_*` sections so
+# the shipped binary does not leak internal crate paths and function
+# names to anyone running `strings` on it. `lto = "thin"` gives us most of
+# the size/performance benefit of link-time optimisation with a small
+# compile-time cost. `codegen-units = 1` squeezes a bit more size out of
+# LLVM at the expense of parallel codegen, which is fine for release
+# builds that run in CI.
+[profile.release]
+strip = "symbols"
+lto = "thin"
+codegen-units = 1

@@ -102,7 +102,9 @@ impl VoteRegistry {
     #[must_use]
     pub fn vote_stake(&self, committee: &Committee) -> Stake {
         // SEC-FIX M-3: saturating fold to prevent u64 overflow
-        self.votes.keys().fold(0u64, |acc, &auth| acc.saturating_add(committee.stake(auth)))
+        self.votes
+            .keys()
+            .fold(0u64, |acc, &auth| acc.saturating_add(committee.stake(auth)))
     }
 
     /// Check if quorum is reached.

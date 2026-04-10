@@ -71,7 +71,11 @@ impl VoteRound {
         // SEC-FIX NM-3: saturating fold to prevent u64 overflow
         self.votes
             .get(digest)
-            .map(|voters| voters.iter().fold(0u64, |acc, &a| acc.saturating_add(committee.stake(a))))
+            .map(|voters| {
+                voters
+                    .iter()
+                    .fold(0u64, |acc, &a| acc.saturating_add(committee.stake(a)))
+            })
             .unwrap_or(0)
     }
 

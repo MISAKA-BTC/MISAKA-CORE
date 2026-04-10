@@ -30,10 +30,10 @@
 
 use std::sync::Arc;
 
-use crate::narwhal_types::block::{AuthorityIndex, BlockSigner, SignatureVerifier};
-use crate::narwhal_types::committee::Committee;
 use super::clock::{Clock, SystemClock};
 use super::metrics::ConsensusMetrics;
+use crate::narwhal_types::block::{AuthorityIndex, BlockSigner, SignatureVerifier};
+use crate::narwhal_types::committee::Committee;
 
 /// Consensus execution context — immutable for the duration of an epoch.
 ///
@@ -108,8 +108,8 @@ impl Context {
     /// in test builds.
     #[cfg(any(test, feature = "test-utils"))]
     pub fn new_for_test(num_authorities: usize) -> Self {
-        use crate::narwhal_types::block::{MlDsa65TestSigner, MlDsa65Verifier, TestValidatorSet};
         use super::clock::SimulatedClock;
+        use crate::narwhal_types::block::{MlDsa65TestSigner, MlDsa65Verifier, TestValidatorSet};
 
         let vs = TestValidatorSet::new(num_authorities);
         let committee = vs.committee();
@@ -127,7 +127,9 @@ impl Context {
             signer,
             sig_verifier,
             metrics,
-            clock: Arc::new(SimulatedClock::new(super::clock::SIM_CLOCK_DEFAULT_START_MS)),
+            clock: Arc::new(SimulatedClock::new(
+                super::clock::SIM_CLOCK_DEFAULT_START_MS,
+            )),
         }
     }
 

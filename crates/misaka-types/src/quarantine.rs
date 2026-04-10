@@ -256,11 +256,7 @@ impl std::fmt::Display for QuarantineReason {
                 tag_hex,
                 conflict_source,
             } => {
-                write!(
-                    f,
-                    "spend-tag conflict: {} ({})",
-                    tag_hex, conflict_source
-                )
+                write!(f, "spend-tag conflict: {} ({})", tag_hex, conflict_source)
             }
             Self::ZkpVerificationFailed(s) => write!(f, "ZKP verification failed: {}", s),
             Self::ZkpBudgetExceeded {

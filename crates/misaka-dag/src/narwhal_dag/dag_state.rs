@@ -317,9 +317,7 @@ impl DagState {
                 let payload = match serde_json::to_vec(block.inner()) {
                     Ok(p) => p,
                     Err(e) => {
-                        return BlockAcceptResult::Rejected(
-                            format!("WAL serialize failed: {}", e),
-                        );
+                        return BlockAcceptResult::Rejected(format!("WAL serialize failed: {}", e));
                     }
                 };
                 if let Err(e) =
@@ -437,7 +435,8 @@ impl DagState {
                 tracing::error!(
                     "DAG INVARIANT VIOLATION (release): duplicate slot ({},{}) \
                      digests: existing={}, new={}",
-                    slot.round, slot.authority,
+                    slot.round,
+                    slot.authority,
                     hex::encode(&existing.digest.0[..8]),
                     hex::encode(&block_ref.digest.0[..8]),
                 );

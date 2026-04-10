@@ -155,7 +155,8 @@ impl EquivocationDetector {
     /// SEC-FIX TM-3: Sort output for deterministic ordering across validators.
     #[must_use]
     pub fn valid_voters_for_slot(&self, slot: u64) -> Vec<AuthorityIndex> {
-        let mut voters: Vec<AuthorityIndex> = self.seen
+        let mut voters: Vec<AuthorityIndex> = self
+            .seen
             .iter()
             .filter_map(|((voter, s), _)| {
                 if s.as_u64() == slot && !self.banned.contains(voter) {

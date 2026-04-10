@@ -46,7 +46,6 @@ pub struct UtxoSetSnapshot {
     pub height: u64,
     pub unspent: Vec<StoredUtxoSnapshot>,
     // Phase 2c-B D4c: spend_ids deleted
-
     /// SEC-FIX: Persisted burn IDs for bridge replay protection across restarts.
     /// Without this, `UtxoExecutor::check_burn_replay()` is ineffective after
     /// a node restart — the same Solana burn tx can be replayed for double-mint.
@@ -146,8 +145,7 @@ fn utxo_element_bytes(outref: &OutputRef, output: &TxOutput, height: u64) -> Vec
     let outref_bytes = borsh::to_vec(outref)
         .expect("OutputRef borsh serialization must not fail — type is fixed-size");
     buf.extend_from_slice(&outref_bytes);
-    let output_bytes = borsh::to_vec(output)
-        .expect("TxOutput borsh serialization must not fail");
+    let output_bytes = borsh::to_vec(output).expect("TxOutput borsh serialization must not fail");
     buf.extend_from_slice(&output_bytes);
     buf.extend_from_slice(&height.to_le_bytes());
     buf
@@ -340,10 +338,7 @@ impl UtxoSet {
     ///
     /// SECURITY: Each input UTXO is removed from the unspent set.
     /// This is the fundamental double-spend prevention mechanism.
-    pub fn apply_transaction(
-        &mut self,
-        tx: &UtxoTransaction,
-    ) -> Result<BlockDelta, UtxoError> {
+    pub fn apply_transaction(&mut self, tx: &UtxoTransaction) -> Result<BlockDelta, UtxoError> {
         let mut delta = BlockDelta::new(self.height);
 
         // SEC-FIX: Defense-in-depth — reject multi-ref inputs at storage layer.
@@ -353,7 +348,8 @@ impl UtxoSet {
             if input.utxo_refs.len() > 1 {
                 return Err(UtxoError::OutputNotFound(format!(
                     "input[{}]: multi-ref inputs not allowed (got {} refs) — signature bypass risk",
-                    i, input.utxo_refs.len()
+                    i,
+                    input.utxo_refs.len()
                 )));
             }
         }
@@ -364,11 +360,9 @@ impl UtxoSet {
                 if self.unspent.contains_key(outref) {
                     // Record spent UTXO in delta for potential rollback
                     if let Some(entry) = self.unspent.get(outref) {
-                        delta.spent.push((
-                            outref.tx_hash,
-                            outref.clone(),
-                            entry.output.clone(),
-                        ));
+                        delta
+                            .spent
+                            .push((outref.tx_hash, outref.clone(), entry.output.clone()));
                     }
                     self.remove_output(outref);
                 } else {
@@ -459,7 +453,11 @@ impl UtxoSet {
             let height = delta.height;
             self.add_output(outref.clone(), output.clone(), height, false)
                 .map_err(|e| {
-                    tracing::error!("undo_last_delta: failed to restore spent UTXO {:?}: {}", outref, e);
+                    tracing::error!(
+                        "undo_last_delta: failed to restore spent UTXO {:?}: {}",
+                        outref,
+                        e
+                    );
                     e
                 })?;
         }
@@ -572,7 +570,7 @@ impl UtxoSet {
             height: self.height,
             unspent,
             processed_burns: Vec::new(), // Populated by UtxoExecutor before save
-            total_emitted: 0, // Populated by UtxoExecutor before save
+            total_emitted: 0,            // Populated by UtxoExecutor before save
         }
     }
 
@@ -825,31 +823,40 @@ impl UtxoSet {
         }
 
         let meta = std::fs::metadata(path).map_err(|e| {
-            UtxoError::SnapshotIo(format!("metadata read failed for {}: {}", path.display(), e))
+            UtxoError::SnapshotIo(format!(
+                "metadata read failed for {}: {}",
+                path.display(),
+                e
+            ))
         })?;
         if meta.len() > Self::MAX_SNAPSHOT_FILE_SIZE {
             return Err(UtxoError::SnapshotIntegrity(format!(
                 "snapshot file {} is {} bytes — exceeds {} byte limit",
-                path.display(), meta.len(), Self::MAX_SNAPSHOT_FILE_SIZE
+                path.display(),
+                meta.len(),
+                Self::MAX_SNAPSHOT_FILE_SIZE
             )));
         }
 
         let data = std::fs::read(path).map_err(|e| {
-            UtxoError::SnapshotIo(format!("failed to read snapshot from {}: {}", path.display(), e))
+            UtxoError::SnapshotIo(format!(
+                "failed to read snapshot from {}: {}",
+                path.display(),
+                e
+            ))
         })?;
 
         let parse_snapshot = |bytes: &[u8]| -> Result<UtxoSetSnapshot, UtxoError> {
-            serde_json::from_slice(bytes).map_err(|e| {
-                UtxoError::SnapshotIntegrity(format!("JSON parse failed: {}", e))
-            })
+            serde_json::from_slice(bytes)
+                .map_err(|e| UtxoError::SnapshotIntegrity(format!("JSON parse failed: {}", e)))
         };
 
         let snapshot = if data.len() < 32 {
             parse_snapshot(&data)?
         } else {
-            let stored_hash: [u8; 32] = data[..32].try_into().map_err(|_| {
-                UtxoError::SnapshotIntegrity("hash prefix too short".into())
-            })?;
+            let stored_hash: [u8; 32] = data[..32]
+                .try_into()
+                .map_err(|_| UtxoError::SnapshotIntegrity("hash prefix too short".into()))?;
             let payload = &data[32..];
             let computed_hash: [u8; 32] = Sha3_256::digest(payload).into();
             if stored_hash == computed_hash {
@@ -865,7 +872,8 @@ impl UtxoSet {
             }
         };
 
-        let (set, burns, total_emitted) = Self::from_snapshot_with_burns(snapshot, max_delta_history);
+        let (set, burns, total_emitted) =
+            Self::from_snapshot_with_burns(snapshot, max_delta_history);
         Ok(Some((set, burns, total_emitted)))
     }
 
@@ -919,8 +927,10 @@ mod tests {
         let mut set = UtxoSet::new(100);
         let o1 = make_outref(1, 0);
         let o2 = make_outref(1, 1);
-        set.add_output(o1.clone(), make_output(7000), 1, false).unwrap();
-        set.add_output(o2.clone(), make_output(3000), 1, false).unwrap();
+        set.add_output(o1.clone(), make_output(7000), 1, false)
+            .unwrap();
+        set.add_output(o2.clone(), make_output(3000), 1, false)
+            .unwrap();
 
         let outputs = vec![make_output(9500)];
         set.verify_amount_conservation(&[o1.clone(), o2.clone()], &outputs, 500)
@@ -1034,7 +1044,8 @@ mod tests {
         let outref = make_outref(7, 1);
         set.add_output(outref.clone(), make_output(4242), 3, false)
             .unwrap();
-        set.register_spending_key(outref.clone(), vec![0xAB; 1952]).unwrap();
+        set.register_spending_key(outref.clone(), vec![0xAB; 1952])
+            .unwrap();
         set.height = 9;
 
         let snapshot = set.export_snapshot();
@@ -1042,7 +1053,10 @@ mod tests {
 
         assert_eq!(restored.height, 9);
         assert_eq!(restored.get(&outref).unwrap().output.amount, 4242);
-        assert_eq!(restored.get_spending_key(&outref).unwrap(), &[0xAB; 1952][..]);
+        assert_eq!(
+            restored.get_spending_key(&outref).unwrap(),
+            &[0xAB; 1952][..]
+        );
         assert_eq!(restored.compute_state_root(), set.compute_state_root());
     }
 }
@@ -1077,8 +1091,7 @@ impl UtxoSet {
             // unspent, enabling double-spending. Restrict to emission-only types.
             if !matches!(
                 tx.tx_type,
-                misaka_types::utxo::TxType::SystemEmission
-                    | misaka_types::utxo::TxType::Faucet
+                misaka_types::utxo::TxType::SystemEmission | misaka_types::utxo::TxType::Faucet
             ) {
                 return Err(UtxoError::OutputNotFound(format!(
                     "apply_block_atomic: rejected tx_type {:?} — only SystemEmission/Faucet allowed",

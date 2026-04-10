@@ -175,11 +175,7 @@ impl ObserverService {
     fn build_quorum_proof(&self, output: &LinearizedOutput) -> QuorumProof {
         // Collect unique block authors from the committed sub-DAG.
         // These are the authorities that contributed blocks to this commit.
-        let mut endorsers: Vec<AuthorityIndex> = output
-            .blocks
-            .iter()
-            .map(|br| br.author)
-            .collect();
+        let mut endorsers: Vec<AuthorityIndex> = output.blocks.iter().map(|br| br.author).collect();
         endorsers.sort_unstable();
         endorsers.dedup();
 
@@ -376,8 +372,7 @@ mod tests {
 
     #[test]
     fn test_as_commit_consumer_trait() {
-        let mut consumer: Box<dyn CommitConsumer> =
-            Box::new(ObserverService::new(7, 100));
+        let mut consumer: Box<dyn CommitConsumer> = Box::new(ObserverService::new(7, 100));
         consumer.process(&make_output(0, 7));
         assert!(!consumer.is_saturated());
     }

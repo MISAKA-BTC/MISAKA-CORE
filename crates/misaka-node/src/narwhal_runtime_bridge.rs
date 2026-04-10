@@ -41,17 +41,17 @@ use tracing::{error, info, warn};
 
 #[cfg(feature = "dag")]
 use misaka_dag::{
-    narwhal_dag::runtime::{
-        ConsensusMessage, ConsensusStatus, RuntimeConfig, spawn_consensus_runtime,
-    },
-    narwhal_dag::rocksdb_store::RocksDbConsensusStore,
+    narwhal_dag::core_engine::ProposeContext,
+    narwhal_dag::epoch::{build_committee, EpochManager},
     narwhal_dag::metrics::ConsensusMetrics,
     narwhal_dag::prometheus::PrometheusExporter,
-    narwhal_dag::epoch::{EpochManager, build_committee},
-    narwhal_dag::core_engine::ProposeContext,
+    narwhal_dag::rocksdb_store::RocksDbConsensusStore,
+    narwhal_dag::runtime::{
+        spawn_consensus_runtime, ConsensusMessage, ConsensusStatus, RuntimeConfig,
+    },
     narwhal_ordering::linearizer::LinearizedOutput,
-    Committee, VerifiedBlock, NarwhalBlock,
     narwhal_types::block::BlockSigner,
+    Committee, NarwhalBlock, VerifiedBlock,
 };
 
 /// Narwhal runtime bridge — main integration point.
@@ -121,7 +121,9 @@ impl NarwhalBridge {
              ║  MISAKA Network — Narwhal/Bullshark Consensus            ║\n\
              ║  Authority: {:<4}  Committee: {:<4}  Epoch: {:<8}       ║\n\
              ╚═══════════════════════════════════════════════════════════╝",
-            authority_index, committee.size(), committee.epoch,
+            authority_index,
+            committee.size(),
+            committee.epoch,
         );
 
         Ok(Self {
@@ -154,25 +156,31 @@ impl NarwhalBridge {
         // Transactions are queued; propose_block pulls from the queue.
         // For now, propose immediately with the single TX.
         let (reply_tx, _reply_rx) = oneshot::channel();
-        self.msg_tx.try_send(ConsensusMessage::ProposeBlock {
-            context: ProposeContext::normal(vec![tx_bytes], [0u8; 32]),
-            reply: reply_tx,
-        }).map_err(|e| format!("consensus runtime closed: {}", e))
+        self.msg_tx
+            .try_send(ConsensusMessage::ProposeBlock {
+                context: ProposeContext::normal(vec![tx_bytes], [0u8; 32]),
+                reply: reply_tx,
+            })
+            .map_err(|e| format!("consensus runtime closed: {}", e))
     }
 
     /// Receive a block from a peer.
     pub fn receive_peer_block(&self, block: NarwhalBlock) -> Result<(), String> {
         let vb = VerifiedBlock::new_pending_verification(block);
-        self.msg_tx.try_send(ConsensusMessage::NewBlock(vb))
+        self.msg_tx
+            .try_send(ConsensusMessage::NewBlock(vb))
             .map_err(|e| format!("consensus runtime closed: {}", e))
     }
 
     /// Get consensus status.
     pub async fn get_status(&self) -> Result<ConsensusStatus, String> {
         let (reply_tx, reply_rx) = oneshot::channel();
-        self.msg_tx.try_send(ConsensusMessage::GetStatus(reply_tx))
+        self.msg_tx
+            .try_send(ConsensusMessage::GetStatus(reply_tx))
             .map_err(|e| format!("consensus runtime closed: {}", e))?;
-        reply_rx.await.map_err(|_| "status reply channel closed".to_string())
+        reply_rx
+            .await
+            .map_err(|_| "status reply channel closed".to_string())
     }
 
     /// Poll for committed outputs (non-blocking).

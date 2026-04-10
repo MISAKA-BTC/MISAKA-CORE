@@ -113,8 +113,7 @@ pub async fn run_rpc_server(
     // SEC-FIX [Audit #1]: route_layer is applied AFTER all routes are added,
     // so that every write endpoint (including faucet) is covered by auth.
     let write_routes = {
-        let routes = Router::new()
-            .route("/api/submit_tx", post(submit_tx));
+        let routes = Router::new().route("/api/submit_tx", post(submit_tx));
 
         // Faucet is feature-gated: not available in production builds
         #[cfg(feature = "faucet")]
@@ -794,8 +793,7 @@ async fn submit_tx(
     // ── SEC-FIX: Reject system-only tx types at RPC ingress ──
     // SystemEmission and Faucet transactions MUST NOT be user-submittable.
     match tx.tx_type {
-        misaka_types::utxo::TxType::SystemEmission
-        | misaka_types::utxo::TxType::Faucet => {
+        misaka_types::utxo::TxType::SystemEmission | misaka_types::utxo::TxType::Faucet => {
             return Json(serde_json::json!({
                 "txHash": null, "accepted": false,
                 "error": "SystemEmission/Faucet transactions cannot be user-submitted"
@@ -1284,10 +1282,7 @@ mod tests {
         assert_eq!(json["privacy"]["schemeTag"], 16);
         assert_eq!(json["privacy"]["schemeName"], "UnifiedZKP-v1");
         assert_eq!(json["privacy"]["backendFamily"], "zeroKnowledge");
-        assert_eq!(
-            json["privacy"]["spendIdentifierModel"],
-            "canonicalSpendTag"
-        );
+        assert_eq!(json["privacy"]["spendIdentifierModel"], "canonicalSpendTag");
         assert_eq!(json["privacy"]["spendIdentifierLabel"], "canonical_id");
         assert_eq!(
             json["privacy"]["spendIdentifiers"][0],

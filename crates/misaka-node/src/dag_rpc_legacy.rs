@@ -291,7 +291,10 @@ async fn sync_runtime_recovery_from_shadow_state(
         guard.mark_bullshark_candidate_preview(&candidate_preview_hashes);
     }
 
-    let commit_preview_hexes = commit_preview_hashes.iter().map(hex::encode).collect::<Vec<_>>();
+    let commit_preview_hexes = commit_preview_hashes
+        .iter()
+        .map(hex::encode)
+        .collect::<Vec<_>>();
     if !commit_preview_hashes.is_empty()
         && guard.last_bullshark_commit_preview_tx_hashes != commit_preview_hexes
     {
@@ -1337,13 +1340,7 @@ fn dag_tx_status_json(state: &DagNodeState, tx_hash: [u8; 32]) -> serde_json::Va
             )
         }
         // Phase 2c-B: ring conflict variants removed.
-        Some(_other) => (
-            "failed",
-            true,
-            false,
-            false,
-            serde_json::Value::Null,
-        ),
+        Some(_other) => ("failed", true, false, false, serde_json::Value::Null),
         None => ("seenInDag", false, false, false, serde_json::Value::Null),
     };
 
@@ -1487,8 +1484,7 @@ where
     // details and making the node appear to support ZKP privacy features
     // that are not implemented. All transfers are transparent (Phase 2c-B).
     #[cfg(feature = "dev-rpc")]
-    let public_routes = public_routes
-        .route("/api/get_anonymity_set", post(dag_get_anonymity_set));
+    let public_routes = public_routes.route("/api/get_anonymity_set", post(dag_get_anonymity_set));
 
     let public_routes = public_routes
         .route("/api/get_mempool_info", get(dag_get_mempool_info))
@@ -1501,8 +1497,7 @@ where
     // `submit_tx` is the user-facing write path. Checkpoint votes use a
     // separate interim gossip ingress because peers do not yet attach HTTP
     // auth headers.
-    let write_routes = Router::new()
-        .route("/api/submit_tx", post(dag_submit_tx));
+    let write_routes = Router::new().route("/api/submit_tx", post(dag_submit_tx));
 
     // Phase 35: faucet gated by feature flag (compile-time exclusion from mainnet).
     // Previously unconditionally compiled; now requires --features faucet.
@@ -1518,16 +1513,12 @@ where
     // merging. Axum's route_layer only applies to routes that already exist at
     // the time of the call, so merging after route_layer would leave the gossip
     // routes unauthenticated.
-    let checkpoint_gossip = dag_checkpoint_vote_gossip_router()
-        .route_layer(axum::middleware::from_fn_with_state(
-            auth_state.clone(),
-            require_api_key,
-        ));
+    let checkpoint_gossip = dag_checkpoint_vote_gossip_router().route_layer(
+        axum::middleware::from_fn_with_state(auth_state.clone(), require_api_key),
+    );
     let write_routes = write_routes.merge(checkpoint_gossip);
 
-    let mut app = public_routes
-        .merge(write_routes)
-        .with_state(rpc_state);
+    let mut app = public_routes.merge(write_routes).with_state(rpc_state);
 
     // ── Validator Lock / Admission API ──
     if let Some(registry) = validator_registry {
@@ -1704,8 +1695,7 @@ async fn dag_submit_tx(
     // ── SEC-FIX: Reject system-only tx types at RPC ingress ──
     // SystemEmission and Faucet transactions MUST NOT be user-submittable.
     match tx.tx_type {
-        misaka_types::utxo::TxType::SystemEmission
-        | misaka_types::utxo::TxType::Faucet => {
+        misaka_types::utxo::TxType::SystemEmission | misaka_types::utxo::TxType::Faucet => {
             return Json(serde_json::json!({
                 "txHash": null, "accepted": false,
                 "error": "SystemEmission/Faucet transactions cannot be user-submitted"
@@ -2855,8 +2845,11 @@ mod tests {
                 address: [0x80 + i as u8; 32],
                 spending_pubkey: Some(wallet.public_poly.to_bytes()),
             };
-            utxo_set.add_output(outref.clone(), output, 0, false).unwrap();
-            utxo_set.register_spending_key(outref, wallet.public_poly.to_bytes())
+            utxo_set
+                .add_output(outref.clone(), output, 0, false)
+                .unwrap();
+            utxo_set
+                .register_spending_key(outref, wallet.public_poly.to_bytes())
                 .expect("test: register_spending_key");
         }
 
@@ -2935,7 +2928,6 @@ mod tests {
             persistent_backend: None,
             faucet_cooldowns: std::collections::HashMap::new(),
             pending_transactions: std::collections::HashMap::new(),
-
         }
     }
 
@@ -3094,9 +3086,7 @@ mod tests {
         );
     }
 
-    fn maybe_write_bullshark_commit_authority_switch_rehearsal_result(
-        payload: &serde_json::Value,
-    ) {
+    fn maybe_write_bullshark_commit_authority_switch_rehearsal_result(payload: &serde_json::Value) {
         maybe_write_named_json_result(
             "MISAKA_BULLSHARK_COMMIT_AUTHORITY_SWITCH_REHEARSAL_RESULT",
             payload,
@@ -3546,11 +3536,9 @@ mod tests {
             ));
 
         // Match production: checkpoint gossip also requires API key
-        let checkpoint_gossip = dag_checkpoint_vote_gossip_router()
-            .route_layer(axum::middleware::from_fn_with_state(
-                auth_state,
-                crate::rpc_auth::require_api_key,
-            ));
+        let checkpoint_gossip = dag_checkpoint_vote_gossip_router().route_layer(
+            axum::middleware::from_fn_with_state(auth_state, crate::rpc_auth::require_api_key),
+        );
 
         public_routes
             .merge(checkpoint_gossip)
@@ -3621,7 +3609,6 @@ mod tests {
         );
     }
 
-
     #[tokio::test]
     async fn test_dag_submit_checkpoint_vote_rejects_unknown_validator_without_registration() {
         let mut state = make_test_dag_state();
@@ -3649,7 +3636,7 @@ mod tests {
                 dag_p2p_observation: None,
                 runtime_recovery: None,
                 chain_id: 2,
-            genesis_hash: [0u8; 32],
+                genesis_hash: [0u8; 32],
             }),
             Json(DagCheckpointVoteRequest {
                 vote,
@@ -3694,7 +3681,7 @@ mod tests {
                 dag_p2p_observation: None,
                 runtime_recovery: None,
                 chain_id: 2,
-            genesis_hash: [0u8; 32],
+                genesis_hash: [0u8; 32],
             }),
             Json(DagCheckpointVoteRequest {
                 vote,
@@ -3745,7 +3732,7 @@ mod tests {
                 dag_p2p_observation: None,
                 runtime_recovery: None,
                 chain_id: 2,
-            genesis_hash: [0u8; 32],
+                genesis_hash: [0u8; 32],
             }),
             Json(DagCheckpointVoteRequest {
                 vote,
@@ -3820,10 +3807,9 @@ mod tests {
             .dag_store
             .set_tx_status(tx_applied.tx_hash(), TxApplyStatus::Applied);
         // Phase 2c-B: ring conflict variants removed; use generic failed status.
-        state.dag_store.set_tx_status(
-            tx_conflict.tx_hash(),
-            TxApplyStatus::FailedInvalidSignature,
-        );
+        state
+            .dag_store
+            .set_tx_status(tx_conflict.tx_hash(), TxApplyStatus::FailedInvalidSignature);
 
         let checkpoint = DagCheckpoint {
             block_hash,
@@ -4128,8 +4114,11 @@ mod tests {
             )
             .await
             .expect("vote response");
-        assert_eq!(vote_response.status(), StatusCode::UNAUTHORIZED,
-            "checkpoint vote gossip must require API key");
+        assert_eq!(
+            vote_response.status(),
+            StatusCode::UNAUTHORIZED,
+            "checkpoint vote gossip must require API key"
+        );
     }
 
     #[tokio::test]
@@ -4162,7 +4151,7 @@ mod tests {
                 dag_p2p_observation: None,
                 runtime_recovery: None,
                 chain_id: 2,
-            genesis_hash: [0u8; 32],
+                genesis_hash: [0u8; 32],
             }),
             Json(serde_json::json!({
                 "address": address
@@ -4930,10 +4919,8 @@ mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind live test port");
         let addr = listener.local_addr().expect("live test addr");
         drop(listener);
-        let server = start_live_dag_rpc_service(
-            dag_state.clone(), runtime_recovery.clone(), addr,
-        )
-        .await;
+        let server =
+            start_live_dag_rpc_service(dag_state.clone(), runtime_recovery.clone(), addr).await;
         let base_url = format!("http://{}", addr);
         let client = reqwest::Client::new();
 
@@ -4941,7 +4928,8 @@ mod tests {
             json["sr21Committee"]["activeCount"] == serde_json::Value::from(3)
                 && json["sr21Committee"]["previewMatchesRuntime"] == serde_json::Value::Bool(true)
                 && json["sr21Committee"]["runtimeActiveSetPresent"] == serde_json::Value::Bool(true)
-                && json["sr21Committee"]["runtimeActiveSetMatchesPreview"] == serde_json::Value::Bool(true)
+                && json["sr21Committee"]["runtimeActiveSetMatchesPreview"]
+                    == serde_json::Value::Bool(true)
                 && json["sr21Committee"]["localValidatorInActiveSet"]
                     == serde_json::Value::Bool(true)
         })
@@ -5110,12 +5098,14 @@ mod tests {
             total_applied_txs: 0,
             timestamp_ms: 1_700_000_000_000,
         });
-        state.latest_checkpoint_finality = state.latest_checkpoint.as_ref().map(|checkpoint| {
-            DagCheckpointFinalityProof {
-                target: checkpoint.validator_target(),
-                commits: vec![],
-            }
-        });
+        state.latest_checkpoint_finality =
+            state
+                .latest_checkpoint
+                .as_ref()
+                .map(|checkpoint| DagCheckpointFinalityProof {
+                    target: checkpoint.validator_target(),
+                    commits: vec![],
+                });
 
         let dag_state = Arc::new(tokio::sync::RwLock::new(state));
         let runtime_recovery = make_runtime_recovery_observation(&temp_dir);
@@ -5135,25 +5125,33 @@ mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind live test port");
         let addr = listener.local_addr().expect("live test addr");
         drop(listener);
-        let server = start_live_dag_rpc_service(
-            dag_state.clone(), runtime_recovery.clone(), addr,
-        )
-        .await;
+        let server =
+            start_live_dag_rpc_service(dag_state.clone(), runtime_recovery.clone(), addr).await;
         let base_url = format!("http://{}", addr);
         let client = reqwest::Client::new();
 
-        let before_apply_chain_info = wait_for_chain_info_http_matching(&client, &base_url, |json| {
-            json["sr21Committee"]["currentEpoch"] == serde_json::Value::from(next_epoch)
-                && json["sr21Committee"]["previewMatchesRuntime"] == serde_json::Value::Bool(false)
-                && json["sr21Committee"]["runtimeActiveSetPresent"] == serde_json::Value::Bool(false)
-                && json["sr21Committee"]["configuredActiveCount"] == serde_json::Value::from(1)
-                && json["validatorLifecycleRecovery"]["checkpointFinalized"] == serde_json::Value::Bool(true)
-                && json["validatorLifecycleRecovery"]["lastCheckpointFinalityBlueScore"] == serde_json::Value::from(finalized_boundary_score)
-                && json["validatorLifecycleRecovery"]["lastCheckpointDecisionSource"] == serde_json::Value::String("ghostdagCheckpointBft".into())
-                && json["validatorAttestation"]["latestCheckpointFinality"]["target"]["blockHash"] == serde_json::Value::String(hex::encode(checkpoint_block_hash))
-                && json["validatorAttestation"]["latestCheckpointFinality"]["target"]["blueScore"] == serde_json::Value::from(finalized_boundary_score)
-        })
-        .await;
+        let before_apply_chain_info =
+            wait_for_chain_info_http_matching(&client, &base_url, |json| {
+                json["sr21Committee"]["currentEpoch"] == serde_json::Value::from(next_epoch)
+                    && json["sr21Committee"]["previewMatchesRuntime"]
+                        == serde_json::Value::Bool(false)
+                    && json["sr21Committee"]["runtimeActiveSetPresent"]
+                        == serde_json::Value::Bool(false)
+                    && json["sr21Committee"]["configuredActiveCount"] == serde_json::Value::from(1)
+                    && json["validatorLifecycleRecovery"]["checkpointFinalized"]
+                        == serde_json::Value::Bool(true)
+                    && json["validatorLifecycleRecovery"]["lastCheckpointFinalityBlueScore"]
+                        == serde_json::Value::from(finalized_boundary_score)
+                    && json["validatorLifecycleRecovery"]["lastCheckpointDecisionSource"]
+                        == serde_json::Value::String("ghostdagCheckpointBft".into())
+                    && json["validatorAttestation"]["latestCheckpointFinality"]["target"]
+                        ["blockHash"]
+                        == serde_json::Value::String(hex::encode(checkpoint_block_hash))
+                    && json["validatorAttestation"]["latestCheckpointFinality"]["target"]
+                        ["blueScore"]
+                        == serde_json::Value::from(finalized_boundary_score)
+            })
+            .await;
 
         let epoch_boundary_reached = lifecycle_progress.apply_finalized_checkpoint_score(
             &mut lifecycle_epoch,
@@ -5181,11 +5179,18 @@ mod tests {
                         == serde_json::Value::from(local_preview_index)
                     && json["sr21Committee"]["configuredActiveCount"]
                         == serde_json::Value::from(election_result.num_active)
-                    && json["validatorLifecycleRecovery"]["checkpointFinalized"] == serde_json::Value::Bool(true)
-                    && json["validatorLifecycleRecovery"]["lastCheckpointFinalityBlueScore"] == serde_json::Value::from(finalized_boundary_score)
-                    && json["validatorLifecycleRecovery"]["lastCheckpointDecisionSource"] == serde_json::Value::String("ghostdagCheckpointBft".into())
-                    && json["validatorAttestation"]["latestCheckpointFinality"]["target"]["blockHash"] == serde_json::Value::String(hex::encode(checkpoint_block_hash))
-                    && json["validatorAttestation"]["latestCheckpointFinality"]["target"]["blueScore"] == serde_json::Value::from(finalized_boundary_score)
+                    && json["validatorLifecycleRecovery"]["checkpointFinalized"]
+                        == serde_json::Value::Bool(true)
+                    && json["validatorLifecycleRecovery"]["lastCheckpointFinalityBlueScore"]
+                        == serde_json::Value::from(finalized_boundary_score)
+                    && json["validatorLifecycleRecovery"]["lastCheckpointDecisionSource"]
+                        == serde_json::Value::String("ghostdagCheckpointBft".into())
+                    && json["validatorAttestation"]["latestCheckpointFinality"]["target"]
+                        ["blockHash"]
+                        == serde_json::Value::String(hex::encode(checkpoint_block_hash))
+                    && json["validatorAttestation"]["latestCheckpointFinality"]["target"]
+                        ["blueScore"]
+                        == serde_json::Value::from(finalized_boundary_score)
             })
             .await;
         let after_apply_dag_info = fetch_dag_info_http(&client, &base_url).await;
@@ -5254,7 +5259,8 @@ mod tests {
         });
 
         let dag_snapshot = PathBuf::from(&temp_dir).join("dag_runtime_snapshot.json");
-        let validator_lifecycle_snapshot = PathBuf::from(&temp_dir).join("validator_lifecycle.json");
+        let validator_lifecycle_snapshot =
+            PathBuf::from(&temp_dir).join("validator_lifecycle.json");
         let (restart_blue_score, restart_block_hash) = {
             let guard = dag_state.read().await;
             let snapshot = guard.dag_store.snapshot();
@@ -5291,10 +5297,9 @@ mod tests {
             .expect("restart live test addr");
         drop(restart_listener);
         let restart_base_url = format!("http://{}", restart_addr);
-        let restarted_server = start_live_dag_rpc_service(
-            dag_state.clone(), runtime_recovery.clone(), restart_addr,
-        )
-        .await;
+        let restarted_server =
+            start_live_dag_rpc_service(dag_state.clone(), runtime_recovery.clone(), restart_addr)
+                .await;
 
         let restarted_client = reqwest::Client::new();
         let after_restart_chain_info =
@@ -5310,13 +5315,20 @@ mod tests {
                         == serde_json::Value::from(local_preview_index)
                     && json["sr21Committee"]["configuredActiveCount"]
                         == serde_json::Value::from(election_result.num_active)
-                    && json["validatorLifecycleRecovery"]["checkpointFinalized"] == serde_json::Value::Bool(true)
-                    && json["validatorLifecycleRecovery"]["lastCheckpointDecisionSource"] == serde_json::Value::String("ghostdagCheckpointBft".into())
-                    && json["validatorAttestation"]["latestCheckpointFinality"]["target"]["blockHash"] == serde_json::Value::String(hex::encode(checkpoint_block_hash))
-                    && json["validatorAttestation"]["latestCheckpointFinality"]["target"]["blueScore"] == serde_json::Value::from(finalized_boundary_score)
+                    && json["validatorLifecycleRecovery"]["checkpointFinalized"]
+                        == serde_json::Value::Bool(true)
+                    && json["validatorLifecycleRecovery"]["lastCheckpointDecisionSource"]
+                        == serde_json::Value::String("ghostdagCheckpointBft".into())
+                    && json["validatorAttestation"]["latestCheckpointFinality"]["target"]
+                        ["blockHash"]
+                        == serde_json::Value::String(hex::encode(checkpoint_block_hash))
+                    && json["validatorAttestation"]["latestCheckpointFinality"]["target"]
+                        ["blueScore"]
+                        == serde_json::Value::from(finalized_boundary_score)
             })
             .await;
-        let after_restart_dag_info = fetch_dag_info_http(&restarted_client, &restart_base_url).await;
+        let after_restart_dag_info =
+            fetch_dag_info_http(&restarted_client, &restart_base_url).await;
 
         let second_epoch = next_epoch + 1;
         let second_finalized_boundary_score = finalized_boundary_score + checkpoint_interval;
@@ -5369,12 +5381,14 @@ mod tests {
                 total_applied_txs: 0,
                 timestamp_ms: 1_700_000_360_000,
             });
-            guard.latest_checkpoint_finality = guard.latest_checkpoint.as_ref().map(|checkpoint| {
-                DagCheckpointFinalityProof {
-                    target: checkpoint.validator_target(),
-                    commits: vec![],
-                }
-            });
+            guard.latest_checkpoint_finality =
+                guard
+                    .latest_checkpoint
+                    .as_ref()
+                    .map(|checkpoint| DagCheckpointFinalityProof {
+                        target: checkpoint.validator_target(),
+                        commits: vec![],
+                    });
         }
         {
             let mut guard = runtime_recovery.write().await;
@@ -5389,11 +5403,9 @@ mod tests {
             let guard = dag_state.read().await;
             sr21_election::run_election(&guard.known_validators, second_epoch)
         };
-        let second_local_preview_index = sr21_election::find_sr_index(
-            &second_election_result,
-            &local_validator_id,
-        )
-        .expect("local validator active at second epoch");
+        let second_local_preview_index =
+            sr21_election::find_sr_index(&second_election_result, &local_validator_id)
+                .expect("local validator active at second epoch");
 
         let before_second_apply_chain_info =
             wait_for_chain_info_http_matching(&restarted_client, &restart_base_url, |json| {
@@ -5564,11 +5576,9 @@ mod tests {
                         && before_second_apply_chain_info["sr21Committee"]
                             ["runtimeActiveSetMatchesPreview"]
                             == serde_json::Value::Bool(false)
-                        && before_second_apply_chain_info["sr21Committee"]
-                            ["localPreviewSrIndex"]
+                        && before_second_apply_chain_info["sr21Committee"]["localPreviewSrIndex"]
                             == serde_json::Value::from(second_local_preview_index)
-                        && before_second_apply_chain_info["sr21Committee"]
-                            ["localRuntimeSrIndex"]
+                        && before_second_apply_chain_info["sr21Committee"]["localRuntimeSrIndex"]
                             == serde_json::Value::from(local_preview_index)
                         && before_second_preview_ids == second_expected_active_ids
                         && before_second_runtime_ids == first_expected_active_ids
@@ -5591,28 +5601,23 @@ mod tests {
                 serde_json::Value::Bool(
                     after_second_apply_chain_info["sr21Committee"]["currentEpoch"]
                         == serde_json::Value::from(second_epoch)
-                        && after_second_apply_chain_info["sr21Committee"]
-                            ["configuredActiveCount"]
+                        && after_second_apply_chain_info["sr21Committee"]["configuredActiveCount"]
                             == serde_json::Value::from(second_election_result.num_active)
-                        && after_second_apply_chain_info["sr21Committee"]
-                            ["previewMatchesRuntime"]
+                        && after_second_apply_chain_info["sr21Committee"]["previewMatchesRuntime"]
                             == serde_json::Value::Bool(true)
                         && after_second_apply_chain_info["sr21Committee"]
                             ["runtimeActiveSetPresent"]
                             == serde_json::Value::Bool(true)
-                        && after_second_apply_chain_info["sr21Committee"]
-                            ["runtimeActiveSetCount"]
+                        && after_second_apply_chain_info["sr21Committee"]["runtimeActiveSetCount"]
                             == serde_json::Value::from(second_election_result.num_active)
                         && after_second_apply_chain_info["sr21Committee"]
                             ["runtimeActiveSetMatchesPreview"]
                             == serde_json::Value::Bool(true)
                         && after_second_preview_ids == second_expected_active_ids
                         && after_second_runtime_ids == second_expected_active_ids
-                        && after_second_apply_chain_info["sr21Committee"]
-                            ["localPreviewSrIndex"]
+                        && after_second_apply_chain_info["sr21Committee"]["localPreviewSrIndex"]
                             == serde_json::Value::from(second_local_preview_index)
-                        && after_second_apply_chain_info["sr21Committee"]
-                            ["localRuntimeSrIndex"]
+                        && after_second_apply_chain_info["sr21Committee"]["localRuntimeSrIndex"]
                             == serde_json::Value::from(second_local_preview_index),
                 ),
             );
@@ -5621,10 +5626,8 @@ mod tests {
                 serde_json::Value::Bool(
                     second_preview_added_validator_ids.is_empty()
                         && second_preview_removed_validator_ids.is_empty()
-                        && second_added_validator_ids
-                            == vec![remote_c_validator_id_hex.clone()]
-                        && second_removed_validator_ids
-                            == vec![remote_b_validator_id_hex.clone()]
+                        && second_added_validator_ids == vec![remote_c_validator_id_hex.clone()]
+                        && second_removed_validator_ids == vec![remote_b_validator_id_hex.clone()]
                         && before_second_preview_ids == second_expected_active_ids
                         && before_second_runtime_ids == first_expected_active_ids
                         && after_second_preview_ids == second_expected_active_ids
@@ -5638,8 +5641,7 @@ mod tests {
                 serde_json::Value::Bool(
                     before_second_apply_chain_info["sr21Committee"]["localRuntimeSrIndex"]
                         == serde_json::Value::from(local_preview_index)
-                        && after_second_apply_chain_info["sr21Committee"]
-                            ["localRuntimeSrIndex"]
+                        && after_second_apply_chain_info["sr21Committee"]["localRuntimeSrIndex"]
                             == serde_json::Value::from(second_local_preview_index)
                         && second_local_preview_index != local_preview_index,
                 ),
@@ -5684,34 +5686,27 @@ mod tests {
                 serde_json::Value::Bool(
                     after_second_apply_chain_info["sr21Committee"]["selection"]
                         == after_second_apply_dag_info["sr21Committee"]["selection"]
-                        && after_second_apply_chain_info["sr21Committee"]
-                            ["committeeSizeCap"]
-                            == after_second_apply_dag_info["sr21Committee"]
-                                ["committeeSizeCap"]
+                        && after_second_apply_chain_info["sr21Committee"]["committeeSizeCap"]
+                            == after_second_apply_dag_info["sr21Committee"]["committeeSizeCap"]
                         && after_second_apply_chain_info["sr21Committee"]["activeCount"]
                             == after_second_apply_dag_info["sr21Committee"]["activeCount"]
-                        && after_second_apply_chain_info["sr21Committee"]
-                            ["configuredActiveCount"]
+                        && after_second_apply_chain_info["sr21Committee"]["configuredActiveCount"]
                             == after_second_apply_dag_info["sr21Committee"]
                                 ["configuredActiveCount"]
-                        && after_second_apply_chain_info["sr21Committee"]
-                            ["previewMatchesRuntime"]
+                        && after_second_apply_chain_info["sr21Committee"]["previewMatchesRuntime"]
                             == after_second_apply_dag_info["sr21Committee"]
                                 ["previewMatchesRuntime"]
-                        && after_second_apply_chain_info["sr21Committee"]
-                            ["previewQuorumThreshold"]
+                        && after_second_apply_chain_info["sr21Committee"]["previewQuorumThreshold"]
                             == after_second_apply_dag_info["sr21Committee"]
                                 ["previewQuorumThreshold"]
-                        && after_second_apply_chain_info["sr21Committee"]
-                            ["runtimeQuorumThreshold"]
+                        && after_second_apply_chain_info["sr21Committee"]["runtimeQuorumThreshold"]
                             == after_second_apply_dag_info["sr21Committee"]
                                 ["runtimeQuorumThreshold"]
                         && after_second_apply_chain_info["sr21Committee"]
                             ["runtimeActiveSetPresent"]
                             == after_second_apply_dag_info["sr21Committee"]
                                 ["runtimeActiveSetPresent"]
-                        && after_second_apply_chain_info["sr21Committee"]
-                            ["runtimeActiveSetCount"]
+                        && after_second_apply_chain_info["sr21Committee"]["runtimeActiveSetCount"]
                             == after_second_apply_dag_info["sr21Committee"]
                                 ["runtimeActiveSetCount"]
                         && after_second_apply_chain_info["sr21Committee"]
@@ -5726,19 +5721,19 @@ mod tests {
                     after_second_apply_chain_info["consensusArchitecture"]["currentRuntime"]
                         ["committee"]
                         == serde_json::Value::String("validatorBreadth".into())
-                        && after_second_apply_chain_info["consensusArchitecture"]
-                            ["currentRuntime"]["committeeStage"]
+                        && after_second_apply_chain_info["consensusArchitecture"]["currentRuntime"]
+                            ["committeeStage"]
                             == serde_json::Value::String("validatorBreadthProof".into())
-                        && after_second_apply_chain_info["consensusArchitecture"]
-                            ["currentRuntime"]["committeeSelection"]
+                        && after_second_apply_chain_info["consensusArchitecture"]["currentRuntime"]
+                            ["committeeSelection"]
                             == serde_json::Value::String("validatorBreadthRehearsal".into()),
                 ),
             );
             consistency_obj.insert(
                 "completionTargetMatchesPlanAfterSecondApply".into(),
                 serde_json::Value::Bool(
-                    after_second_apply_chain_info["consensusArchitecture"]
-                        ["completionTarget"]["committee"]
+                    after_second_apply_chain_info["consensusArchitecture"]["completionTarget"]
+                        ["committee"]
                         == serde_json::Value::String("superRepresentative21".into())
                         && after_second_apply_chain_info["consensusArchitecture"]
                             ["completionTarget"]["committeeStage"]
@@ -5915,11 +5910,13 @@ mod tests {
             serde_json::Value::Bool(false)
         );
         assert_eq!(
-            payload["beforeApply"]["chainInfo"]["validatorLifecycleRecovery"]["checkpointFinalized"],
+            payload["beforeApply"]["chainInfo"]["validatorLifecycleRecovery"]
+                ["checkpointFinalized"],
             serde_json::Value::Bool(true)
         );
         assert_eq!(
-            payload["beforeApply"]["chainInfo"]["validatorAttestation"]["latestCheckpointFinality"]["target"]["blueScore"],
+            payload["beforeApply"]["chainInfo"]["validatorAttestation"]["latestCheckpointFinality"]
+                ["target"]["blueScore"],
             serde_json::Value::from(finalized_boundary_score)
         );
         assert_eq!(
@@ -5997,7 +5994,8 @@ mod tests {
             Some(3)
         );
         assert_eq!(
-            payload["afterApply"]["chainInfo"]["sr21Committee"]["activeSetPreview"][2]["validatorId"],
+            payload["afterApply"]["chainInfo"]["sr21Committee"]["activeSetPreview"][2]
+                ["validatorId"],
             serde_json::Value::String(local_validator_id_hex)
         );
         assert_eq!(
@@ -6025,7 +6023,8 @@ mod tests {
             serde_json::Value::Bool(true)
         );
         assert_eq!(
-            payload["afterRestart"]["chainInfo"]["validatorAttestation"]["latestCheckpointFinality"]["target"]["blueScore"],
+            payload["afterRestart"]["chainInfo"]["validatorAttestation"]
+                ["latestCheckpointFinality"]["target"]["blueScore"],
             serde_json::Value::from(finalized_boundary_score)
         );
         assert_eq!(
@@ -6081,7 +6080,8 @@ mod tests {
             serde_json::Value::from(second_election_result.num_active)
         );
         assert_eq!(
-            payload["afterSecondApply"]["chainInfo"]["sr21Committee"]["runtimeActiveSetMatchesPreview"],
+            payload["afterSecondApply"]["chainInfo"]["sr21Committee"]
+                ["runtimeActiveSetMatchesPreview"],
             serde_json::Value::Bool(true)
         );
         assert_eq!(
@@ -6133,12 +6133,14 @@ mod tests {
         let mut excluded_ineligible_validator_ids = Vec::new();
 
         for multiplier in (31u128..=50u128).rev() {
-            let remote = make_test_local_validator(sr21_election::MIN_SR_STAKE.saturating_mul(multiplier));
+            let remote =
+                make_test_local_validator(sr21_election::MIN_SR_STAKE.saturating_mul(multiplier));
             known_validators.push(remote.identity.clone());
         }
 
         for multiplier in [29u128, 28u128] {
-            let remote = make_test_local_validator(sr21_election::MIN_SR_STAKE.saturating_mul(multiplier));
+            let remote =
+                make_test_local_validator(sr21_election::MIN_SR_STAKE.saturating_mul(multiplier));
             excluded_eligible_validator_ids.push(hex::encode(remote.identity.validator_id));
             known_validators.push(remote.identity.clone());
         }
@@ -6146,12 +6148,14 @@ mod tests {
         let mut inactive_validator =
             make_test_local_validator(sr21_election::MIN_SR_STAKE.saturating_mul(60));
         inactive_validator.identity.is_active = false;
-        excluded_ineligible_validator_ids.push(hex::encode(inactive_validator.identity.validator_id));
+        excluded_ineligible_validator_ids
+            .push(hex::encode(inactive_validator.identity.validator_id));
         known_validators.push(inactive_validator.identity.clone());
 
         let below_min_validator =
             make_test_local_validator(sr21_election::MIN_SR_STAKE.saturating_sub(1));
-        excluded_ineligible_validator_ids.push(hex::encode(below_min_validator.identity.validator_id));
+        excluded_ineligible_validator_ids
+            .push(hex::encode(below_min_validator.identity.validator_id));
         known_validators.push(below_min_validator.identity.clone());
 
         let election_result = sr21_election::run_election(&known_validators, next_epoch);
@@ -6180,23 +6184,25 @@ mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind live test port");
         let addr = listener.local_addr().expect("live test addr");
         drop(listener);
-        let server = start_live_dag_rpc_service(
-            dag_state.clone(), runtime_recovery.clone(), addr,
-        )
-        .await;
+        let server =
+            start_live_dag_rpc_service(dag_state.clone(), runtime_recovery.clone(), addr).await;
         let base_url = format!("http://{}", addr);
         let client = reqwest::Client::new();
 
-        let before_apply_chain_info = wait_for_chain_info_http_matching(&client, &base_url, |json| {
-            json["sr21Committee"]["currentEpoch"] == serde_json::Value::from(next_epoch)
-                && json["sr21Committee"]["eligibleValidatorCount"] == serde_json::Value::from(23)
-                && json["sr21Committee"]["activeCount"] == serde_json::Value::from(21)
-                && json["sr21Committee"]["configuredActiveCount"] == serde_json::Value::from(1)
-                && json["sr21Committee"]["droppedCount"] == serde_json::Value::from(4)
-                && json["sr21Committee"]["runtimeActiveSetPresent"] == serde_json::Value::Bool(false)
-                && json["sr21Committee"]["previewMatchesRuntime"] == serde_json::Value::Bool(false)
-        })
-        .await;
+        let before_apply_chain_info =
+            wait_for_chain_info_http_matching(&client, &base_url, |json| {
+                json["sr21Committee"]["currentEpoch"] == serde_json::Value::from(next_epoch)
+                    && json["sr21Committee"]["eligibleValidatorCount"]
+                        == serde_json::Value::from(23)
+                    && json["sr21Committee"]["activeCount"] == serde_json::Value::from(21)
+                    && json["sr21Committee"]["configuredActiveCount"] == serde_json::Value::from(1)
+                    && json["sr21Committee"]["droppedCount"] == serde_json::Value::from(4)
+                    && json["sr21Committee"]["runtimeActiveSetPresent"]
+                        == serde_json::Value::Bool(false)
+                    && json["sr21Committee"]["previewMatchesRuntime"]
+                        == serde_json::Value::Bool(false)
+            })
+            .await;
 
         {
             let mut guard = dag_state.write().await;
@@ -6206,15 +6212,21 @@ mod tests {
         let after_apply_chain_info =
             wait_for_chain_info_http_matching(&client, &base_url, |json| {
                 json["sr21Committee"]["currentEpoch"] == serde_json::Value::from(next_epoch)
-                    && json["sr21Committee"]["eligibleValidatorCount"] == serde_json::Value::from(23)
+                    && json["sr21Committee"]["eligibleValidatorCount"]
+                        == serde_json::Value::from(23)
                     && json["sr21Committee"]["activeCount"] == serde_json::Value::from(21)
                     && json["sr21Committee"]["configuredActiveCount"] == serde_json::Value::from(21)
-                    && json["sr21Committee"]["runtimeActiveSetPresent"] == serde_json::Value::Bool(true)
-                    && json["sr21Committee"]["runtimeActiveSetMatchesPreview"] == serde_json::Value::Bool(true)
-                    && json["sr21Committee"]["localPreviewSrIndex"] == serde_json::Value::from(local_preview_index)
-                    && json["sr21Committee"]["localRuntimeSrIndex"] == serde_json::Value::from(local_preview_index)
+                    && json["sr21Committee"]["runtimeActiveSetPresent"]
+                        == serde_json::Value::Bool(true)
+                    && json["sr21Committee"]["runtimeActiveSetMatchesPreview"]
+                        == serde_json::Value::Bool(true)
+                    && json["sr21Committee"]["localPreviewSrIndex"]
+                        == serde_json::Value::from(local_preview_index)
+                    && json["sr21Committee"]["localRuntimeSrIndex"]
+                        == serde_json::Value::from(local_preview_index)
                     && json["sr21Committee"]["droppedCount"] == serde_json::Value::from(4)
-                    && json["sr21Committee"]["previewMatchesRuntime"] == serde_json::Value::Bool(true)
+                    && json["sr21Committee"]["previewMatchesRuntime"]
+                        == serde_json::Value::Bool(true)
             })
             .await;
         let after_apply_dag_info = fetch_dag_info_http(&client, &base_url).await;
@@ -6382,7 +6394,8 @@ mod tests {
             Some(21)
         );
         assert_eq!(
-            payload["afterApply"]["chainInfo"]["sr21Committee"]["activeSetPreview"][20]["validatorId"],
+            payload["afterApply"]["chainInfo"]["sr21Committee"]["activeSetPreview"][20]
+                ["validatorId"],
             serde_json::Value::String(local_validator_id_hex)
         );
         assert_eq!(
@@ -6407,7 +6420,10 @@ mod tests {
         let dag_state = Arc::new(tokio::sync::RwLock::new(make_test_dag_state()));
         let dissemination_service = DagTxDisseminationService::new(dag_state.clone());
         dissemination_service
-            .admit_transaction(make_test_dissemination_tx(0x41, TxType::TransparentTransfer))
+            .admit_transaction(make_test_dissemination_tx(
+                0x41,
+                TxType::TransparentTransfer,
+            ))
             .await
             .expect("admit transparent");
 
@@ -6548,9 +6564,10 @@ mod tests {
         let dissemination_service = DagNarwhalDisseminationService::new(dag_state.clone());
         dissemination_service.start().await.expect("start service");
         dissemination_service
-            .stage_narwhal_worker_batch(vec![
-                make_test_dissemination_tx(0x51, TxType::TransparentTransfer),
-            ])
+            .stage_narwhal_worker_batch(vec![make_test_dissemination_tx(
+                0x51,
+                TxType::TransparentTransfer,
+            )])
             .await
             .expect("stage shadow batch");
 
@@ -6897,12 +6914,10 @@ mod tests {
 
         let dissemination = DagTxDisseminationService::new(dag_state.clone());
         let transparent = make_test_dissemination_tx(0xA1, TxType::TransparentTransfer);
-        let tx_hashes = vec![
-            dissemination
-                .admit_transaction(transparent.clone())
-                .await
-                .expect("admit transparent"),
-        ];
+        let tx_hashes = vec![dissemination
+            .admit_transaction(transparent.clone())
+            .await
+            .expect("admit transparent")];
         let tx_hash_hexes = tx_hashes.iter().map(hex::encode).collect::<Vec<_>>();
 
         let admitted_chain_info = dag_get_chain_info(State(rpc.clone())).await.0;
@@ -7051,12 +7066,10 @@ mod tests {
 
         let dissemination = DagTxDisseminationService::new(dag_state.clone());
         let transparent = make_test_dissemination_tx(0xB1, TxType::TransparentTransfer);
-        let tx_hashes = vec![
-            dissemination
-                .admit_transaction(transparent.clone())
-                .await
-                .expect("admit transparent"),
-        ];
+        let tx_hashes = vec![dissemination
+            .admit_transaction(transparent.clone())
+            .await
+            .expect("admit transparent")];
         let tx_hash_hexes = tx_hashes.iter().map(hex::encode).collect::<Vec<_>>();
 
         let admitted_chain_info = dag_get_chain_info(State(rpc.clone())).await.0;
@@ -7208,12 +7221,10 @@ mod tests {
 
         let dissemination = DagTxDisseminationService::new(dag_state.clone());
         let transparent = make_test_dissemination_tx(0xD1, TxType::TransparentTransfer);
-        let tx_hashes = vec![
-            dissemination
-                .admit_transaction(transparent.clone())
-                .await
-                .expect("admit transparent"),
-        ];
+        let tx_hashes = vec![dissemination
+            .admit_transaction(transparent.clone())
+            .await
+            .expect("admit transparent")];
         let tx_hash_hexes = tx_hashes.iter().map(hex::encode).collect::<Vec<_>>();
 
         let admitted_chain_info = dag_get_chain_info(State(rpc.clone())).await.0;
@@ -7367,10 +7378,8 @@ mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind live test port");
         let addr = listener.local_addr().expect("local addr");
         drop(listener);
-        let server = start_live_dag_rpc_service(
-            dag_state.clone(), runtime_recovery.clone(), addr,
-        )
-        .await;
+        let server =
+            start_live_dag_rpc_service(dag_state.clone(), runtime_recovery.clone(), addr).await;
         let base_url = format!("http://{}", addr);
         let client = reqwest::Client::new();
 
@@ -7536,10 +7545,8 @@ mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind live test port");
         let addr = listener.local_addr().expect("local addr");
         drop(listener);
-        let server = start_live_dag_rpc_service(
-            dag_state.clone(), runtime_recovery.clone(), addr,
-        )
-        .await;
+        let server =
+            start_live_dag_rpc_service(dag_state.clone(), runtime_recovery.clone(), addr).await;
         let base_url = format!("http://{}", addr);
         let client = reqwest::Client::new();
 
@@ -7699,7 +7706,10 @@ mod tests {
             )
             .expect("persist bullshark auto-commit runtime snapshot");
         }
-        assert!(dag_snapshot.exists(), "dag runtime snapshot must be written");
+        assert!(
+            dag_snapshot.exists(),
+            "dag runtime snapshot must be written"
+        );
 
         let (restart_blue_score, restart_block_hash) = {
             let guard = dag_state.read().await;
@@ -7737,17 +7747,17 @@ mod tests {
             .expect("restart live test addr");
         drop(restart_listener);
         let restart_base_url = format!("http://{}", restart_addr);
-        let restarted_server = start_live_dag_rpc_service(
-            dag_state.clone(), runtime_recovery.clone(), restart_addr,
-        )
-        .await;
+        let restarted_server =
+            start_live_dag_rpc_service(dag_state.clone(), runtime_recovery.clone(), restart_addr)
+                .await;
 
         let restarted_client = reqwest::Client::new();
         let restarted_chain_info =
             wait_for_chain_info_http_matching(&restarted_client, &restart_base_url, |json| {
                 json["orderingContract"]["completionTargetShadowState"]["candidatePreviewQueued"]
                     == serde_json::Value::from(2)
-                    && json["orderingContract"]["completionTargetShadowState"]["commitPreviewQueued"]
+                    && json["orderingContract"]["completionTargetShadowState"]
+                        ["commitPreviewQueued"]
                         == serde_json::Value::from(2)
                     && json["orderingContract"]["completionTargetShadowState"]["committedQueued"]
                         == serde_json::Value::from(2)
@@ -8400,20 +8410,20 @@ mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind live test port");
         let addr = listener.local_addr().expect("live test addr");
         drop(listener);
-        let server = start_live_dag_rpc_service(
-            dag_state.clone(), runtime_recovery.clone(), addr,
-        )
-        .await;
+        let server =
+            start_live_dag_rpc_service(dag_state.clone(), runtime_recovery.clone(), addr).await;
         let base_url = format!("http://{}", addr);
         let client = reqwest::Client::new();
 
-        let before_apply_chain_info = wait_for_chain_info_http_matching(&client, &base_url, |json| {
-            json["sr21Committee"]["currentEpoch"] == serde_json::Value::from(next_epoch)
-                && json["sr21Committee"]["previewMatchesRuntime"] == serde_json::Value::Bool(false)
-                && json["sr21Committee"]["configuredActiveCount"] == serde_json::Value::from(1)
-                && json["authoritySwitchReadiness"]["ready"] == serde_json::Value::Bool(false)
-        })
-        .await;
+        let before_apply_chain_info =
+            wait_for_chain_info_http_matching(&client, &base_url, |json| {
+                json["sr21Committee"]["currentEpoch"] == serde_json::Value::from(next_epoch)
+                    && json["sr21Committee"]["previewMatchesRuntime"]
+                        == serde_json::Value::Bool(false)
+                    && json["sr21Committee"]["configuredActiveCount"] == serde_json::Value::from(1)
+                    && json["authoritySwitchReadiness"]["ready"] == serde_json::Value::Bool(false)
+            })
+            .await;
 
         {
             let mut guard = dag_state.write().await;
@@ -8611,10 +8621,9 @@ mod tests {
             .expect("restart live test addr");
         drop(restart_listener);
         let restart_base_url = format!("http://{}", restart_addr);
-        let restarted_server = start_live_dag_rpc_service(
-            dag_state.clone(), runtime_recovery.clone(), restart_addr,
-        )
-        .await;
+        let restarted_server =
+            start_live_dag_rpc_service(dag_state.clone(), runtime_recovery.clone(), restart_addr)
+                .await;
 
         let restarted_client = reqwest::Client::new();
         let restarted_initial_chain_info =
@@ -8648,7 +8657,8 @@ mod tests {
                 .expect("re-mark bullshark commit after restart");
             rehydrated_after_restart = true;
         }
-        let restarted_chain_info = wait_for_chain_info_http(&restarted_client, &restart_base_url).await;
+        let restarted_chain_info =
+            wait_for_chain_info_http(&restarted_client, &restart_base_url).await;
         let restarted_dag_info = fetch_dag_info_http(&restarted_client, &restart_base_url).await;
         let restarted_commit_hashes = serde_json::json!({
             "any": restarted_server
@@ -8801,7 +8811,8 @@ mod tests {
             serde_json::Value::Bool(true)
         );
         assert_eq!(
-            payload["afterRestart"]["chainInfo"]["authoritySwitchReadiness"]["currentAuthorityRetained"],
+            payload["afterRestart"]["chainInfo"]["authoritySwitchReadiness"]
+                ["currentAuthorityRetained"],
             serde_json::Value::Bool(true)
         );
         assert!(
@@ -8880,20 +8891,20 @@ mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind live test port");
         let addr = listener.local_addr().expect("live test addr");
         drop(listener);
-        let server = start_live_dag_rpc_service(
-            dag_state.clone(), runtime_recovery.clone(), addr,
-        )
-        .await;
+        let server =
+            start_live_dag_rpc_service(dag_state.clone(), runtime_recovery.clone(), addr).await;
         let base_url = format!("http://{}", addr);
         let client = reqwest::Client::new();
 
-        let before_apply_chain_info = wait_for_chain_info_http_matching(&client, &base_url, |json| {
-            json["sr21Committee"]["currentEpoch"] == serde_json::Value::from(next_epoch)
-                && json["sr21Committee"]["previewMatchesRuntime"] == serde_json::Value::Bool(false)
-                && json["sr21Committee"]["configuredActiveCount"] == serde_json::Value::from(1)
-                && json["authoritySwitchReadiness"]["ready"] == serde_json::Value::Bool(false)
-        })
-        .await;
+        let before_apply_chain_info =
+            wait_for_chain_info_http_matching(&client, &base_url, |json| {
+                json["sr21Committee"]["currentEpoch"] == serde_json::Value::from(next_epoch)
+                    && json["sr21Committee"]["previewMatchesRuntime"]
+                        == serde_json::Value::Bool(false)
+                    && json["sr21Committee"]["configuredActiveCount"] == serde_json::Value::from(1)
+                    && json["authoritySwitchReadiness"]["ready"] == serde_json::Value::Bool(false)
+            })
+            .await;
 
         {
             let mut guard = dag_state.write().await;
@@ -8998,7 +9009,8 @@ mod tests {
         });
         let ready_runtime_recovery = ready_chain_info["runtimeRecovery"].clone();
         let dag_snapshot = PathBuf::from(&temp_dir).join("dag_runtime_snapshot.json");
-        let validator_lifecycle_snapshot = PathBuf::from(&temp_dir).join("validator_lifecycle.json");
+        let validator_lifecycle_snapshot =
+            PathBuf::from(&temp_dir).join("validator_lifecycle.json");
         assert!(
             dag_snapshot.exists(),
             "dag runtime snapshot must be written"
@@ -9138,10 +9150,9 @@ mod tests {
             .expect("restart live test addr");
         drop(restart_listener);
         let restart_base_url = format!("http://{}", restart_addr);
-        let restarted_server = start_live_dag_rpc_service(
-            dag_state.clone(), runtime_recovery.clone(), restart_addr,
-        )
-        .await;
+        let restarted_server =
+            start_live_dag_rpc_service(dag_state.clone(), runtime_recovery.clone(), restart_addr)
+                .await;
 
         let restarted_client = reqwest::Client::new();
         let restarted_initial_chain_info =
@@ -9175,7 +9186,8 @@ mod tests {
                 .expect("re-mark bullshark commit after restart");
             rehydrated_after_restart = true;
         }
-        let restarted_chain_info = wait_for_chain_info_http(&restarted_client, &restart_base_url).await;
+        let restarted_chain_info =
+            wait_for_chain_info_http(&restarted_client, &restart_base_url).await;
         let restarted_dag_info = fetch_dag_info_http(&restarted_client, &restart_base_url).await;
         let restarted_commit_hashes = serde_json::json!({
             "any": restarted_server
@@ -9299,12 +9311,14 @@ mod tests {
                 total_applied_txs: 0,
                 timestamp_ms: 1_700_000_720_000,
             });
-            guard.latest_checkpoint_finality = guard.latest_checkpoint.as_ref().map(|checkpoint| {
-                DagCheckpointFinalityProof {
-                    target: checkpoint.validator_target(),
-                    commits: vec![],
-                }
-            });
+            guard.latest_checkpoint_finality =
+                guard
+                    .latest_checkpoint
+                    .as_ref()
+                    .map(|checkpoint| DagCheckpointFinalityProof {
+                        target: checkpoint.validator_target(),
+                        commits: vec![],
+                    });
         }
         {
             let mut guard = runtime_recovery.write().await;
@@ -9510,11 +9524,9 @@ mod tests {
                         && before_second_apply_chain_info["sr21Committee"]
                             ["runtimeActiveSetMatchesPreview"]
                             == serde_json::Value::Bool(false)
-                        && before_second_apply_chain_info["sr21Committee"]
-                            ["localPreviewSrIndex"]
+                        && before_second_apply_chain_info["sr21Committee"]["localPreviewSrIndex"]
                             == serde_json::Value::from(second_local_preview_index)
-                        && before_second_apply_chain_info["sr21Committee"]
-                            ["localRuntimeSrIndex"]
+                        && before_second_apply_chain_info["sr21Committee"]["localRuntimeSrIndex"]
                             == serde_json::Value::from(local_preview_index)
                         && before_second_preview_ids == second_expected_active_ids
                         && before_second_runtime_ids == first_expected_active_ids
@@ -9604,28 +9616,23 @@ mod tests {
                 serde_json::Value::Bool(
                     after_second_apply_chain_info["sr21Committee"]["currentEpoch"]
                         == serde_json::Value::from(second_epoch)
-                        && after_second_apply_chain_info["sr21Committee"]
-                            ["configuredActiveCount"]
+                        && after_second_apply_chain_info["sr21Committee"]["configuredActiveCount"]
                             == serde_json::Value::from(second_election_result.num_active)
-                        && after_second_apply_chain_info["sr21Committee"]
-                            ["previewMatchesRuntime"]
+                        && after_second_apply_chain_info["sr21Committee"]["previewMatchesRuntime"]
                             == serde_json::Value::Bool(true)
                         && after_second_apply_chain_info["sr21Committee"]
                             ["runtimeActiveSetPresent"]
                             == serde_json::Value::Bool(true)
-                        && after_second_apply_chain_info["sr21Committee"]
-                            ["runtimeActiveSetCount"]
+                        && after_second_apply_chain_info["sr21Committee"]["runtimeActiveSetCount"]
                             == serde_json::Value::from(second_election_result.num_active)
                         && after_second_apply_chain_info["sr21Committee"]
                             ["runtimeActiveSetMatchesPreview"]
                             == serde_json::Value::Bool(true)
                         && after_second_preview_ids == second_expected_active_ids
                         && after_second_runtime_ids == second_expected_active_ids
-                        && after_second_apply_chain_info["sr21Committee"]
-                            ["localPreviewSrIndex"]
+                        && after_second_apply_chain_info["sr21Committee"]["localPreviewSrIndex"]
                             == serde_json::Value::from(second_local_preview_index)
-                        && after_second_apply_chain_info["sr21Committee"]
-                            ["localRuntimeSrIndex"]
+                        && after_second_apply_chain_info["sr21Committee"]["localRuntimeSrIndex"]
                             == serde_json::Value::from(second_local_preview_index)
                         && after_second_apply_chain_info["authoritySwitchReadiness"]["ready"]
                             == serde_json::Value::Bool(true),
@@ -9636,10 +9643,8 @@ mod tests {
                 serde_json::Value::Bool(
                     second_preview_added_validator_ids.is_empty()
                         && second_preview_removed_validator_ids.is_empty()
-                        && second_added_validator_ids
-                            == vec![second_rotation_in_id_hex.clone()]
-                        && second_removed_validator_ids
-                            == vec![second_rotation_out_id_hex.clone()]
+                        && second_added_validator_ids == vec![second_rotation_in_id_hex.clone()]
+                        && second_removed_validator_ids == vec![second_rotation_out_id_hex.clone()]
                         && before_second_preview_ids == second_expected_active_ids
                         && before_second_runtime_ids == first_expected_active_ids
                         && after_second_preview_ids == second_expected_active_ids
@@ -9653,8 +9658,7 @@ mod tests {
                 serde_json::Value::Bool(
                     before_second_apply_chain_info["sr21Committee"]["localRuntimeSrIndex"]
                         == serde_json::Value::from(local_preview_index)
-                        && after_second_apply_chain_info["sr21Committee"]
-                            ["localRuntimeSrIndex"]
+                        && after_second_apply_chain_info["sr21Committee"]["localRuntimeSrIndex"]
                             == serde_json::Value::from(second_local_preview_index)
                         && second_local_preview_index != local_preview_index,
                 ),
@@ -9852,11 +9856,9 @@ mod tests {
                         && after_second_apply_chain_info["authoritySwitchReadiness"]
                             ["runtimeRecoveryCommitObserved"]
                             == serde_json::Value::Bool(true)
-                        && before_second_apply_chain_info["sr21Committee"]
-                            ["previewMatchesRuntime"]
+                        && before_second_apply_chain_info["sr21Committee"]["previewMatchesRuntime"]
                             == serde_json::Value::Bool(false)
-                        && after_second_apply_chain_info["sr21Committee"]
-                            ["previewMatchesRuntime"]
+                        && after_second_apply_chain_info["sr21Committee"]["previewMatchesRuntime"]
                             == serde_json::Value::Bool(true)
                         && before_second_apply_chain_info["sr21Committee"]
                             ["runtimeActiveSetPresent"]
@@ -9864,11 +9866,9 @@ mod tests {
                         && after_second_apply_chain_info["sr21Committee"]
                             ["runtimeActiveSetPresent"]
                             == serde_json::Value::Bool(true)
-                        && before_second_apply_chain_info["sr21Committee"]
-                            ["runtimeActiveSetCount"]
+                        && before_second_apply_chain_info["sr21Committee"]["runtimeActiveSetCount"]
                             == serde_json::Value::from(second_election_result.num_active)
-                        && after_second_apply_chain_info["sr21Committee"]
-                            ["runtimeActiveSetCount"]
+                        && after_second_apply_chain_info["sr21Committee"]["runtimeActiveSetCount"]
                             == serde_json::Value::from(second_election_result.num_active)
                         && before_second_apply_chain_info["sr21Committee"]
                             ["runtimeActiveSetMatchesPreview"]
@@ -9876,17 +9876,13 @@ mod tests {
                         && after_second_apply_chain_info["sr21Committee"]
                             ["runtimeActiveSetMatchesPreview"]
                             == serde_json::Value::Bool(true)
-                        && before_second_apply_chain_info["sr21Committee"]
-                            ["localPreviewSrIndex"]
+                        && before_second_apply_chain_info["sr21Committee"]["localPreviewSrIndex"]
                             == serde_json::Value::from(second_local_preview_index)
-                        && after_second_apply_chain_info["sr21Committee"]
-                            ["localPreviewSrIndex"]
+                        && after_second_apply_chain_info["sr21Committee"]["localPreviewSrIndex"]
                             == serde_json::Value::from(second_local_preview_index)
-                        && before_second_apply_chain_info["sr21Committee"]
-                            ["localRuntimeSrIndex"]
+                        && before_second_apply_chain_info["sr21Committee"]["localRuntimeSrIndex"]
                             == serde_json::Value::from(local_preview_index)
-                        && after_second_apply_chain_info["sr21Committee"]
-                            ["localRuntimeSrIndex"]
+                        && after_second_apply_chain_info["sr21Committee"]["localRuntimeSrIndex"]
                             == serde_json::Value::from(second_local_preview_index)
                         && before_second_preview_ids == after_second_preview_ids
                         && before_second_preview_ids == second_expected_active_ids
@@ -9929,27 +9925,21 @@ mod tests {
                         && before_second_preview_ids == after_second_preview_ids
                         && before_second_runtime_ids == first_expected_active_ids
                         && after_second_runtime_ids == second_expected_active_ids
-                        && second_added_validator_ids
-                            == vec![second_rotation_in_id_hex.clone()]
-                        && second_removed_validator_ids
-                            == vec![second_rotation_out_id_hex.clone()]
+                        && second_added_validator_ids == vec![second_rotation_in_id_hex.clone()]
+                        && second_removed_validator_ids == vec![second_rotation_out_id_hex.clone()]
                         && before_second_apply_chain_info["sr21Committee"]
                             ["runtimeActiveSetMatchesPreview"]
                             == serde_json::Value::Bool(false)
                         && after_second_apply_chain_info["sr21Committee"]
                             ["runtimeActiveSetMatchesPreview"]
                             == serde_json::Value::Bool(true)
-                        && before_second_apply_chain_info["sr21Committee"]
-                            ["localPreviewSrIndex"]
+                        && before_second_apply_chain_info["sr21Committee"]["localPreviewSrIndex"]
                             == serde_json::Value::from(second_local_preview_index)
-                        && before_second_apply_chain_info["sr21Committee"]
-                            ["localRuntimeSrIndex"]
+                        && before_second_apply_chain_info["sr21Committee"]["localRuntimeSrIndex"]
                             == serde_json::Value::from(local_preview_index)
-                        && after_second_apply_chain_info["sr21Committee"]
-                            ["localPreviewSrIndex"]
+                        && after_second_apply_chain_info["sr21Committee"]["localPreviewSrIndex"]
                             == serde_json::Value::from(second_local_preview_index)
-                        && after_second_apply_chain_info["sr21Committee"]
-                            ["localRuntimeSrIndex"]
+                        && after_second_apply_chain_info["sr21Committee"]["localRuntimeSrIndex"]
                             == serde_json::Value::from(second_local_preview_index)
                         && before_second_apply_chain_info["authoritySwitchReadiness"]
                             ["committeePreviewReady"]
@@ -10040,8 +10030,7 @@ mod tests {
                 ),
             );
             consistency_obj.insert(
-                "authoritySwitchReadyLiftMatchesSecondRotationProvenanceAfterSecondApply"
-                    .into(),
+                "authoritySwitchReadyLiftMatchesSecondRotationProvenanceAfterSecondApply".into(),
                 serde_json::Value::Bool(
                     second_epoch_boundary_reached
                         && before_second_apply_chain_info["authoritySwitchReadiness"]["ready"]
@@ -10064,17 +10053,13 @@ mod tests {
                         && after_second_apply_chain_info["validatorLifecycleRecovery"]
                             ["lastCheckpointFinalityBlueScore"]
                             == serde_json::Value::from(second_finalized_boundary_score)
-                        && before_second_apply_chain_info["sr21Committee"]
-                            ["localPreviewSrIndex"]
+                        && before_second_apply_chain_info["sr21Committee"]["localPreviewSrIndex"]
                             == serde_json::Value::from(second_local_preview_index)
-                        && before_second_apply_chain_info["sr21Committee"]
-                            ["localRuntimeSrIndex"]
+                        && before_second_apply_chain_info["sr21Committee"]["localRuntimeSrIndex"]
                             == serde_json::Value::from(local_preview_index)
-                        && after_second_apply_chain_info["sr21Committee"]
-                            ["localPreviewSrIndex"]
+                        && after_second_apply_chain_info["sr21Committee"]["localPreviewSrIndex"]
                             == serde_json::Value::from(second_local_preview_index)
-                        && after_second_apply_chain_info["sr21Committee"]
-                            ["localRuntimeSrIndex"]
+                        && after_second_apply_chain_info["sr21Committee"]["localRuntimeSrIndex"]
                             == serde_json::Value::from(second_local_preview_index)
                         && before_second_apply_dag_info["validatorAttestation"]
                             ["latestCheckpointFinality"]["target"]["blueScore"]
@@ -10088,17 +10073,13 @@ mod tests {
                         && after_second_apply_dag_info["validatorLifecycleRecovery"]
                             ["lastCheckpointFinalityBlueScore"]
                             == serde_json::Value::from(second_finalized_boundary_score)
-                        && before_second_apply_dag_info["sr21Committee"]
-                            ["localPreviewSrIndex"]
+                        && before_second_apply_dag_info["sr21Committee"]["localPreviewSrIndex"]
                             == serde_json::Value::from(second_local_preview_index)
-                        && before_second_apply_dag_info["sr21Committee"]
-                            ["localRuntimeSrIndex"]
+                        && before_second_apply_dag_info["sr21Committee"]["localRuntimeSrIndex"]
                             == serde_json::Value::from(local_preview_index)
-                        && after_second_apply_dag_info["sr21Committee"]
-                            ["localPreviewSrIndex"]
+                        && after_second_apply_dag_info["sr21Committee"]["localPreviewSrIndex"]
                             == serde_json::Value::from(second_local_preview_index)
-                        && after_second_apply_dag_info["sr21Committee"]
-                            ["localRuntimeSrIndex"]
+                        && after_second_apply_dag_info["sr21Committee"]["localRuntimeSrIndex"]
                             == serde_json::Value::from(second_local_preview_index)
                         && next_epoch + 1 == second_epoch
                         && lifecycle_epoch == second_epoch
@@ -10115,40 +10096,32 @@ mod tests {
                         && delivered_chain_info["authoritySwitchReadiness"]
                             ["candidatePreviewReady"]
                             == serde_json::Value::Bool(false)
-                        && delivered_chain_info["authoritySwitchReadiness"]
-                            ["commitPreviewReady"]
+                        && delivered_chain_info["authoritySwitchReadiness"]["commitPreviewReady"]
                             == serde_json::Value::Bool(false)
-                        && delivered_chain_info["authoritySwitchReadiness"]
-                            ["committedReady"]
+                        && delivered_chain_info["authoritySwitchReadiness"]["committedReady"]
                             == serde_json::Value::Bool(false)
                         && delivered_chain_info["authoritySwitchReadiness"]
                             ["candidatePreviewQueued"]
                             == serde_json::Value::from(0)
-                        && delivered_chain_info["authoritySwitchReadiness"]
-                            ["commitPreviewQueued"]
+                        && delivered_chain_info["authoritySwitchReadiness"]["commitPreviewQueued"]
                             == serde_json::Value::from(0)
-                        && delivered_chain_info["authoritySwitchReadiness"]
-                            ["committedQueued"]
+                        && delivered_chain_info["authoritySwitchReadiness"]["committedQueued"]
                             == serde_json::Value::from(0)
                         && candidate_chain_info["authoritySwitchReadiness"]["ready"]
                             == serde_json::Value::Bool(false)
                         && candidate_chain_info["authoritySwitchReadiness"]
                             ["candidatePreviewReady"]
                             == serde_json::Value::Bool(true)
-                        && candidate_chain_info["authoritySwitchReadiness"]
-                            ["commitPreviewReady"]
+                        && candidate_chain_info["authoritySwitchReadiness"]["commitPreviewReady"]
                             == serde_json::Value::Bool(false)
-                        && candidate_chain_info["authoritySwitchReadiness"]
-                            ["committedReady"]
+                        && candidate_chain_info["authoritySwitchReadiness"]["committedReady"]
                             == serde_json::Value::Bool(false)
                         && candidate_chain_info["authoritySwitchReadiness"]
                             ["candidatePreviewQueued"]
                             == serde_json::Value::from(2)
-                        && candidate_chain_info["authoritySwitchReadiness"]
-                            ["commitPreviewQueued"]
+                        && candidate_chain_info["authoritySwitchReadiness"]["commitPreviewQueued"]
                             == serde_json::Value::from(0)
-                        && candidate_chain_info["authoritySwitchReadiness"]
-                            ["committedQueued"]
+                        && candidate_chain_info["authoritySwitchReadiness"]["committedQueued"]
                             == serde_json::Value::from(0)
                         && commit_preview_chain_info["authoritySwitchReadiness"]["ready"]
                             == serde_json::Value::Bool(false)
@@ -10158,8 +10131,7 @@ mod tests {
                         && commit_preview_chain_info["authoritySwitchReadiness"]
                             ["commitPreviewReady"]
                             == serde_json::Value::Bool(true)
-                        && commit_preview_chain_info["authoritySwitchReadiness"]
-                            ["committedReady"]
+                        && commit_preview_chain_info["authoritySwitchReadiness"]["committedReady"]
                             == serde_json::Value::Bool(false)
                         && commit_preview_chain_info["authoritySwitchReadiness"]
                             ["candidatePreviewQueued"]
@@ -10167,48 +10139,37 @@ mod tests {
                         && commit_preview_chain_info["authoritySwitchReadiness"]
                             ["commitPreviewQueued"]
                             == serde_json::Value::from(2)
-                        && commit_preview_chain_info["authoritySwitchReadiness"]
-                            ["committedQueued"]
+                        && commit_preview_chain_info["authoritySwitchReadiness"]["committedQueued"]
                             == serde_json::Value::from(0)
                         && ready_chain_info["authoritySwitchReadiness"]["ready"]
                             == serde_json::Value::Bool(true)
-                        && ready_chain_info["authoritySwitchReadiness"]
-                            ["candidatePreviewReady"]
+                        && ready_chain_info["authoritySwitchReadiness"]["candidatePreviewReady"]
                             == serde_json::Value::Bool(true)
-                        && ready_chain_info["authoritySwitchReadiness"]
-                            ["commitPreviewReady"]
+                        && ready_chain_info["authoritySwitchReadiness"]["commitPreviewReady"]
                             == serde_json::Value::Bool(true)
-                        && ready_chain_info["authoritySwitchReadiness"]
-                            ["committedReady"]
+                        && ready_chain_info["authoritySwitchReadiness"]["committedReady"]
                             == serde_json::Value::Bool(true)
-                        && ready_chain_info["authoritySwitchReadiness"]
-                            ["candidatePreviewQueued"]
+                        && ready_chain_info["authoritySwitchReadiness"]["candidatePreviewQueued"]
                             == serde_json::Value::from(2)
-                        && ready_chain_info["authoritySwitchReadiness"]
-                            ["commitPreviewQueued"]
+                        && ready_chain_info["authoritySwitchReadiness"]["commitPreviewQueued"]
                             == serde_json::Value::from(2)
-                        && ready_chain_info["authoritySwitchReadiness"]
-                            ["committedQueued"]
+                        && ready_chain_info["authoritySwitchReadiness"]["committedQueued"]
                             == serde_json::Value::from(2)
                         && restarted_chain_info["authoritySwitchReadiness"]["ready"]
                             == serde_json::Value::Bool(true)
                         && restarted_chain_info["authoritySwitchReadiness"]
                             ["candidatePreviewReady"]
                             == serde_json::Value::Bool(true)
-                        && restarted_chain_info["authoritySwitchReadiness"]
-                            ["commitPreviewReady"]
+                        && restarted_chain_info["authoritySwitchReadiness"]["commitPreviewReady"]
                             == serde_json::Value::Bool(true)
-                        && restarted_chain_info["authoritySwitchReadiness"]
-                            ["committedReady"]
+                        && restarted_chain_info["authoritySwitchReadiness"]["committedReady"]
                             == serde_json::Value::Bool(true)
                         && restarted_chain_info["authoritySwitchReadiness"]
                             ["candidatePreviewQueued"]
                             == serde_json::Value::from(2)
-                        && restarted_chain_info["authoritySwitchReadiness"]
-                            ["commitPreviewQueued"]
+                        && restarted_chain_info["authoritySwitchReadiness"]["commitPreviewQueued"]
                             == serde_json::Value::from(2)
-                        && restarted_chain_info["authoritySwitchReadiness"]
-                            ["committedQueued"]
+                        && restarted_chain_info["authoritySwitchReadiness"]["committedQueued"]
                             == serde_json::Value::from(2)
                         && before_second_apply_chain_info["authoritySwitchReadiness"]["ready"]
                             == serde_json::Value::Bool(false)
@@ -10230,8 +10191,7 @@ mod tests {
                         && before_second_apply_chain_info["authoritySwitchReadiness"]
                             ["committedQueued"]
                             == serde_json::Value::from(2)
-                        && after_second_apply_chain_info["authoritySwitchReadiness"]
-                            ["ready"]
+                        && after_second_apply_chain_info["authoritySwitchReadiness"]["ready"]
                             == serde_json::Value::Bool(true)
                         && after_second_apply_chain_info["authoritySwitchReadiness"]
                             ["candidatePreviewReady"]
@@ -10260,16 +10220,14 @@ mod tests {
                         == after_second_apply_dag_info["authoritySwitchReadiness"]
                         && after_second_apply_chain_info["sr21Committee"]["activeCount"]
                             == after_second_apply_dag_info["sr21Committee"]["activeCount"]
-                        && after_second_apply_chain_info["sr21Committee"]
-                            ["configuredActiveCount"]
+                        && after_second_apply_chain_info["sr21Committee"]["configuredActiveCount"]
                             == after_second_apply_dag_info["sr21Committee"]
                                 ["configuredActiveCount"]
                         && after_second_apply_chain_info["sr21Committee"]
                             ["runtimeActiveSetPresent"]
                             == after_second_apply_dag_info["sr21Committee"]
                                 ["runtimeActiveSetPresent"]
-                        && after_second_apply_chain_info["sr21Committee"]
-                            ["runtimeActiveSetCount"]
+                        && after_second_apply_chain_info["sr21Committee"]["runtimeActiveSetCount"]
                             == after_second_apply_dag_info["sr21Committee"]
                                 ["runtimeActiveSetCount"]
                         && after_second_apply_chain_info["sr21Committee"]
@@ -10281,7 +10239,8 @@ mod tests {
             consistency_obj.insert(
                 "chainDagOrderingStateConsistentAfterSecondApply".into(),
                 serde_json::Value::Bool(
-                    after_second_apply_chain_info["orderingContract"]["completionTargetShadowState"]
+                    after_second_apply_chain_info["orderingContract"]
+                        ["completionTargetShadowState"]
                         == after_second_apply_dag_info["orderingContract"]
                             ["completionTargetShadowState"],
                 ),
@@ -10294,7 +10253,7 @@ mod tests {
                         == serde_json::Value::from(2)
                         && after_second_apply_chain_info["orderingContract"]
                             ["completionTargetShadowState"]
-                                ["candidatePreviewFastTransparentQueued"]
+                            ["candidatePreviewFastTransparentQueued"]
                             == serde_json::Value::from(1)
                         && after_second_apply_chain_info["orderingContract"]
                             ["completionTargetShadowState"]
@@ -10340,8 +10299,7 @@ mod tests {
             consistency_obj.insert(
                 "runtimeRecoveryCommitRetainedAfterSecondApply".into(),
                 serde_json::Value::Bool(
-                    after_second_apply_chain_info["runtimeRecovery"]
-                        ["lastBullsharkCommitCount"]
+                    after_second_apply_chain_info["runtimeRecovery"]["lastBullsharkCommitCount"]
                         == serde_json::Value::from(2)
                         && after_second_apply_chain_info["runtimeRecovery"]
                             ["lastBullsharkCommitTxHashes"]
@@ -10357,22 +10315,21 @@ mod tests {
                     after_second_apply_chain_info["authoritySwitchReadiness"]
                         ["currentAuthorityRetained"]
                         == serde_json::Value::Bool(true)
-                        && after_second_apply_chain_info["consensusArchitecture"]
-                            ["currentRuntime"]["orderingStage"]
+                        && after_second_apply_chain_info["consensusArchitecture"]["currentRuntime"]
+                            ["orderingStage"]
                             == serde_json::Value::String("ghostdagTotalOrder".into())
-                        && after_second_apply_chain_info["consensusArchitecture"]
-                            ["currentRuntime"]["checkpointDecisionSource"]
+                        && after_second_apply_chain_info["consensusArchitecture"]["currentRuntime"]
+                            ["checkpointDecisionSource"]
                             == serde_json::Value::String("ghostdagCheckpointBft".into())
-                        && after_second_apply_chain_info["consensusArchitecture"]
-                            ["currentRuntime"]["committee"]
+                        && after_second_apply_chain_info["consensusArchitecture"]["currentRuntime"]
+                            ["committee"]
                             == serde_json::Value::String("validatorBreadth".into()),
                 ),
             );
             consistency_obj.insert(
                 "completionTargetMatchesPlanAfterSecondApply".into(),
                 serde_json::Value::Bool(
-                    after_second_apply_chain_info["authoritySwitchReadiness"]
-                        ["bullsharkPlanReady"]
+                    after_second_apply_chain_info["authoritySwitchReadiness"]["bullsharkPlanReady"]
                         == serde_json::Value::Bool(true)
                         && after_second_apply_chain_info["authoritySwitchReadiness"]
                             ["committeePlanReady"]
@@ -10529,8 +10486,7 @@ mod tests {
         assert_eq!(
             payload["flow"],
             serde_json::Value::String(
-                "live_bullshark_commit_handoff_enables_authority_switch_through_rpc_service"
-                    .into()
+                "live_bullshark_commit_handoff_enables_authority_switch_through_rpc_service".into()
             )
         );
         assert_eq!(payload["txHashes"].as_array().map(Vec::len), Some(2));
@@ -10624,7 +10580,8 @@ mod tests {
             serde_json::Value::Bool(true)
         );
         assert_eq!(
-            payload["afterRestart"]["chainInfo"]["authoritySwitchReadiness"]["currentAuthorityRetained"],
+            payload["afterRestart"]["chainInfo"]["authoritySwitchReadiness"]
+                ["currentAuthorityRetained"],
             serde_json::Value::Bool(true)
         );
         assert_eq!(
@@ -10656,11 +10613,13 @@ mod tests {
             serde_json::Value::Bool(true)
         );
         assert_eq!(
-            payload["afterRestart"]["chainInfo"]["orderingContract"]["completionTargetShadowState"]["committedQueued"],
+            payload["afterRestart"]["chainInfo"]["orderingContract"]["completionTargetShadowState"]
+                ["committedQueued"],
             serde_json::Value::from(2)
         );
         assert_eq!(
-            payload["afterRestart"]["chainInfo"]["orderingContract"]["completionTargetShadowState"]["committedLive"],
+            payload["afterRestart"]["chainInfo"]["orderingContract"]["completionTargetShadowState"]
+                ["committedLive"],
             serde_json::Value::Bool(true)
         );
         assert_eq!(
@@ -10694,8 +10653,7 @@ mod tests {
             serde_json::Value::Bool(true)
         );
         assert_eq!(
-            payload["beforeSecondApply"]["chainInfo"]["authoritySwitchReadiness"]
-                ["committedReady"],
+            payload["beforeSecondApply"]["chainInfo"]["authoritySwitchReadiness"]["committedReady"],
             serde_json::Value::Bool(true)
         );
         assert_eq!(
@@ -10717,7 +10675,8 @@ mod tests {
             serde_json::Value::Bool(true)
         );
         assert_eq!(
-            payload["afterSecondApply"]["chainInfo"]["sr21Committee"]["runtimeActiveSetMatchesPreview"],
+            payload["afterSecondApply"]["chainInfo"]["sr21Committee"]
+                ["runtimeActiveSetMatchesPreview"],
             serde_json::Value::Bool(true)
         );
         assert_eq!(
@@ -10757,7 +10716,8 @@ mod tests {
             serde_json::Value::Bool(true)
         );
         assert_eq!(
-            payload["consistency"]["authoritySwitchReadyLiftedOnlyByCommitteeCatchupAfterSecondApply"],
+            payload["consistency"]
+                ["authoritySwitchReadyLiftedOnlyByCommitteeCatchupAfterSecondApply"],
             serde_json::Value::Bool(true)
         );
         assert_eq!(

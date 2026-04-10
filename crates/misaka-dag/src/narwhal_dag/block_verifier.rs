@@ -110,10 +110,7 @@ impl BlockVerifier {
         chain_ctx: misaka_types::chain_context::ChainContext,
     ) -> Self {
         // Phase 2b: construct AppId from chain_ctx
-        let app_id = misaka_types::intent::AppId::new(
-            chain_ctx.chain_id,
-            chain_ctx.genesis_hash,
-        );
+        let app_id = misaka_types::intent::AppId::new(chain_ctx.chain_id, chain_ctx.genesis_hash);
         Self {
             committee,
             epoch,

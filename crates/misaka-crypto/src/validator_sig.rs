@@ -13,8 +13,8 @@
 use sha3::{Digest as Sha3Digest, Sha3_256};
 
 use misaka_pqc::pq_sign::{
-    ml_dsa_sign_raw, ml_dsa_verify_raw, MlDsaKeypair, MlDsaPublicKey,
-    MlDsaSecretKey, MlDsaSignature, ML_DSA_PK_LEN, ML_DSA_SIG_LEN,
+    ml_dsa_sign_raw, ml_dsa_verify_raw, MlDsaKeypair, MlDsaPublicKey, MlDsaSecretKey,
+    MlDsaSignature, ML_DSA_PK_LEN, ML_DSA_SIG_LEN,
 };
 
 const DOMAIN_TAG: &[u8] = b"MISAKA-PQ-SIG:v2:";
@@ -212,8 +212,7 @@ pub fn generate_validator_keypair() -> ValidatorKeypair {
             pq_pk: pq_kp.public_key.as_bytes().to_vec(),
         },
         secret_key: pq_kp.secret_key.with_bytes(|bytes| {
-            ValidatorPqSecretKey::from_bytes(bytes)
-                .expect("ML-DSA-65 SK is always 4032 bytes")
+            ValidatorPqSecretKey::from_bytes(bytes).expect("ML-DSA-65 SK is always 4032 bytes")
         }),
     }
 }
@@ -225,12 +224,13 @@ pub fn validator_sign(
 ) -> Result<ValidatorPqSignature, ValidatorVerifyError> {
     let digest = signing_digest(message);
 
-    let pq_sk = sk.with_bytes(|bytes| MlDsaSecretKey::from_bytes(bytes))
+    let pq_sk = sk
+        .with_bytes(|bytes| MlDsaSecretKey::from_bytes(bytes))
         .map_err(|_| ValidatorVerifyError::InvalidPqSecretKey)?;
     // Phase 2c-B D5c: domain separation is handled by signing_digest()
     // which includes DOMAIN_TAG in the hash. No additional domain prefix needed.
-    let pq_sig = ml_dsa_sign_raw(&pq_sk, &digest)
-        .map_err(|_| ValidatorVerifyError::InvalidPqSecretKey)?;
+    let pq_sig =
+        ml_dsa_sign_raw(&pq_sk, &digest).map_err(|_| ValidatorVerifyError::InvalidPqSecretKey)?;
 
     Ok(ValidatorPqSignature {
         pq_sig: pq_sig.as_bytes().to_vec(),
@@ -249,12 +249,7 @@ pub fn validator_verify(
         .map_err(|_| ValidatorVerifyError::InvalidPqPublicKey)?;
     let pq_sig = MlDsaSignature::from_bytes(&sig.pq_sig)
         .map_err(|_| ValidatorVerifyError::InvalidPqSignature)?;
-    ml_dsa_verify_raw(
-        &pq_pk,
-        &digest,
-        &pq_sig,
-    )
-    .map_err(|_| ValidatorVerifyError::MlDsaFailed)?;
+    ml_dsa_verify_raw(&pq_pk, &digest, &pq_sig).map_err(|_| ValidatorVerifyError::MlDsaFailed)?;
 
     Ok(())
 }

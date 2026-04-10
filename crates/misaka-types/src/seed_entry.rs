@@ -50,7 +50,9 @@ impl SeedEntry {
         }
 
         // PK must be present and correct length
-        let pk_hex = self.transport_pubkey.strip_prefix("0x")
+        let pk_hex = self
+            .transport_pubkey
+            .strip_prefix("0x")
             .unwrap_or(&self.transport_pubkey);
 
         if pk_hex.len() != 3904 {
@@ -72,7 +74,9 @@ impl SeedEntry {
     ///
     /// Returns `None` if the hex is malformed.
     pub fn transport_pubkey_bytes(&self) -> Option<Vec<u8>> {
-        let pk_hex = self.transport_pubkey.strip_prefix("0x")
+        let pk_hex = self
+            .transport_pubkey
+            .strip_prefix("0x")
             .unwrap_or(&self.transport_pubkey);
         hex::decode(pk_hex).ok()
     }

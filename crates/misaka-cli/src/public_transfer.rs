@@ -14,9 +14,7 @@ use anyhow::{bail, Context, Result};
 use misaka_pqc::canonical_spend_id;
 use misaka_pqc::pq_sign::{ml_dsa_sign_raw, MlDsaSecretKey};
 use misaka_pqc::SpendingKeypair;
-use misaka_types::utxo::{
-    OutputRef, TxInput, TxOutput, TxType, UtxoTransaction, UTXO_TX_VERSION,
-};
+use misaka_types::utxo::{OutputRef, TxInput, TxOutput, TxType, UtxoTransaction, UTXO_TX_VERSION};
 use std::fs;
 
 use crate::rpc_client::RpcClient;

@@ -31,9 +31,11 @@ fn fee_rate(tx: &UtxoTransaction) -> u128 {
     // Estimate serialized size from struct contents.
     // Each input: proof bytes + utxo_refs (40 each)
     // Each output: ~8 (amount) + 32 (address)
-    let input_size: usize = tx.inputs.iter().map(|i| {
-        i.proof.len() + i.utxo_refs.len() * 40
-    }).sum();
+    let input_size: usize = tx
+        .inputs
+        .iter()
+        .map(|i| i.proof.len() + i.utxo_refs.len() * 40)
+        .sum();
     let output_size: usize = tx.outputs.len() * 40;
     let extra_size = tx.extra.len();
     let total = (input_size + output_size + extra_size + 64).max(1) as u128; // 64 for fixed fields
@@ -145,8 +147,7 @@ impl UtxoMempool {
         // SystemEmission or Faucet transactions from external sources.
         if matches!(
             tx.tx_type,
-            misaka_types::utxo::TxType::SystemEmission
-                | misaka_types::utxo::TxType::Faucet
+            misaka_types::utxo::TxType::SystemEmission | misaka_types::utxo::TxType::Faucet
         ) {
             return Err(MempoolError::RejectedTxType);
         }
@@ -163,14 +164,17 @@ impl UtxoMempool {
         if tx.tx_type == misaka_types::utxo::TxType::TransparentTransfer {
             for (i, input) in tx.inputs.iter().enumerate() {
                 if input.proof.is_empty() {
-                    return Err(MempoolError::Structural(
-                        format!("input[{}]: missing signature (empty proof)", i),
-                    ));
+                    return Err(MempoolError::Structural(format!(
+                        "input[{}]: missing signature (empty proof)",
+                        i
+                    )));
                 }
                 if input.proof.len() != 3309 {
-                    return Err(MempoolError::Structural(
-                        format!("input[{}]: invalid signature length {} (expected 3309)", i, input.proof.len()),
-                    ));
+                    return Err(MempoolError::Structural(format!(
+                        "input[{}]: invalid signature length {} (expected 3309)",
+                        i,
+                        input.proof.len()
+                    )));
                 }
             }
         }
@@ -361,7 +365,8 @@ mod tests {
                     false,
                 )
                 .unwrap();
-            utxo_set.register_spending_key(outref, vec![0x22; 1952])
+            utxo_set
+                .register_spending_key(outref, vec![0x22; 1952])
                 .expect("test: register_spending_key");
         }
         utxo_set

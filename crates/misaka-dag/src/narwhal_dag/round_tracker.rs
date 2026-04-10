@@ -367,8 +367,8 @@ impl RoundTracker {
 
             // Update lagging status.
             for (&_auth, state) in &mut self.authority_state {
-                state.is_lagging = self.quorum_round > 0
-                    && state.highest_accepted_round + 3 <= self.quorum_round;
+                state.is_lagging =
+                    self.quorum_round > 0 && state.highest_accepted_round + 3 <= self.quorum_round;
             }
         }
     }
@@ -435,11 +435,7 @@ mod tests {
 
         // Authority 4 at round 10 → quorum reached
         tracker.on_block_accepted(10, 4);
-        assert_eq!(
-            tracker.quorum_round(),
-            10,
-            "5 = quorum, quorum round is 10"
-        );
+        assert_eq!(tracker.quorum_round(), 10, "5 = quorum, quorum round is 10");
 
         // Authorities 5-6 at round 8 (behind)
         tracker.on_block_accepted(8, 5);
@@ -545,7 +541,7 @@ mod tests {
             tracker.on_block_accepted(5, auth);
         }
         tracker.on_round_advance(2); // delay = 8 - 5 = 3
-        // avg = (2 + 3) / 2 = 2.5
+                                     // avg = (2 + 3) / 2 = 2.5
         assert_eq!(tracker.avg_propagation_delay(), 2.5);
     }
 

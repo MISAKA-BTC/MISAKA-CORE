@@ -170,7 +170,11 @@ pub struct Broadcaster {
 
 impl Broadcaster {
     /// Create a new broadcaster for the given committee.
-    pub fn new(committee: &Committee, our_authority: AuthorityIndex, config: BroadcasterConfig) -> Self {
+    pub fn new(
+        committee: &Committee,
+        our_authority: AuthorityIndex,
+        config: BroadcasterConfig,
+    ) -> Self {
         let mut peers = HashMap::new();
         for i in 0..committee.size() as u32 {
             if i != our_authority {
@@ -221,7 +225,10 @@ impl Broadcaster {
     /// - `force_flush` is true (timer-triggered partial flush)
     ///
     /// Each peer is limited to `window_size` concurrent in-flight batches.
-    pub fn take_ready_batches(&mut self, force_flush: bool) -> Vec<(AuthorityIndex, Vec<VerifiedBlock>)> {
+    pub fn take_ready_batches(
+        &mut self,
+        force_flush: bool,
+    ) -> Vec<(AuthorityIndex, Vec<VerifiedBlock>)> {
         let mut result = Vec::new();
 
         for (&peer_id, state) in &mut self.peers {
@@ -236,7 +243,10 @@ impl Broadcaster {
             if ready {
                 let batch_end = state.pending.len().min(self.config.batch_size);
                 let batch: Vec<VerifiedBlock> = state.pending.drain(..batch_end).collect();
-                let batch_bytes: usize = batch.iter().map(|b| PeerState::estimated_block_bytes(b)).sum();
+                let batch_bytes: usize = batch
+                    .iter()
+                    .map(|b| PeerState::estimated_block_bytes(b))
+                    .sum();
                 state.pending_bytes = state.pending_bytes.saturating_sub(batch_bytes);
                 state.in_flight_batches += 1;
 

@@ -1,4 +1,4 @@
-﻿//! Key derivation and polynomial arithmetic for MISAKA spending keys.
+//! Key derivation and polynomial arithmetic for MISAKA spending keys.
 //!
 //! Contains:
 //! - `Poly`: polynomial in R_q = Z_q[X]/(X^256+1)
@@ -466,7 +466,6 @@ mod tests {
 
     // SEC-FIX: test_sign_verify and test_sig_serialization_roundtrip removed
     // (tested legacy LRS pq_sign/legacy_verify which have been deleted).
-
 
     #[test]
     fn test_pubkey_verification() {

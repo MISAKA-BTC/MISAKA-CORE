@@ -36,7 +36,9 @@ impl SupplyTracker {
 
     /// Mint new tokens. Enforces max_supply cap.
     pub fn mint(&mut self, amount: u128) -> Result<(), SupplyError> {
-        let new_total = self.total_supply.checked_add(amount)
+        let new_total = self
+            .total_supply
+            .checked_add(amount)
             .ok_or(SupplyError::Overflow)?;
         if new_total > self.max_supply {
             return Err(SupplyError::ExceedsCap {
@@ -45,7 +47,9 @@ impl SupplyTracker {
                 cap: self.max_supply,
             });
         }
-        let new_circ = self.circulating.checked_add(amount)
+        let new_circ = self
+            .circulating
+            .checked_add(amount)
             .ok_or(SupplyError::Overflow)?;
         self.total_supply = new_total;
         self.circulating = new_circ;
@@ -60,7 +64,9 @@ impl SupplyTracker {
                 attempted: amount,
             });
         }
-        self.burned = self.burned.checked_add(amount)
+        self.burned = self
+            .burned
+            .checked_add(amount)
             .ok_or(SupplyError::Overflow)?;
         self.circulating -= amount;
         Ok(())
@@ -74,7 +80,9 @@ impl SupplyTracker {
                 attempted: amount,
             });
         }
-        self.staked = self.staked.checked_add(amount)
+        self.staked = self
+            .staked
+            .checked_add(amount)
             .ok_or(SupplyError::Overflow)?;
         self.circulating -= amount;
         Ok(())
@@ -88,7 +96,9 @@ impl SupplyTracker {
                 attempted: amount,
             });
         }
-        let new_circ = self.circulating.checked_add(amount)
+        let new_circ = self
+            .circulating
+            .checked_add(amount)
             .ok_or(SupplyError::Overflow)?;
         self.staked -= amount;
         self.circulating = new_circ;
@@ -97,7 +107,8 @@ impl SupplyTracker {
 
     /// Check the invariant: circulating + staked + burned == total_supply
     pub fn check_invariant(&self) -> bool {
-        let sum = self.circulating
+        let sum = self
+            .circulating
             .checked_add(self.staked)
             .and_then(|s| s.checked_add(self.burned));
         sum == Some(self.total_supply)

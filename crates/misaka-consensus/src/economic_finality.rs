@@ -323,14 +323,11 @@ impl EconomicFinalityManager {
                 validator: attestation.validator_id,
             },
         )?;
-        misaka_pqc::pq_sign::ml_dsa_verify_raw(
-            &pk,
-            &attestation.checkpoint_hash,
-            &sig,
-        )
-        .map_err(|_| FinalityError::InvalidSignature {
-            validator: attestation.validator_id,
-        })?;
+        misaka_pqc::pq_sign::ml_dsa_verify_raw(&pk, &attestation.checkpoint_hash, &sig).map_err(
+            |_| FinalityError::InvalidSignature {
+                validator: attestation.validator_id,
+            },
+        )?;
 
         // Record attestation (with verified stake)
         pending
@@ -487,15 +484,13 @@ mod tests {
     fn make_test_validator_set(entries: &[(u8, u128)]) -> ValidatorSet {
         let validators = entries
             .iter()
-            .map(|(id_byte, stake)| {
-                ValidatorIdentity {
-                    validator_id: [*id_byte; 32],
-                    stake_weight: *stake,
-                    public_key: ValidatorPublicKey {
-                        bytes: vec![0u8; 1952],
-                    },
-                    is_active: true,
-                }
+            .map(|(id_byte, stake)| ValidatorIdentity {
+                validator_id: [*id_byte; 32],
+                stake_weight: *stake,
+                public_key: ValidatorPublicKey {
+                    bytes: vec![0u8; 1952],
+                },
+                is_active: true,
             })
             .collect();
         ValidatorSet::new(validators)

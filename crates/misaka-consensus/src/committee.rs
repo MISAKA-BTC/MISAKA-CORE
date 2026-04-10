@@ -71,9 +71,13 @@ pub fn verify_dag_checkpoint_votes(
                 "duplicate dag checkpoint vote".into(),
             ));
         }
-        total = total.checked_add(verify_dag_checkpoint_vote(vs, v)?).ok_or_else(|| {
-            MisakaError::SignatureVerificationFailed("dag checkpoint vote stake overflow".into())
-        })?;
+        total = total
+            .checked_add(verify_dag_checkpoint_vote(vs, v)?)
+            .ok_or_else(|| {
+                MisakaError::SignatureVerificationFailed(
+                    "dag checkpoint vote stake overflow".into(),
+                )
+            })?;
     }
     Ok(total)
 }

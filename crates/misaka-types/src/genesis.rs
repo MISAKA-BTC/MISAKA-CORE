@@ -134,7 +134,10 @@ mod tests {
     fn genesis_hash_pk_order_matters() {
         let pks_a = vec![vec![0xAA; 1952], vec![0xBB; 1952]];
         let pks_b = vec![vec![0xBB; 1952], vec![0xAA; 1952]];
-        assert_ne!(compute_genesis_hash(2, &pks_a), compute_genesis_hash(2, &pks_b));
+        assert_ne!(
+            compute_genesis_hash(2, &pks_a),
+            compute_genesis_hash(2, &pks_b)
+        );
     }
 
     #[test]

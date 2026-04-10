@@ -1275,7 +1275,8 @@ impl DagP2pEventLoop {
             drop(guard);
             self.peer_syncs.insert(*peer_id, sync);
         }
-        self.peer_syncs.get_mut(peer_id)
+        self.peer_syncs
+            .get_mut(peer_id)
             .expect("INVARIANT: peer_syncs.insert() called on line above; key must exist")
     }
 

@@ -405,10 +405,7 @@ impl ConsensusRuntime {
     /// pipeline (steps 4–6 of `process_block`) here. Running the full
     /// `process_block` would hit the `BlockAcceptResult::Duplicate` early
     /// return because the block is already in `dag_state`.
-    fn handle_propose(
-        &mut self,
-        context: ProposeContext,
-    ) -> (VerifiedBlock, ProcessResult) {
+    fn handle_propose(&mut self, context: ProposeContext) -> (VerifiedBlock, ProcessResult) {
         let block = self.core.propose_block(&mut self.dag_state, context);
         self.threshold_clock.set_round(self.core.current_round());
         let mut post_propose = ProcessResult::default();
@@ -491,20 +488,24 @@ pub fn spawn_consensus_runtime(
     // SEC-FIX CRITICAL: Verify WAL store is provided in production.
     // Without WAL, crash recovery loses all commits since last snapshot,
     // causing UTXO/consensus state divergence.
+    //
+    // SEC-FIX v0.5.6: the env var escape hatch `MISAKA_ALLOW_NO_WAL=1` is
+    // now test-only. Production builds (neither `cfg(test)` nor the
+    // `test-utils` feature) will ALWAYS panic on `store.is_none()`, so an
+    // operator cannot accidentally run a WAL-less production node by
+    // setting an environment variable.
     if store.is_none() {
         tracing::error!(
             "CONSENSUS RUNTIME: WAL store is None — crash recovery will be impossible! \
              This is acceptable ONLY in tests. Production MUST provide a WAL store."
         );
-        #[cfg(not(test))]
+        #[cfg(not(any(test, feature = "test-utils")))]
         {
-            // In non-test builds, check if this is a test context via env var
-            if std::env::var("MISAKA_ALLOW_NO_WAL").is_err() {
-                panic!(
-                    "FATAL: Consensus runtime started without WAL store. \
-                     Set MISAKA_ALLOW_NO_WAL=1 to override (testing only)."
-                );
-            }
+            panic!(
+                "FATAL: Consensus runtime started without WAL store. \
+                 Production builds require a persistent WAL — if you are \
+                 running tests, enable the `test-utils` feature on misaka-dag."
+            );
         }
     }
 
@@ -598,7 +599,9 @@ mod tests {
             spawn_consensus_runtime(config, signer, None, TestValidatorSet::chain_ctx());
 
         let (reply_tx, reply_rx) = oneshot::channel();
-        msg_tx.try_send(ConsensusMessage::GetStatus(reply_tx)).unwrap();
+        msg_tx
+            .try_send(ConsensusMessage::GetStatus(reply_tx))
+            .unwrap();
 
         let status = reply_rx.await.unwrap();
         assert_eq!(status.current_round, 0);

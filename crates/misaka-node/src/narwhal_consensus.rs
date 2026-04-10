@@ -9,12 +9,10 @@ use std::sync::Arc;
 
 #[cfg(feature = "dag")]
 use misaka_dag::{
-    BlockManager, Committee, CoreEngine, DagState, DagStateConfig, LeaderSchedule,
-    Linearizer, CommitFinalizer, ThresholdClock, Synchronizer, SynchronizerConfig,
-    UniversalCommitter, VerifiedBlock, BlockRef, Round,
-    narwhal_dag::core_engine::ProposeContext,
-    narwhal_types::block::BlockSigner,
-    narwhal_dag::block_verifier::BlockVerifier,
+    narwhal_dag::block_verifier::BlockVerifier, narwhal_dag::core_engine::ProposeContext,
+    narwhal_types::block::BlockSigner, BlockManager, BlockRef, CommitFinalizer, Committee,
+    CoreEngine, DagState, DagStateConfig, LeaderSchedule, Linearizer, Round, Synchronizer,
+    SynchronizerConfig, ThresholdClock, UniversalCommitter, VerifiedBlock,
 };
 #[cfg(feature = "dag")]
 use misaka_mempool::UtxoMempool;
@@ -49,13 +47,17 @@ impl NarwhalConsensusAdapter {
     pub fn new(config: NarwhalConsensusConfig, signer: Arc<dyn BlockSigner>) -> Self {
         let committee = config.committee.clone();
         let verifier = BlockVerifier::new(
-            committee.clone(), committee.epoch,
+            committee.clone(),
+            committee.epoch,
             Arc::new(misaka_dag::MlDsa65Verifier),
             config.chain_ctx.clone(),
         );
         let core = CoreEngine::new(
-            config.authority_index, committee.epoch,
-            committee.clone(), signer, verifier,
+            config.authority_index,
+            committee.epoch,
+            committee.clone(),
+            signer,
+            verifier,
             config.chain_ctx.clone(),
         );
         Self {
@@ -68,17 +70,28 @@ impl NarwhalConsensusAdapter {
     }
 
     pub fn process_block(&mut self, block: VerifiedBlock) -> Vec<misaka_dag::LinearizedOutput> {
-        let result = self.core.process_block(block, &mut self.block_manager, &mut self.dag_state);
+        let result = self
+            .core
+            .process_block(block, &mut self.block_manager, &mut self.dag_state);
         result.outputs
     }
 
     pub fn propose(&mut self, transactions: Vec<Vec<u8>>, state_root: [u8; 32]) -> VerifiedBlock {
-        self.core.propose_block(&mut self.dag_state, ProposeContext::normal(transactions, state_root))
+        self.core.propose_block(
+            &mut self.dag_state,
+            ProposeContext::normal(transactions, state_root),
+        )
     }
 
-    pub fn current_round(&self) -> Round { self.core.current_round() }
-    pub fn num_blocks(&self) -> usize { self.dag_state.num_blocks() }
-    pub fn num_commits(&self) -> usize { self.dag_state.num_commits() }
+    pub fn current_round(&self) -> Round {
+        self.core.current_round()
+    }
+    pub fn num_blocks(&self) -> usize {
+        self.dag_state.num_blocks()
+    }
+    pub fn num_commits(&self) -> usize {
+        self.dag_state.num_commits()
+    }
 }
 
 #[cfg(feature = "dag")]
@@ -131,8 +144,7 @@ impl NarwhalMempoolIngress {
         // SystemEmission and Faucet transactions MUST NOT be user-submittable.
         // Without this guard, any external user can mint tokens via the public RPC.
         match tx.tx_type {
-            misaka_types::utxo::TxType::SystemEmission
-            | misaka_types::utxo::TxType::Faucet => {
+            misaka_types::utxo::TxType::SystemEmission | misaka_types::utxo::TxType::Faucet => {
                 return serde_json::json!({
                     "txHash": serde_json::Value::Null,
                     "accepted": false,
@@ -179,9 +191,9 @@ impl NarwhalMempoolIngress {
     /// This is the same verification logic as utxo_executor::validate_transparent_transfer
     /// but performed at the RPC ingress point to prevent garbage tx flooding.
     fn verify_tx_signatures(&self, tx: &UtxoTransaction) -> Result<(), String> {
+        use misaka_pqc::pq_sign::{ml_dsa_verify_raw, MlDsaPublicKey, MlDsaSignature};
         use misaka_types::intent::{IntentMessage, IntentScope};
         use misaka_types::tx_signable::TxSignablePayload;
-        use misaka_pqc::pq_sign::{MlDsaPublicKey, MlDsaSignature, ml_dsa_verify_raw};
 
         let payload = TxSignablePayload::from(tx);
         let intent = IntentMessage::wrap(
@@ -196,7 +208,9 @@ impl NarwhalMempoolIngress {
                 return Err(format!("input {} has no UTXO refs", i));
             }
             let outref = &input.utxo_refs[0];
-            let pk_bytes = self.utxo_set.get_spending_key(outref)
+            let pk_bytes = self
+                .utxo_set
+                .get_spending_key(outref)
                 .ok_or_else(|| format!("spending key not found for input {}", i))?;
 
             let pk = MlDsaPublicKey::from_bytes(pk_bytes)
@@ -262,14 +276,14 @@ pub fn spawn_propose_loop(
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut pending_txs: VecDeque<Vec<u8>> = VecDeque::with_capacity(config.max_block_txs);
-        let mut status_tick = tokio::time::interval(tokio::time::Duration::from_millis(
-            config.status_poll_ms,
-        ));
+        let mut status_tick =
+            tokio::time::interval(tokio::time::Duration::from_millis(config.status_poll_ms));
         let mut last_proposed_round: Option<Round> = None;
 
         tracing::info!(
             "Propose loop started: max_block_txs={}, status_poll={}ms",
-            config.max_block_txs, config.status_poll_ms
+            config.max_block_txs,
+            config.status_poll_ms
         );
 
         loop {
@@ -328,8 +342,8 @@ pub fn spawn_propose_loop(
             // the tx after consensus, wasting block space and round time.
             let txs: Vec<Vec<u8>> = candidates
                 .into_iter()
-                .filter(|raw| {
-                    match borsh::from_slice::<misaka_types::utxo::UtxoTransaction>(raw) {
+                .filter(
+                    |raw| match borsh::from_slice::<misaka_types::utxo::UtxoTransaction>(raw) {
                         Ok(tx) => tx.validate_structure().is_ok(),
                         Err(_) => {
                             tracing::warn!(
@@ -338,18 +352,23 @@ pub fn spawn_propose_loop(
                             );
                             false
                         }
-                    }
-                })
+                    },
+                )
                 .collect();
 
             // Send proposal to consensus runtime
             let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
             // Read the latest state_root from the executor (updated after each commit)
             let current_state_root = *shared_state_root.read().await;
-            if msg_tx.try_send(misaka_dag::narwhal_dag::runtime::ConsensusMessage::ProposeBlock {
-                context: ProposeContext::normal(txs, current_state_root),
-                reply: reply_tx,
-            }).is_err() {
+            if msg_tx
+                .try_send(
+                    misaka_dag::narwhal_dag::runtime::ConsensusMessage::ProposeBlock {
+                        context: ProposeContext::normal(txs, current_state_root),
+                        reply: reply_tx,
+                    },
+                )
+                .is_err()
+            {
                 tracing::error!("Consensus runtime stopped, propose loop exiting");
                 break;
             }
@@ -360,7 +379,10 @@ pub fn spawn_propose_loop(
                     last_proposed_round = Some(block.round());
                     tracing::info!(
                         "propose_block round={} author={} tx_count={} sig_len={}",
-                        block.round(), block.author(), tx_count, block.inner().signature.len()
+                        block.round(),
+                        block.author(),
+                        tx_count,
+                        block.inner().signature.len()
                     );
                 }
                 Err(_) => {
@@ -378,7 +400,9 @@ pub fn spawn_propose_loop(
 /// Returns (sender, receiver). The sender goes to the mempool/RPC layer,
 /// the receiver goes to `spawn_propose_loop`.
 #[cfg(feature = "dag")]
-pub fn mempool_propose_channel(buffer: usize) -> (
+pub fn mempool_propose_channel(
+    buffer: usize,
+) -> (
     tokio::sync::mpsc::Sender<Vec<u8>>,
     tokio::sync::mpsc::Receiver<Vec<u8>>,
 ) {
@@ -419,9 +443,10 @@ mod tests {
             expiry: 0,
         };
         let payload = TxSignablePayload::from(&tx);
-        let intent = IntentMessage::wrap(IntentScope::TransparentTransfer, app_id.clone(), &payload);
-        let sig = ml_dsa_sign_raw(&kp.secret_key, &intent.signing_digest())
-            .expect("ml_dsa_sign_raw");
+        let intent =
+            IntentMessage::wrap(IntentScope::TransparentTransfer, app_id.clone(), &payload);
+        let sig =
+            ml_dsa_sign_raw(&kp.secret_key, &intent.signing_digest()).expect("ml_dsa_sign_raw");
         tx.inputs[0].proof = sig.as_bytes().to_vec();
         tx
     }

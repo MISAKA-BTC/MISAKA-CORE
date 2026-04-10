@@ -158,7 +158,8 @@ impl CommitFinalizerV2 {
                 if let Some(other_block) = block_lookup(other_ref) {
                     if other_block.tx_reject_votes.contains(block_ref) {
                         // SEC-FIX TM-2: saturating_add to prevent overflow
-                        reject_stake = reject_stake.saturating_add(self.committee.stake(other_block.author));
+                        reject_stake =
+                            reject_stake.saturating_add(self.committee.stake(other_block.author));
                     }
                 }
             }

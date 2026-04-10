@@ -19,6 +19,6 @@ pub use pq_kem::{
     MlKemCiphertext, MlKemKeypair, MlKemPublicKey, MlKemSecretKey, MlKemSharedSecret,
 };
 pub use pq_sign::{
-    ml_dsa_sign_raw, ml_dsa_verify_raw, MlDsaKeypair,
-    MlDsaPublicKey, MlDsaSecretKey, MlDsaSignature,
+    ml_dsa_sign_raw, ml_dsa_verify_raw, MlDsaKeypair, MlDsaPublicKey, MlDsaSecretKey,
+    MlDsaSignature,
 };

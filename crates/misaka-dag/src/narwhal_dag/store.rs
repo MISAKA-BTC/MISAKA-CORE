@@ -349,7 +349,9 @@ pub fn recover_dag_state(
             if let Err(e) = v.verify(&block) {
                 tracing::warn!(
                     "Recovery: rejecting corrupted block round={} author={}: {}",
-                    block.round, block.author, e
+                    block.round,
+                    block.author,
+                    e
                 );
                 rejected_count += 1;
                 continue;
@@ -362,7 +364,8 @@ pub fn recover_dag_state(
     if rejected_count > 0 {
         tracing::error!(
             "Recovery: rejected {} corrupted blocks out of {} total",
-            rejected_count, block_count + rejected_count
+            rejected_count,
+            block_count + rejected_count
         );
     }
 

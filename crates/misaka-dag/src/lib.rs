@@ -58,7 +58,14 @@ pub use narwhal_types::committee::{Authority, Committee, Stake};
 pub use narwhal_dag::authority_node::{AuthorityNode, AuthorityNodeConfig, AuthorityNodeState};
 pub use narwhal_dag::authority_service::AuthorityService;
 pub use narwhal_dag::block_manager::{BlockAcceptResult, BlockManager};
+pub use narwhal_dag::block_subscriber::{
+    BlockSubscriber, BlockSubscriberConfig, BlockSubscriberMetrics,
+};
 pub use narwhal_dag::block_verifier::BlockVerifier;
+pub use narwhal_dag::broadcaster::{Broadcaster, BroadcasterConfig, BroadcasterMetrics};
+pub use narwhal_dag::commit_consumer::{
+    ChannelCommitConsumer, CommitConsumer, CommitRecord, LogCommitConsumer, MultiConsumer,
+};
 pub use narwhal_dag::context::Context;
 pub use narwhal_dag::core_engine::CoreEngine;
 pub use narwhal_dag::dag_state::{
@@ -67,12 +74,9 @@ pub use narwhal_dag::dag_state::{
 pub use narwhal_dag::leader_schedule::{
     LeaderSchedule, ReputationScores, StakeAggregator, ThresholdClock, TimeoutBackoff,
 };
-pub use narwhal_dag::broadcaster::{Broadcaster, BroadcasterConfig, BroadcasterMetrics};
-pub use narwhal_dag::block_subscriber::{BlockSubscriber, BlockSubscriberConfig, BlockSubscriberMetrics};
-pub use narwhal_dag::commit_consumer::{
-    ChannelCommitConsumer, CommitConsumer, CommitRecord, LogCommitConsumer, MultiConsumer,
+pub use narwhal_dag::observer_service::{
+    ObservedCommit, ObserverMetrics, ObserverService, QuorumProof,
 };
-pub use narwhal_dag::observer_service::{ObservedCommit, ObserverMetrics, ObserverService, QuorumProof};
 pub use narwhal_dag::proposed_block_handler::{
     BroadcastSink, ProposalOutcome, ProposedBlockHandler, ProposedBlockHandlerMetrics, WalWriter,
 };

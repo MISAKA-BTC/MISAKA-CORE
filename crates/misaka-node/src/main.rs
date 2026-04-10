@@ -23,7 +23,6 @@ compile_error!("DO NOT compile production build with 'dev-rpc' feature enabled."
 #[cfg(all(not(debug_assertions), feature = "dev-bridge-mock"))]
 compile_error!("DO NOT compile production build with 'dev-bridge-mock' feature enabled.");
 
-
 // SEC-FIX [Audit #11]: Additional production safety compile guards.
 // Faucet is allowed in release builds when `testnet` feature is enabled.
 #[cfg(all(not(debug_assertions), feature = "faucet", not(feature = "testnet")))]
@@ -118,17 +117,17 @@ pub mod dag_rpc_service;
 #[cfg(all(feature = "dag", feature = "ghostdag-compat"))]
 pub mod dag_tx_dissemination_service;
 #[cfg(feature = "dag")]
-pub mod narwhal_consensus;
-#[cfg(feature = "dag")]
 pub mod narwhal_block_relay_transport;
+#[cfg(feature = "dag")]
+pub mod narwhal_consensus;
 #[cfg(feature = "dag")]
 pub mod narwhal_runtime_bridge;
 // Phase 2c-B D1: narwhal_tx_executor deleted (replaced by utxo_executor)
+#[cfg(all(feature = "dag", feature = "ghostdag-compat"))]
+pub mod jsonrpc;
 #[cfg(feature = "dag")]
 pub mod utxo_executor;
 pub mod ws;
-#[cfg(all(feature = "dag", feature = "ghostdag-compat"))]
-pub mod jsonrpc;
 #[cfg(not(feature = "dag"))]
 pub use misaka_execution::block_apply::{self, execute_block, undo_last_block, BlockResult};
 
@@ -351,8 +350,9 @@ async fn main() -> anyhow::Result<()> {
         let loaded_config = if let Some(ref config_path) = cli.config {
             config_source = "file";
             Some(
-                misaka_config::load_config(std::path::Path::new(config_path))
-                    .map_err(|e| anyhow::anyhow!("failed to load config '{}': {}", config_path, e))?,
+                misaka_config::load_config(std::path::Path::new(config_path)).map_err(|e| {
+                    anyhow::anyhow!("failed to load config '{}': {}", config_path, e)
+                })?,
             )
         } else if cli.chain_id == 1 {
             // Auto-detect mainnet config if --chain-id 1 and no --config given
@@ -420,7 +420,11 @@ async fn main() -> anyhow::Result<()> {
             }
             if cli.peers.is_empty() {
                 if let Some(ref peers_str) = cfg.peers {
-                    cli.peers = peers_str.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+                    cli.peers = peers_str
+                        .split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect();
                 }
             }
         }
@@ -454,8 +458,15 @@ async fn main() -> anyhow::Result<()> {
 
     info!(
         "Effective config: chain_id={}, data_dir={}, rpc_port={}, p2p_port={}, config_source={}",
-        cli.chain_id, cli.data_dir, cli.rpc_port, cli.p2p_port,
-        if cli.config.is_some() { "file" } else { "defaults+CLI" }
+        cli.chain_id,
+        cli.data_dir,
+        cli.rpc_port,
+        cli.p2p_port,
+        if cli.config.is_some() {
+            "file"
+        } else {
+            "defaults+CLI"
+        }
     );
 
     // Parse NodeMode
@@ -552,20 +563,22 @@ async fn main() -> anyhow::Result<()> {
                 eprintln!("     Set MISAKA_VALIDATOR_PASSPHRASE for production use.");
             }
 
-            let keystore = keypair.secret_key.with_bytes(|sk_bytes| {
-                encrypt_keystore(
-                    sk_bytes,
-                    &hex::encode(&pk_bytes),
-                    &validator_id_hex,
-                    if cli.chain_id == 1 {
-                        10_000_000
-                    } else {
-                        1_000_000
-                    },
-                    &passphrase,
-                )
-            })
-            .map_err(|e| anyhow::anyhow!("keystore encryption failed: {}", e))?;
+            let keystore = keypair
+                .secret_key
+                .with_bytes(|sk_bytes| {
+                    encrypt_keystore(
+                        sk_bytes,
+                        &hex::encode(&pk_bytes),
+                        &validator_id_hex,
+                        if cli.chain_id == 1 {
+                            10_000_000
+                        } else {
+                            1_000_000
+                        },
+                        &passphrase,
+                    )
+                })
+                .map_err(|e| anyhow::anyhow!("keystore encryption failed: {}", e))?;
 
             // save_keystore writes to tmp with 0600 then renames (no race window)
             save_keystore(&output_path, &keystore)
@@ -633,9 +646,8 @@ async fn main() -> anyhow::Result<()> {
     if cli.emit_validator_pubkey {
         let data_dir = std::path::Path::new(&cli.data_dir);
         std::fs::create_dir_all(data_dir)?;
-        let identity = crate::identity::ValidatorIdentity::load_or_create(
-            &data_dir.join("validator.key"),
-        )?;
+        let identity =
+            crate::identity::ValidatorIdentity::load_or_create(&data_dir.join("validator.key"))?;
         println!("0x{}", hex::encode(identity.public_key()));
         return Ok(());
     }
@@ -702,21 +714,36 @@ async fn main() -> anyhow::Result<()> {
 
     // Phase 2b' (M7'): Build parsed seed entries before config validation
     // so they're available both for validation and for transport.
+    //
+    // SEC-FIX: the old code silently dropped seeds to `vec![]` when
+    // `--seed-pubkeys` was absent and printed a misleading warning that
+    // "seeds will connect without PK pinning (TOFU)". In reality there is
+    // no TOFU path — the Narwhal relay handshake is strictly PK-pinned
+    // (tcp_initiator_handshake takes &peer.public_key). Without pubkeys
+    // the seeds were silently ignored, which made `--seeds` look like it
+    // worked while the node was actually running in solo mode.
+    //
+    // The correct behaviour is to hard-fail if `--seeds` is provided
+    // without matching `--seed-pubkeys`, and to build SeedEntry structs
+    // one-to-one otherwise.
     let parsed_seeds: Vec<misaka_types::seed_entry::SeedEntry> = {
-        if cli.seed_pubkeys.is_empty() && !cli.seeds.is_empty() {
-            warn!(
-                "Phase 2b: --seed-pubkeys not provided for {} seeds. \
-                 Seeds will connect without PK pinning (TOFU). \
-                 Provide --seed-pubkeys for production use.",
+        if cli.seeds.is_empty() {
+            vec![]
+        } else if cli.seed_pubkeys.is_empty() {
+            error!(
+                "FATAL: --seeds provided ({}) but --seed-pubkeys is empty. \
+                 The Narwhal relay handshake is PK-pinned; there is no TOFU \
+                 mode. Obtain the seed's ML-DSA-65 public key from its \
+                 operator (misaka-node --emit-validator-pubkey prints it \
+                 on stdout) and pass it as `--seed-pubkeys 0x<hex>`, one \
+                 per --seeds entry in the same order.",
                 cli.seeds.len()
             );
-            vec![]
-        } else if !cli.seed_pubkeys.is_empty()
-            && cli.seed_pubkeys.len() != cli.seeds.len()
-        {
+            std::process::exit(1);
+        } else if cli.seed_pubkeys.len() != cli.seeds.len() {
             error!(
                 "FATAL: --seed-pubkeys count ({}) != --seeds count ({}). \
-                 Each seed must have a corresponding pubkey.",
+                 Each seed must have a corresponding pubkey in the same order.",
                 cli.seed_pubkeys.len(),
                 cli.seeds.len()
             );
@@ -942,9 +969,7 @@ async fn start_narwhal_node(cli: Cli) -> anyhow::Result<()> {
 
     // ── CRIT #1 fix: Load persistent validator identity (not generate fresh) ──
     let validator_key_path = data_dir.join("validator.key");
-    let identity = crate::identity::ValidatorIdentity::load_or_create(
-        &validator_key_path,
-    )?;
+    let identity = crate::identity::ValidatorIdentity::load_or_create(&validator_key_path)?;
     tracing::info!(
         fingerprint = %hex::encode(identity.fingerprint()),
         "Loaded validator identity"
@@ -1017,8 +1042,11 @@ async fn start_narwhal_node(cli: Cli) -> anyhow::Result<()> {
     }
     impl std::fmt::Debug for IdentityBlockSigner {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(f, "IdentityBlockSigner({}..)",
-                hex::encode(&self.identity.fingerprint()[..8]))
+            write!(
+                f,
+                "IdentityBlockSigner({}..)",
+                hex::encode(&self.identity.fingerprint()[..8])
+            )
         }
     }
     impl misaka_dag::BlockSigner for IdentityBlockSigner {
@@ -1046,14 +1074,12 @@ async fn start_narwhal_node(cli: Cli) -> anyhow::Result<()> {
     // CR-2: Chain context for cross-network replay prevention.
     // genesis_hash is derived from the committee manifest (deterministic).
     // Phase 2c-A: use shared utility for genesis hash computation
-    let committee_pks: Vec<Vec<u8>> = committee.authorities
+    let committee_pks: Vec<Vec<u8>> = committee
+        .authorities
         .iter()
         .map(|auth| auth.public_key.clone())
         .collect();
-    let genesis_hash = misaka_types::genesis::compute_genesis_hash(
-        cli.chain_id,
-        &committee_pks,
-    );
+    let genesis_hash = misaka_types::genesis::compute_genesis_hash(cli.chain_id, &committee_pks);
     let chain_ctx = misaka_types::chain_context::ChainContext::new(cli.chain_id, genesis_hash);
     info!(
         "ChainContext: chain_id={}, genesis_hash={}",
@@ -1088,7 +1114,7 @@ async fn start_narwhal_node(cli: Cli) -> anyhow::Result<()> {
         .map(|addr| addr.port())
         .unwrap_or(cli.p2p_port);
     let relay_listen_addr = SocketAddr::from(([0, 0, 0, 0], relay_listen_port));
-    let relay_peers: Vec<crate::narwhal_block_relay_transport::RelayPeer> = manifest
+    let mut relay_peers: Vec<crate::narwhal_block_relay_transport::RelayPeer> = manifest
         .validators
         .iter()
         .filter(|validator| validator.authority_index != authority_index)
@@ -1105,6 +1131,109 @@ async fn start_narwhal_node(cli: Cli) -> anyhow::Result<()> {
             })
         })
         .collect();
+
+    // ── SEC-FIX: `--seeds` → Narwhal relay wiring ─────────────────────
+    //
+    // Historically the `--seeds` argument was parsed but never wired into
+    // the Narwhal relay transport. `relay_peers` was built exclusively from
+    // `genesis_committee.toml`, so a user running the bundled distribution
+    // against a remote seed would silently operate in solo mode (see the
+    // v0.5.5 audit finding "node is not connecting to the seed IP").
+    //
+    // This block reconciles each --seeds/--seed-pubkeys pair against the
+    // committee (validation of counts already happened in `main()` before
+    // this function was called):
+    //
+    //  1. If the seed's pubkey matches an existing committee member, the
+    //     member's `network_address` is overridden with the `--seeds`
+    //     address. This handles the common case of a bundled genesis file
+    //     shipped with a placeholder / loopback address for a validator
+    //     that is actually reachable at a different host.
+    //
+    //  2. If the pubkey does not match any committee member, the seed is
+    //     added as a synthetic observer peer (authority_index beyond the
+    //     committee range). Such peers receive broadcasts so they can
+    //     relay traffic, but their blocks will still be rejected by
+    //     `BlockVerifier` because their authority_index is out of range —
+    //     so observer seeds cannot forge consensus participation.
+    //
+    // Note: the outbound-dial filter inside `spawn_narwhal_block_relay_transport`
+    // only dials peers whose `authority_index > self.authority_index`. Since
+    // synthetic observer indexes start at `manifest.validators.len()`, they
+    // are always > our authority_index, so they will be dialed.
+    if !cli.seeds.is_empty() && cli.seeds.len() == cli.seed_pubkeys.len() {
+        let mut synthetic_index = manifest.validators.len() as u32;
+        for (addr_s, pk_s) in cli.seeds.iter().zip(cli.seed_pubkeys.iter()) {
+            let addr = match addr_s.parse::<SocketAddr>() {
+                Ok(a) => a,
+                Err(e) => {
+                    warn!("--seeds: invalid address '{}': {} — skipping", addr_s, e);
+                    continue;
+                }
+            };
+            let pk_hex = pk_s.trim_start_matches("0x");
+            let pk_bytes = match hex::decode(pk_hex) {
+                Ok(b) => b,
+                Err(e) => {
+                    warn!(
+                        "--seed-pubkeys: invalid hex for '{}': {} — skipping",
+                        addr_s, e
+                    );
+                    continue;
+                }
+            };
+            let pk = match misaka_crypto::validator_sig::ValidatorPqPublicKey::from_bytes(&pk_bytes)
+            {
+                Ok(k) => k,
+                Err(e) => {
+                    warn!(
+                        "--seed-pubkeys: invalid ML-DSA-65 pubkey for '{}': {} — skipping",
+                        addr_s, e
+                    );
+                    continue;
+                }
+            };
+            let pk_snapshot = pk.to_bytes();
+            if let Some(existing) = relay_peers
+                .iter_mut()
+                .find(|p| p.public_key.to_bytes() == pk_snapshot)
+            {
+                let old_addr = existing.address;
+                existing.address = addr;
+                info!(
+                    "--seeds: overriding committee authority_index={} address {} → {}",
+                    existing.authority_index, old_addr, addr,
+                );
+            } else {
+                info!(
+                    "--seeds: adding observer peer synthetic_authority_index={} addr={}",
+                    synthetic_index, addr,
+                );
+                relay_peers.push(crate::narwhal_block_relay_transport::RelayPeer {
+                    authority_index: synthetic_index,
+                    address: addr,
+                    public_key: pk,
+                });
+                synthetic_index = synthetic_index.saturating_add(1);
+            }
+        }
+    }
+
+    if relay_peers.is_empty() {
+        warn!(
+            "SOLO MODE: no relay peers configured. This node will propose, \
+             self-vote, and self-commit without any remote participants. \
+             To join a multi-validator network, add the other validators to \
+             genesis_committee.toml or pass --seeds + --seed-pubkeys at \
+             startup."
+        );
+    } else {
+        info!(
+            "Narwhal relay peers configured: {} (committee members and/or --seeds)",
+            relay_peers.len()
+        );
+    }
+
     let (relay_in_tx, mut relay_in_rx) = tokio::sync::mpsc::channel(1024);
     let (relay_out_tx, relay_out_rx) = tokio::sync::mpsc::channel(1024);
     let block_cache: Arc<RwLock<BTreeMap<BlockRef, NarwhalBlock>>> =
@@ -1164,8 +1293,8 @@ async fn start_narwhal_node(cli: Cli) -> anyhow::Result<()> {
     let metrics_rpc = metrics.clone();
 
     // SEC-FIX [Audit H3]: Load RPC auth state for write endpoint protection.
-    let auth_state = crate::rpc_auth::ApiKeyState::from_env_checked(cli.chain_id)
-        .unwrap_or_else(|e| {
+    let auth_state =
+        crate::rpc_auth::ApiKeyState::from_env_checked(cli.chain_id).unwrap_or_else(|e| {
             error!("RPC auth config error: {}", e);
             std::process::exit(1);
         });
@@ -1308,20 +1437,46 @@ async fn start_narwhal_node(cli: Cli) -> anyhow::Result<()> {
         .route("/api/get_chain_info", axum::routing::get({
             let msg_tx = msg_tx_rpc.clone();
             let metrics2 = metrics_rpc.clone();
+            let connected_peers = connected_peers.clone();
+            let chain_id_for_rpc = cli.chain_id;
             move || {
                 let msg_tx = msg_tx.clone();
                 let metrics2 = metrics2.clone();
+                let connected_peers = connected_peers.clone();
                 async move {
                     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
                     let _ = msg_tx.try_send(ConsensusMessage::GetStatus(reply_tx));
                     let status = reply_rx.await.ok();
+                    // Peer count is authoritative for whether we are joined to
+                    // a shared network or running self-host. The value is
+                    // updated by the narwhal_block_relay ingress loop when
+                    // PeerConnected / PeerDisconnected events arrive.
+                    let peers_snapshot: Vec<u32> =
+                        connected_peers.read().await.iter().copied().collect();
+                    let peer_count = peers_snapshot.len();
+                    // "mode" is a UX hint derived from peer_count: 0 peers ⇒
+                    // the node is isolated and is making self-progress with
+                    // only its own validator identity.
+                    let mode = if peer_count == 0 {
+                        "solo"
+                    } else {
+                        "joined"
+                    };
                     axum::Json(serde_json::json!({
                         "chain": "MISAKA Network",
                         "consensus": "Mysticeti-equivalent",
-                        "chainId": 1,
-                        "version": "0.5.1",
+                        // SEC-FIX v0.5.6: chainId / version were hardcoded
+                        // to stale values (chainId=1, version="0.5.1") and
+                        // misrepresented the running node's identity. They
+                        // are now sourced from the runtime CLI and the
+                        // compiled crate version respectively.
+                        "chainId": chain_id_for_rpc,
+                        "version": env!("CARGO_PKG_VERSION"),
                         "pqSignature": "ML-DSA-65 (FIPS 204)",
                         "status": status,
+                        "mode": mode,
+                        "peerCount": peer_count,
+                        "peers": peers_snapshot,
                         "metrics": {
                             "blocksProposed": misaka_dag::narwhal_dag::metrics::ConsensusMetrics::get(
                                 &metrics2.blocks_proposed),
@@ -1484,27 +1639,38 @@ async fn start_narwhal_node(cli: Cli) -> anyhow::Result<()> {
             }
         }))
         // ── Testnet manifest ──
-        .route("/api/testnet_info", axum::routing::get(|| async {
-            axum::Json(serde_json::json!({
-                "network": "MISAKA Testnet",
-                "chainId": 2,
-                "networkId": "misaka-testnet-1",
-                "addressPrefix": "misakatest1",
-                "consensus": "Mysticeti-equivalent",
-                "pqSignature": "ML-DSA-65 (FIPS 204)",
-                "version": "0.5.1",
-                "seedNodes": ["160.16.131.119:3000"],
-                // Phase 2c-B: faucet route removed from minimal RPC
-                "maxSupply": 10_000_000_000u64,
-                "bridge": {
-                    "ui": "https://testbridge.misakastake.com",
-                    "solanaNetwork": "devnet",
-                    "solanaRpc": "https://api.devnet.solana.com",
-                    "programId": "GVb76FKRY7anhraL8WFEjXrNCuRXzQJ6TYj4BmgpiDQZ",
-                    "tokenMint": "Dc5ni2yXsMeLuSVRg5fdYjgyKJyQFafBWfjmGSsUFMBA",
-                    "explorer": "https://explorer.solana.com/address/GVb76FKRY7anhraL8WFEjXrNCuRXzQJ6TYj4BmgpiDQZ?cluster=devnet"
+        .route("/api/testnet_info", axum::routing::get({
+            // SEC-FIX v0.5.6: version and seedNodes used to be hardcoded
+            // (version="0.5.1", seedNodes=["160.16.131.119:3000"], which
+            // did not even match `seeds.txt` in the distribution). Bind
+            // the handler over the runtime CLI so its output actually
+            // reflects what the operator launched.
+            let chain_id_for_rpc = cli.chain_id;
+            let seed_nodes_for_rpc: Vec<String> = cli.seeds.clone();
+            move || {
+                let seed_nodes_for_rpc = seed_nodes_for_rpc.clone();
+                async move {
+                    axum::Json(serde_json::json!({
+                        "network": "MISAKA Testnet",
+                        "chainId": chain_id_for_rpc,
+                        "networkId": "misaka-testnet-1",
+                        "addressPrefix": "misakatest1",
+                        "consensus": "Mysticeti-equivalent",
+                        "pqSignature": "ML-DSA-65 (FIPS 204)",
+                        "version": env!("CARGO_PKG_VERSION"),
+                        "seedNodes": seed_nodes_for_rpc,
+                        "maxSupply": 10_000_000_000u64,
+                        "bridge": {
+                            "ui": "https://testbridge.misakastake.com",
+                            "solanaNetwork": "devnet",
+                            "solanaRpc": "https://api.devnet.solana.com",
+                            "programId": "GVb76FKRY7anhraL8WFEjXrNCuRXzQJ6TYj4BmgpiDQZ",
+                            "tokenMint": "Dc5ni2yXsMeLuSVRg5fdYjgyKJyQFafBWfjmGSsUFMBA",
+                            "explorer": "https://explorer.solana.com/address/GVb76FKRY7anhraL8WFEjXrNCuRXzQJ6TYj4BmgpiDQZ?cluster=devnet"
+                        }
+                    }))
                 }
-            }))
+            }
         }));
 
     let rpc_server = axum::serve(
@@ -1542,11 +1708,13 @@ async fn start_narwhal_node(cli: Cli) -> anyhow::Result<()> {
                 .await
                 .insert(block_ref, block_body.clone());
             let _ = relay_out_tx_for_broadcast
-                .send(crate::narwhal_block_relay_transport::OutboundNarwhalRelayEvent::Broadcast(
-                    NarwhalRelayMessage::BlockProposal(NarwhalBlockProposal {
-                        block: block_body,
-                    }),
-                ))
+                .send(
+                    crate::narwhal_block_relay_transport::OutboundNarwhalRelayEvent::Broadcast(
+                        NarwhalRelayMessage::BlockProposal(NarwhalBlockProposal {
+                            block: block_body,
+                        }),
+                    ),
+                )
                 .await;
             tracing::debug!(
                 "Block broadcast round={} author={} txs={} total_broadcast={}",
@@ -1556,7 +1724,10 @@ async fn start_narwhal_node(cli: Cli) -> anyhow::Result<()> {
                 blocks_broadcast
             );
         }
-        tracing::info!("Block broadcast channel closed (total: {})", blocks_broadcast);
+        tracing::info!(
+            "Block broadcast channel closed (total: {})",
+            blocks_broadcast
+        );
     });
 
     let relay_msg_tx = msg_tx.clone();
@@ -1970,11 +2141,12 @@ fn load_or_create_local_dag_validator(
 
         // SEC-FIX: Use from_bytes() instead of direct field construction.
         // Ensures length validation (4032 bytes) is always enforced.
-        let secret_key = ValidatorPqSecretKey::from_bytes(&secret_bytes)
-            .ok_or_else(|| anyhow::anyhow!(
+        let secret_key = ValidatorPqSecretKey::from_bytes(&secret_bytes).ok_or_else(|| {
+            anyhow::anyhow!(
                 "invalid validator secret key length: {} (expected 4032)",
                 secret_bytes.len()
-            ))?;
+            )
+        })?;
         let keypair = misaka_crypto::validator_sig::ValidatorKeypair {
             public_key,
             secret_key,
@@ -2058,11 +2230,12 @@ fn load_or_create_local_dag_validator(
 
         // SEC-FIX: Use from_bytes() instead of direct field construction.
         // Ensures length validation (4032 bytes) is always enforced.
-        let secret_key = ValidatorPqSecretKey::from_bytes(&secret_bytes)
-            .ok_or_else(|| anyhow::anyhow!(
+        let secret_key = ValidatorPqSecretKey::from_bytes(&secret_bytes).ok_or_else(|| {
+            anyhow::anyhow!(
                 "invalid validator secret key length: {} (expected 4032)",
                 secret_bytes.len()
-            ))?;
+            )
+        })?;
         let keypair = misaka_crypto::validator_sig::ValidatorKeypair {
             public_key,
             secret_key,
@@ -2094,16 +2267,18 @@ fn load_or_create_local_dag_validator(
         };
 
         let passphrase = read_passphrase(chain_id)?;
-        let keystore = keypair.secret_key.with_bytes(|sk_bytes| {
-            encrypt_keystore(
-                sk_bytes,
-                &hex::encode(&identity.public_key.bytes),
-                &hex::encode(identity.validator_id),
-                identity.stake_weight,
-                &passphrase,
-            )
-        })
-        .map_err(|e| anyhow::anyhow!("encryption failed: {}", e))?;
+        let keystore = keypair
+            .secret_key
+            .with_bytes(|sk_bytes| {
+                encrypt_keystore(
+                    sk_bytes,
+                    &hex::encode(&identity.public_key.bytes),
+                    &hex::encode(identity.validator_id),
+                    identity.stake_weight,
+                    &passphrase,
+                )
+            })
+            .map_err(|e| anyhow::anyhow!("encryption failed: {}", e))?;
 
         save_keystore(&encrypted_path, &keystore)
             .map_err(|e| anyhow::anyhow!("failed to save encrypted keystore: {}", e))?;
@@ -2151,9 +2326,11 @@ fn normalize_experimental_validator_identity(
     //
     // Stake weight: query Solana on-chain staking program for real stake amount.
     // Falls back to 1 if Solana RPC is unavailable or validator not found.
-    let stake_weight = match crate::solana_stake_verify::query_validator_stake_weight(
-        &hex::encode(&identity.public_key.bytes),
-    ).await {
+    let stake_weight = match crate::solana_stake_verify::query_validator_stake_weight(&hex::encode(
+        &identity.public_key.bytes,
+    ))
+    .await
+    {
         Ok(weight) => {
             tracing::info!(
                 "Solana stake weight for validator {}: {}",
@@ -4315,7 +4492,10 @@ async fn start_v1_node(
     // for bridge replay protection across restarts.
     // SEC-FIX: Also restore total_emitted for supply cap enforcement across restarts.
     let (utxo_set, restored_height, restored_burn_ids, restored_total_emitted) =
-        match misaka_storage::utxo_set::UtxoSet::load_from_file_with_burns(&utxo_snapshot_path, 1000) {
+        match misaka_storage::utxo_set::UtxoSet::load_from_file_with_burns(
+            &utxo_snapshot_path,
+            1000,
+        ) {
             Ok(Some((restored, burn_ids, total_emitted))) => {
                 let h = restored.height;
                 info!(
@@ -4329,14 +4509,24 @@ async fn start_v1_node(
             }
             Ok(None) => {
                 info!("Layer 1: no UTXO snapshot found — starting fresh");
-                (misaka_storage::utxo_set::UtxoSet::new(1000), 0, Vec::new(), 0u64)
+                (
+                    misaka_storage::utxo_set::UtxoSet::new(1000),
+                    0,
+                    Vec::new(),
+                    0u64,
+                )
             }
             Err(e) => {
                 warn!(
                     "Layer 1: UTXO snapshot load failed ({}) — starting fresh",
                     e
                 );
-                (misaka_storage::utxo_set::UtxoSet::new(1000), 0, Vec::new(), 0u64)
+                (
+                    misaka_storage::utxo_set::UtxoSet::new(1000),
+                    0,
+                    Vec::new(),
+                    0u64,
+                )
             }
         };
 

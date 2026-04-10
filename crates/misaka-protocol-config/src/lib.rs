@@ -44,15 +44,21 @@ impl ProtocolVersion {
     pub const MIN: Self = Self(MIN_PROTOCOL_VERSION);
     pub const MAX: Self = Self(MAX_PROTOCOL_VERSION);
 
-    pub const fn new(v: u64) -> Self { Self(v) }
-    pub const fn as_u64(&self) -> u64 { self.0 }
+    pub const fn new(v: u64) -> Self {
+        Self(v)
+    }
+    pub const fn as_u64(&self) -> u64 {
+        self.0
+    }
 
     /// Convenience aliases.
     pub const V1: Self = Self(1);
 }
 
 impl From<u64> for ProtocolVersion {
-    fn from(v: u64) -> Self { Self::new(v) }
+    fn from(v: u64) -> Self {
+        Self::new(v)
+    }
 }
 
 impl std::fmt::Display for ProtocolVersion {
@@ -86,12 +92,24 @@ pub struct FeatureFlags {
 }
 
 impl FeatureFlags {
-    pub fn transparent_only(&self) -> bool { self.transparent_only }
-    pub fn bridge_enabled(&self) -> bool { self.bridge_enabled }
-    pub fn faucet_enabled(&self) -> bool { self.faucet_enabled }
-    pub fn dag_consensus(&self) -> bool { self.dag_consensus }
-    pub fn enforce_domain_separation_at_edge(&self) -> bool { self.enforce_domain_separation_at_edge }
-    pub fn equivocation_quorum_exclusion(&self) -> bool { self.equivocation_quorum_exclusion }
+    pub fn transparent_only(&self) -> bool {
+        self.transparent_only
+    }
+    pub fn bridge_enabled(&self) -> bool {
+        self.bridge_enabled
+    }
+    pub fn faucet_enabled(&self) -> bool {
+        self.faucet_enabled
+    }
+    pub fn dag_consensus(&self) -> bool {
+        self.dag_consensus
+    }
+    pub fn enforce_domain_separation_at_edge(&self) -> bool {
+        self.enforce_domain_separation_at_edge
+    }
+    pub fn equivocation_quorum_exclusion(&self) -> bool {
+        self.equivocation_quorum_exclusion
+    }
 
     /// Lookup a feature flag by string name.
     pub fn lookup(&self, name: &str) -> Option<bool> {
@@ -113,8 +131,14 @@ impl FeatureFlags {
         m.insert("bridge_enabled".into(), self.bridge_enabled);
         m.insert("faucet_enabled".into(), self.faucet_enabled);
         m.insert("dag_consensus".into(), self.dag_consensus);
-        m.insert("enforce_domain_separation_at_edge".into(), self.enforce_domain_separation_at_edge);
-        m.insert("equivocation_quorum_exclusion".into(), self.equivocation_quorum_exclusion);
+        m.insert(
+            "enforce_domain_separation_at_edge".into(),
+            self.enforce_domain_separation_at_edge,
+        );
+        m.insert(
+            "equivocation_quorum_exclusion".into(),
+            self.equivocation_quorum_exclusion,
+        );
         m
     }
 }
@@ -235,72 +259,159 @@ macro_rules! config_accessor {
 
 // We don't have the `paste` crate, so implement manually:
 impl ProtocolConfig {
-    const ERR_MSG: &'static str =
-        "protocol config value not present in current protocol version";
+    const ERR_MSG: &'static str = "protocol config value not present in current protocol version";
 
     // BFT
-    pub fn num_validators(&self) -> u32 { self.num_validators.expect(Self::ERR_MSG) }
-    pub fn min_validators(&self) -> u32 { self.min_validators.expect(Self::ERR_MSG) }
-    pub fn quorum_threshold_bps(&self) -> u16 { self.quorum_threshold_bps.expect(Self::ERR_MSG) }
+    pub fn num_validators(&self) -> u32 {
+        self.num_validators.expect(Self::ERR_MSG)
+    }
+    pub fn min_validators(&self) -> u32 {
+        self.min_validators.expect(Self::ERR_MSG)
+    }
+    pub fn quorum_threshold_bps(&self) -> u16 {
+        self.quorum_threshold_bps.expect(Self::ERR_MSG)
+    }
 
     // Block
-    pub fn max_block_mass(&self) -> u64 { self.max_block_mass.expect(Self::ERR_MSG) }
-    pub fn max_tx_mass(&self) -> u64 { self.max_tx_mass.expect(Self::ERR_MSG) }
-    pub fn max_txs_per_block(&self) -> u32 { self.max_txs_per_block.expect(Self::ERR_MSG) }
-    pub fn max_block_parents(&self) -> u32 { self.max_block_parents.expect(Self::ERR_MSG) }
-    pub fn max_block_sig_ops(&self) -> u64 { self.max_block_sig_ops.expect(Self::ERR_MSG) }
-    pub fn max_tx_size(&self) -> u64 { self.max_tx_size.expect(Self::ERR_MSG) }
-    pub fn max_mergeset_size(&self) -> u32 { self.max_mergeset_size.expect(Self::ERR_MSG) }
+    pub fn max_block_mass(&self) -> u64 {
+        self.max_block_mass.expect(Self::ERR_MSG)
+    }
+    pub fn max_tx_mass(&self) -> u64 {
+        self.max_tx_mass.expect(Self::ERR_MSG)
+    }
+    pub fn max_txs_per_block(&self) -> u32 {
+        self.max_txs_per_block.expect(Self::ERR_MSG)
+    }
+    pub fn max_block_parents(&self) -> u32 {
+        self.max_block_parents.expect(Self::ERR_MSG)
+    }
+    pub fn max_block_sig_ops(&self) -> u64 {
+        self.max_block_sig_ops.expect(Self::ERR_MSG)
+    }
+    pub fn max_tx_size(&self) -> u64 {
+        self.max_tx_size.expect(Self::ERR_MSG)
+    }
+    pub fn max_mergeset_size(&self) -> u32 {
+        self.max_mergeset_size.expect(Self::ERR_MSG)
+    }
 
     // Timing
-    pub fn target_block_interval_ms(&self) -> u64 { self.target_block_interval_ms.expect(Self::ERR_MSG) }
-    pub fn epoch_length_blocks(&self) -> u64 { self.epoch_length_blocks.expect(Self::ERR_MSG) }
-    pub fn finality_depth(&self) -> u64 { self.finality_depth.expect(Self::ERR_MSG) }
-    pub fn coinbase_maturity(&self) -> u64 { self.coinbase_maturity.expect(Self::ERR_MSG) }
-    pub fn pruning_depth(&self) -> u64 { self.pruning_depth.expect(Self::ERR_MSG) }
+    pub fn target_block_interval_ms(&self) -> u64 {
+        self.target_block_interval_ms.expect(Self::ERR_MSG)
+    }
+    pub fn epoch_length_blocks(&self) -> u64 {
+        self.epoch_length_blocks.expect(Self::ERR_MSG)
+    }
+    pub fn finality_depth(&self) -> u64 {
+        self.finality_depth.expect(Self::ERR_MSG)
+    }
+    pub fn coinbase_maturity(&self) -> u64 {
+        self.coinbase_maturity.expect(Self::ERR_MSG)
+    }
+    pub fn pruning_depth(&self) -> u64 {
+        self.pruning_depth.expect(Self::ERR_MSG)
+    }
 
     // DAG
-    pub fn ghostdag_k(&self) -> u64 { self.ghostdag_k.expect(Self::ERR_MSG) }
-    pub fn blocks_per_second(&self) -> u64 { self.blocks_per_second.expect(Self::ERR_MSG) }
-    pub fn leader_round_wave(&self) -> u32 { self.leader_round_wave.expect(Self::ERR_MSG) }
+    pub fn ghostdag_k(&self) -> u64 {
+        self.ghostdag_k.expect(Self::ERR_MSG)
+    }
+    pub fn blocks_per_second(&self) -> u64 {
+        self.blocks_per_second.expect(Self::ERR_MSG)
+    }
+    pub fn leader_round_wave(&self) -> u32 {
+        self.leader_round_wave.expect(Self::ERR_MSG)
+    }
 
     // Crypto
-    pub fn ml_dsa_pk_len(&self) -> u64 { self.ml_dsa_pk_len.expect(Self::ERR_MSG) }
-    pub fn ml_dsa_sk_len(&self) -> u64 { self.ml_dsa_sk_len.expect(Self::ERR_MSG) }
-    pub fn ml_dsa_sig_len(&self) -> u64 { self.ml_dsa_sig_len.expect(Self::ERR_MSG) }
-    pub fn ml_kem_pk_len(&self) -> u64 { self.ml_kem_pk_len.expect(Self::ERR_MSG) }
-    pub fn ml_kem_ct_len(&self) -> u64 { self.ml_kem_ct_len.expect(Self::ERR_MSG) }
-    pub fn nist_security_level(&self) -> u8 { self.nist_security_level.expect(Self::ERR_MSG) }
+    pub fn ml_dsa_pk_len(&self) -> u64 {
+        self.ml_dsa_pk_len.expect(Self::ERR_MSG)
+    }
+    pub fn ml_dsa_sk_len(&self) -> u64 {
+        self.ml_dsa_sk_len.expect(Self::ERR_MSG)
+    }
+    pub fn ml_dsa_sig_len(&self) -> u64 {
+        self.ml_dsa_sig_len.expect(Self::ERR_MSG)
+    }
+    pub fn ml_kem_pk_len(&self) -> u64 {
+        self.ml_kem_pk_len.expect(Self::ERR_MSG)
+    }
+    pub fn ml_kem_ct_len(&self) -> u64 {
+        self.ml_kem_ct_len.expect(Self::ERR_MSG)
+    }
+    pub fn nist_security_level(&self) -> u8 {
+        self.nist_security_level.expect(Self::ERR_MSG)
+    }
 
     // Tokenomics
-    pub fn max_supply(&self) -> u128 { self.max_supply.expect(Self::ERR_MSG) }
-    pub fn decimals(&self) -> u32 { self.decimals.expect(Self::ERR_MSG) }
-    pub fn initial_block_reward(&self) -> u64 { self.initial_block_reward.expect(Self::ERR_MSG) }
-    pub fn min_stake(&self) -> u64 { self.min_stake.expect(Self::ERR_MSG) }
-    pub fn dust_threshold(&self) -> u64 { self.dust_threshold.expect(Self::ERR_MSG) }
+    pub fn max_supply(&self) -> u128 {
+        self.max_supply.expect(Self::ERR_MSG)
+    }
+    pub fn decimals(&self) -> u32 {
+        self.decimals.expect(Self::ERR_MSG)
+    }
+    pub fn initial_block_reward(&self) -> u64 {
+        self.initial_block_reward.expect(Self::ERR_MSG)
+    }
+    pub fn min_stake(&self) -> u64 {
+        self.min_stake.expect(Self::ERR_MSG)
+    }
+    pub fn dust_threshold(&self) -> u64 {
+        self.dust_threshold.expect(Self::ERR_MSG)
+    }
 
     // Broadcaster / Subscriber (PQ-aware)
-    pub fn broadcaster_batch_size(&self) -> u32 { self.broadcaster_batch_size.expect(Self::ERR_MSG) }
-    pub fn broadcaster_window_size(&self) -> u32 { self.broadcaster_window_size.expect(Self::ERR_MSG) }
-    pub fn broadcaster_max_pending_bytes(&self) -> u64 { self.broadcaster_max_pending_bytes.expect(Self::ERR_MSG) }
-    pub fn broadcaster_max_batch_delay_ms(&self) -> u64 { self.broadcaster_max_batch_delay_ms.expect(Self::ERR_MSG) }
-    pub fn block_subscriber_buffer_capacity(&self) -> u32 { self.block_subscriber_buffer_capacity.expect(Self::ERR_MSG) }
+    pub fn broadcaster_batch_size(&self) -> u32 {
+        self.broadcaster_batch_size.expect(Self::ERR_MSG)
+    }
+    pub fn broadcaster_window_size(&self) -> u32 {
+        self.broadcaster_window_size.expect(Self::ERR_MSG)
+    }
+    pub fn broadcaster_max_pending_bytes(&self) -> u64 {
+        self.broadcaster_max_pending_bytes.expect(Self::ERR_MSG)
+    }
+    pub fn broadcaster_max_batch_delay_ms(&self) -> u64 {
+        self.broadcaster_max_batch_delay_ms.expect(Self::ERR_MSG)
+    }
+    pub fn block_subscriber_buffer_capacity(&self) -> u32 {
+        self.block_subscriber_buffer_capacity.expect(Self::ERR_MSG)
+    }
 
     // Network
-    pub fn max_p2p_message_size(&self) -> u64 { self.max_p2p_message_size.expect(Self::ERR_MSG) }
-    pub fn max_inbound_peers(&self) -> u64 { self.max_inbound_peers.expect(Self::ERR_MSG) }
-    pub fn max_outbound_peers(&self) -> u64 { self.max_outbound_peers.expect(Self::ERR_MSG) }
-    pub fn default_p2p_port(&self) -> u16 { self.default_p2p_port.expect(Self::ERR_MSG) }
-    pub fn default_rpc_port(&self) -> u16 { self.default_rpc_port.expect(Self::ERR_MSG) }
+    pub fn max_p2p_message_size(&self) -> u64 {
+        self.max_p2p_message_size.expect(Self::ERR_MSG)
+    }
+    pub fn max_inbound_peers(&self) -> u64 {
+        self.max_inbound_peers.expect(Self::ERR_MSG)
+    }
+    pub fn max_outbound_peers(&self) -> u64 {
+        self.max_outbound_peers.expect(Self::ERR_MSG)
+    }
+    pub fn default_p2p_port(&self) -> u16 {
+        self.default_p2p_port.expect(Self::ERR_MSG)
+    }
+    pub fn default_rpc_port(&self) -> u16 {
+        self.default_rpc_port.expect(Self::ERR_MSG)
+    }
 
     // Script
-    pub fn max_script_size(&self) -> u64 { self.max_script_size.expect(Self::ERR_MSG) }
-    pub fn max_stack_size(&self) -> u64 { self.max_stack_size.expect(Self::ERR_MSG) }
-    pub fn max_ops_per_script(&self) -> u64 { self.max_ops_per_script.expect(Self::ERR_MSG) }
+    pub fn max_script_size(&self) -> u64 {
+        self.max_script_size.expect(Self::ERR_MSG)
+    }
+    pub fn max_stack_size(&self) -> u64 {
+        self.max_stack_size.expect(Self::ERR_MSG)
+    }
+    pub fn max_ops_per_script(&self) -> u64 {
+        self.max_ops_per_script.expect(Self::ERR_MSG)
+    }
 
     // Chain identity
-    pub fn mainnet_chain_id(&self) -> u32 { self.mainnet_chain_id.expect(Self::ERR_MSG) }
-    pub fn testnet_chain_id(&self) -> u32 { self.testnet_chain_id.expect(Self::ERR_MSG) }
+    pub fn mainnet_chain_id(&self) -> u32 {
+        self.mainnet_chain_id.expect(Self::ERR_MSG)
+    }
+    pub fn testnet_chain_id(&self) -> u32 {
+        self.testnet_chain_id.expect(Self::ERR_MSG)
+    }
 
     /// Lookup any config attribute by string name.
     pub fn lookup_attr(&self, name: &str) -> Option<String> {
@@ -436,9 +547,9 @@ impl ProtocolConfig {
 
         // Block timing
         cfg.target_block_interval_ms = Some(2_000);
-        cfg.epoch_length_blocks = Some(43_200);   // 24h at 2s blocks
-        cfg.finality_depth = Some(30);            // ~1 min at 2s blocks
-        cfg.coinbase_maturity = Some(300);        // ~10 min at 2s blocks
+        cfg.epoch_length_blocks = Some(43_200); // 24h at 2s blocks
+        cfg.finality_depth = Some(30); // ~1 min at 2s blocks
+        cfg.coinbase_maturity = Some(300); // ~10 min at 2s blocks
         cfg.pruning_depth = Some(1_000);
 
         // GhostDAG / DAG
@@ -457,22 +568,22 @@ impl ProtocolConfig {
         // Tokenomics
         cfg.max_supply = Some(10_000_000_000 * 1_000_000_000); // 10B MISAKA
         cfg.decimals = Some(9);
-        cfg.initial_block_reward = Some(50 * 1_000_000_000);   // 50 MISAKA
-        cfg.min_stake = Some(10_000_000 * 1_000_000_000);      // 10M MISAKA
+        cfg.initial_block_reward = Some(50 * 1_000_000_000); // 50 MISAKA
+        cfg.min_stake = Some(10_000_000 * 1_000_000_000); // 10M MISAKA
         cfg.dust_threshold = Some(1_000);
 
         // Broadcaster / Subscriber — PQ-aware tuning
         // Sui block payloads are ~64B sig; ML-DSA-65 is 3,309B (50× larger).
         // Strategy: fewer, larger batches to amortise TLS/framing overhead,
         // with a hard 50ms latency ceiling.
-        cfg.broadcaster_batch_size = Some(5);           // Sui ~20 → 1/4
-        cfg.broadcaster_window_size = Some(3);          // Sui ~10 → 1/3
+        cfg.broadcaster_batch_size = Some(5); // Sui ~20 → 1/4
+        cfg.broadcaster_window_size = Some(3); // Sui ~10 → 1/3
         cfg.broadcaster_max_pending_bytes = Some(64 * 1024 * 1024); // 64 MiB
-        cfg.broadcaster_max_batch_delay_ms = Some(50);  // latency ceiling
+        cfg.broadcaster_max_batch_delay_ms = Some(50); // latency ceiling
         cfg.block_subscriber_buffer_capacity = Some(2000); // ~6.3 MiB at 3.3 KB/sig
 
         // Network
-        cfg.max_p2p_message_size = Some(32 * 1024 * 1024);     // 32 MiB
+        cfg.max_p2p_message_size = Some(32 * 1024 * 1024); // 32 MiB
         cfg.max_inbound_peers = Some(117);
         cfg.max_outbound_peers = Some(8);
         cfg.default_p2p_port = Some(16111);

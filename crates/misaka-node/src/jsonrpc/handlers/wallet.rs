@@ -1,16 +1,23 @@
-use serde_json::{json, Value};
-use crate::dag_rpc::DagRpcState;
 use super::HandlerResult;
+use crate::dag_rpc::DagRpcState;
 use crate::jsonrpc::error::*;
+use serde_json::{json, Value};
 
 /// `getbalance` — sum UTXO amounts for a given address.
 ///
 /// Scans UTXO set via spending_pubkey → address derivation (same as
 /// the existing dag_get_utxos_by_address endpoint). O(N) scan.
 pub async fn get_balance(rpc: &DagRpcState, params: &Value) -> HandlerResult {
-    let address = params.get(0)
+    let address = params
+        .get(0)
         .and_then(|v| v.as_str())
-        .ok_or_else(|| (INVALID_PARAMS, "params[0]: expected address string".into(), None))?
+        .ok_or_else(|| {
+            (
+                INVALID_PARAMS,
+                "params[0]: expected address string".into(),
+                None,
+            )
+        })?
         .trim();
 
     let s = rpc.node.read().await;
@@ -39,9 +46,16 @@ pub async fn get_balance(rpc: &DagRpcState, params: &Value) -> HandlerResult {
 
 /// `listunspent` — list UTXOs for a given address.
 pub async fn list_unspent(rpc: &DagRpcState, params: &Value) -> HandlerResult {
-    let address = params.get(0)
+    let address = params
+        .get(0)
         .and_then(|v| v.as_str())
-        .ok_or_else(|| (INVALID_PARAMS, "params[0]: expected address string".into(), None))?
+        .ok_or_else(|| {
+            (
+                INVALID_PARAMS,
+                "params[0]: expected address string".into(),
+                None,
+            )
+        })?
         .trim();
 
     let s = rpc.node.read().await;
@@ -73,9 +87,13 @@ pub async fn list_unspent(rpc: &DagRpcState, params: &Value) -> HandlerResult {
 
 /// `validateaddress` — check whether an address string is valid.
 pub async fn validate_address(params: &Value) -> HandlerResult {
-    let address = params.get(0)
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| (INVALID_PARAMS, "params[0]: expected address string".into(), None))?;
+    let address = params.get(0).and_then(|v| v.as_str()).ok_or_else(|| {
+        (
+            INVALID_PARAMS,
+            "params[0]: expected address string".into(),
+            None,
+        )
+    })?;
 
     // Format-only validation (no chain_id required)
     let is_valid = misaka_types::address::validate_format(address).is_ok();

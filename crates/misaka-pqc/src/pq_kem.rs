@@ -141,8 +141,7 @@ impl MlKemCiphertext {
         if bytes.len() != ML_KEM_CT_LEN {
             return Err(CryptoError::MlKemInvalidCtLen(bytes.len()));
         }
-        mlkem768::Ciphertext::from_bytes(bytes)
-            .map_err(|_| CryptoError::MlKemDecapsulateFailed)?;
+        mlkem768::Ciphertext::from_bytes(bytes).map_err(|_| CryptoError::MlKemDecapsulateFailed)?;
         Ok(Self(bytes.to_vec()))
     }
 
@@ -236,7 +235,9 @@ impl PqKemBackend for MlKem768Backend {
         _seed32: &[u8; 32],
     ) -> Result<(Self::Ciphertext, Self::SharedSecret), CryptoError> {
         #[cfg(debug_assertions)]
-        eprintln!("[SEC-WARN] encapsulate_deterministic: seed ignored — pqcrypto-mlkem uses system RNG");
+        eprintln!(
+            "[SEC-WARN] encapsulate_deterministic: seed ignored — pqcrypto-mlkem uses system RNG"
+        );
         Self::encapsulate(pk)
     }
 

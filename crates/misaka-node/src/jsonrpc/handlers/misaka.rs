@@ -1,7 +1,7 @@
-use serde_json::{json, Value};
-use crate::dag_rpc::DagRpcState;
 use super::HandlerResult;
+use crate::dag_rpc::DagRpcState;
 use crate::jsonrpc::error::*;
+use serde_json::{json, Value};
 
 // ═══════════════════════════════════════════════════════════════
 //  DAG Info / Tips / Block
@@ -65,9 +65,13 @@ pub async fn get_dag_tips(rpc: &DagRpcState) -> HandlerResult {
 
 /// `misaka_getDagBlock` — look up a DAG block by hash.
 pub async fn get_dag_block(rpc: &DagRpcState, params: &Value) -> HandlerResult {
-    let hash_hex = params.get(0)
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| (INVALID_PARAMS, "params[0]: expected block hash hex".into(), None))?;
+    let hash_hex = params.get(0).and_then(|v| v.as_str()).ok_or_else(|| {
+        (
+            INVALID_PARAMS,
+            "params[0]: expected block hash hex".into(),
+            None,
+        )
+    })?;
 
     let hash_bytes: [u8; 32] = hex::decode(hash_hex)
         .map_err(|e| (INVALID_PARAMS, format!("invalid hex: {}", e), None))?
@@ -77,8 +81,13 @@ pub async fn get_dag_block(rpc: &DagRpcState, params: &Value) -> HandlerResult {
     let s = rpc.node.read().await;
     let snapshot = s.dag_store.snapshot();
 
-    let header = snapshot.get_header(&hash_bytes)
-        .ok_or_else(|| (BLOCK_NOT_FOUND, format!("block {} not found", hash_hex), None))?;
+    let header = snapshot.get_header(&hash_bytes).ok_or_else(|| {
+        (
+            BLOCK_NOT_FOUND,
+            format!("block {} not found", hash_hex),
+            None,
+        )
+    })?;
     let ghostdag = snapshot.get_ghostdag_data(&hash_bytes);
     let txs = s.dag_store.get_block_txs(&hash_bytes);
 
@@ -127,7 +136,8 @@ pub async fn get_virtual_chain(rpc: &DagRpcState, params: &Value) -> HandlerResu
         Some(hex_str) => {
             let bytes = hex::decode(hex_str)
                 .map_err(|e| (INVALID_PARAMS, format!("invalid hex: {}", e), None))?;
-            let arr: [u8; 32] = bytes.try_into()
+            let arr: [u8; 32] = bytes
+                .try_into()
                 .map_err(|_| (INVALID_PARAMS, "hash must be 32 bytes".into(), None))?;
             Some(arr)
         }
@@ -256,14 +266,17 @@ pub async fn get_epoch_info(rpc: &DagRpcState) -> HandlerResult {
 /// `misaka_getValidatorSet` — list of known validators.
 pub async fn get_validator_set(rpc: &DagRpcState) -> HandlerResult {
     let s = rpc.node.read().await;
-    let validators: Vec<Value> = s.known_validators
+    let validators: Vec<Value> = s
+        .known_validators
         .iter()
-        .map(|v| json!({
-            "validatorId": hex::encode(v.validator_id),
-            "stakeWeight": v.stake_weight.to_string(),
-            "publicKeyHex": hex::encode(&v.public_key.bytes),
-            "isActive": v.is_active,
-        }))
+        .map(|v| {
+            json!({
+                "validatorId": hex::encode(v.validator_id),
+                "stakeWeight": v.stake_weight.to_string(),
+                "publicKeyHex": hex::encode(&v.public_key.bytes),
+                "isActive": v.is_active,
+            })
+        })
         .collect();
 
     Ok(json!({
@@ -274,9 +287,13 @@ pub async fn get_validator_set(rpc: &DagRpcState) -> HandlerResult {
 
 /// `misaka_getValidatorById` — look up a validator by ID.
 pub async fn get_validator_by_id(rpc: &DagRpcState, params: &Value) -> HandlerResult {
-    let id_hex = params.get(0)
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| (INVALID_PARAMS, "params[0]: expected validator_id hex".into(), None))?;
+    let id_hex = params.get(0).and_then(|v| v.as_str()).ok_or_else(|| {
+        (
+            INVALID_PARAMS,
+            "params[0]: expected validator_id hex".into(),
+            None,
+        )
+    })?;
 
     let id_bytes: [u8; 32] = hex::decode(id_hex)
         .map_err(|e| (INVALID_PARAMS, format!("invalid hex: {}", e), None))?
@@ -284,7 +301,8 @@ pub async fn get_validator_by_id(rpc: &DagRpcState, params: &Value) -> HandlerRe
         .map_err(|_| (INVALID_PARAMS, "validator_id must be 32 bytes".into(), None))?;
 
     let s = rpc.node.read().await;
-    let validator = s.known_validators
+    let validator = s
+        .known_validators
         .iter()
         .find(|v| v.validator_id == id_bytes);
 
@@ -296,7 +314,11 @@ pub async fn get_validator_by_id(rpc: &DagRpcState, params: &Value) -> HandlerRe
             "publicKeyBytes": v.public_key.bytes.len(),
             "isActive": v.is_active,
         })),
-        None => Err((BLOCK_NOT_FOUND, format!("validator {} not found", id_hex), None)),
+        None => Err((
+            BLOCK_NOT_FOUND,
+            format!("validator {} not found", id_hex),
+            None,
+        )),
     }
 }
 
@@ -313,13 +335,10 @@ pub async fn get_staking_info(_rpc: &DagRpcState, _params: &Value) -> HandlerRes
 pub async fn get_anonymity_set(rpc: &DagRpcState, params: &Value) -> HandlerResult {
     use sha3::{Digest, Sha3_256};
 
-    let tx_hash_hex = params.get(0)
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let output_index = params.get(1)
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0) as u32;
-    let set_size = params.get(2)
+    let tx_hash_hex = params.get(0).and_then(|v| v.as_str()).unwrap_or("");
+    let output_index = params.get(1).and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+    let set_size = params
+        .get(2)
         .and_then(|v| v.as_u64())
         .unwrap_or(16)
         .max(4)
@@ -337,7 +356,11 @@ pub async fn get_anonymity_set(rpc: &DagRpcState, params: &Value) -> HandlerResu
     if all_keys.len() < set_size {
         return Err((
             INTERNAL_ERROR,
-            format!("insufficient UTXOs for anonymity set: need {}, have {}", set_size, all_keys.len()),
+            format!(
+                "insufficient UTXOs for anonymity set: need {}, have {}",
+                set_size,
+                all_keys.len()
+            ),
             None,
         ));
     }
@@ -400,12 +423,20 @@ pub async fn get_anonymity_set(rpc: &DagRpcState, params: &Value) -> HandlerResu
 
 /// `misaka_getBlocksRange` — iterate blocks by blue score range.
 pub async fn get_blocks_range(rpc: &DagRpcState, params: &Value) -> HandlerResult {
-    let from_score = params.get(0)
-        .and_then(|v| v.as_u64())
-        .ok_or_else(|| (INVALID_PARAMS, "params[0]: expected from_score (u64)".into(), None))?;
-    let to_score = params.get(1)
-        .and_then(|v| v.as_u64())
-        .ok_or_else(|| (INVALID_PARAMS, "params[1]: expected to_score (u64)".into(), None))?;
+    let from_score = params.get(0).and_then(|v| v.as_u64()).ok_or_else(|| {
+        (
+            INVALID_PARAMS,
+            "params[0]: expected from_score (u64)".into(),
+            None,
+        )
+    })?;
+    let to_score = params.get(1).and_then(|v| v.as_u64()).ok_or_else(|| {
+        (
+            INVALID_PARAMS,
+            "params[1]: expected to_score (u64)".into(),
+            None,
+        )
+    })?;
 
     if to_score < from_score || (to_score - from_score) > 1000 {
         return Err((INVALID_PARAMS, "range must be <= 1000 blocks".into(), None));
@@ -453,12 +484,20 @@ pub async fn get_blocks_range(rpc: &DagRpcState, params: &Value) -> HandlerResul
 
 /// `misaka_getTxsRange` — iterate transactions in a blue score range.
 pub async fn get_txs_range(rpc: &DagRpcState, params: &Value) -> HandlerResult {
-    let from_score = params.get(0)
-        .and_then(|v| v.as_u64())
-        .ok_or_else(|| (INVALID_PARAMS, "params[0]: expected from_score (u64)".into(), None))?;
-    let to_score = params.get(1)
-        .and_then(|v| v.as_u64())
-        .ok_or_else(|| (INVALID_PARAMS, "params[1]: expected to_score (u64)".into(), None))?;
+    let from_score = params.get(0).and_then(|v| v.as_u64()).ok_or_else(|| {
+        (
+            INVALID_PARAMS,
+            "params[0]: expected from_score (u64)".into(),
+            None,
+        )
+    })?;
+    let to_score = params.get(1).and_then(|v| v.as_u64()).ok_or_else(|| {
+        (
+            INVALID_PARAMS,
+            "params[1]: expected to_score (u64)".into(),
+            None,
+        )
+    })?;
 
     if to_score < from_score || (to_score - from_score) > 1000 {
         return Err((INVALID_PARAMS, "range must be <= 1000 blocks".into(), None));
@@ -506,5 +545,9 @@ pub async fn get_txs_range(rpc: &DagRpcState, params: &Value) -> HandlerResult {
 
 /// Return a NOT_IMPLEMENTED error with a descriptive reason.
 pub fn not_implemented(reason: &str) -> HandlerResult {
-    Err((NOT_IMPLEMENTED, format!("not implemented: {}", reason), None))
+    Err((
+        NOT_IMPLEMENTED,
+        format!("not implemented: {}", reason),
+        None,
+    ))
 }

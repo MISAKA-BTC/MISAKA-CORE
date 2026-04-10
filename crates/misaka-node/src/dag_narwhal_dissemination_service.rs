@@ -396,8 +396,7 @@ mod tests {
     };
     use misaka_storage::utxo_set::UtxoSet;
     use misaka_types::utxo::{
-        OutputRef, TxInput, TxOutput, TxType, UtxoTransaction, UTXO_TX_VERSION,
-        UTXO_TX_VERSION,
+        OutputRef, TxInput, TxOutput, TxType, UtxoTransaction, UTXO_TX_VERSION, UTXO_TX_VERSION,
     };
     use std::collections::HashSet;
     use std::path::PathBuf;

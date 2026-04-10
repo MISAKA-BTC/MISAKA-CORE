@@ -324,10 +324,8 @@ impl RpcServiceImpl {
 
         // SEC-FIX H-6/H-7: Admin methods require localhost or explicit auth.
         // Default-deny for dangerous operations to prevent remote exploitation.
-        if matches!(
-            method,
-            "shutdown" | "addPeer" | "banPeer" | "submitBlock"
-        ) && !Self::is_local_client(client_id)
+        if matches!(method, "shutdown" | "addPeer" | "banPeer" | "submitBlock")
+            && !Self::is_local_client(client_id)
         {
             return Err(RpcError::Forbidden(format!(
                 "admin method '{}' requires local access",

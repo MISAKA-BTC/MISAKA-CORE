@@ -30,7 +30,7 @@ use super::core_engine::CoreEngine;
 use super::dag_state::{DagState, DagStateConfig};
 use super::leader_schedule::LeaderSchedule;
 use super::metrics::ConsensusMetrics;
-use super::runtime::{ConsensusRuntime, RuntimeConfig, spawn_consensus_runtime};
+use super::runtime::{spawn_consensus_runtime, ConsensusRuntime, RuntimeConfig};
 use super::slot_equivocation_ledger::SlotEquivocationLedger;
 use super::store::ConsensusStore;
 use crate::narwhal_ordering::linearizer::{CommitFinalizer, Linearizer};
@@ -84,7 +84,8 @@ pub struct AuthorityNode {
     /// Consensus message channel sender.
     msg_tx: Option<tokio::sync::mpsc::Sender<super::runtime::ConsensusMessage>>,
     /// Committed output receiver.
-    commit_rx: Option<tokio::sync::mpsc::Receiver<crate::narwhal_ordering::linearizer::LinearizedOutput>>,
+    commit_rx:
+        Option<tokio::sync::mpsc::Receiver<crate::narwhal_ordering::linearizer::LinearizedOutput>>,
     /// Block broadcast receiver.
     block_rx: Option<tokio::sync::mpsc::Receiver<VerifiedBlock>>,
     /// Runtime task handle.
@@ -160,10 +161,7 @@ impl AuthorityNode {
 
         // Wait for runtime to finish
         if let Some(handle) = self.runtime_handle.take() {
-            match tokio::time::timeout(
-                std::time::Duration::from_secs(30),
-                handle,
-            ).await {
+            match tokio::time::timeout(std::time::Duration::from_secs(30), handle).await {
                 Ok(Ok(())) => info!("Consensus runtime stopped cleanly"),
                 Ok(Err(e)) => error!("Consensus runtime panicked: {}", e),
                 Err(_) => warn!("Consensus runtime shutdown timed out after 30s"),
@@ -236,7 +234,10 @@ impl AuthorityNode {
     }
 
     /// Take the commit receiver (can only be taken once).
-    pub fn take_commit_rx(&mut self) -> Option<tokio::sync::mpsc::Receiver<crate::narwhal_ordering::linearizer::LinearizedOutput>> {
+    pub fn take_commit_rx(
+        &mut self,
+    ) -> Option<tokio::sync::mpsc::Receiver<crate::narwhal_ordering::linearizer::LinearizedOutput>>
+    {
         self.commit_rx.take()
     }
 
@@ -246,7 +247,9 @@ impl AuthorityNode {
     }
 
     /// Get the consensus message sender (for submitting blocks from peers).
-    pub fn msg_sender(&self) -> Option<&tokio::sync::mpsc::Sender<super::runtime::ConsensusMessage>> {
+    pub fn msg_sender(
+        &self,
+    ) -> Option<&tokio::sync::mpsc::Sender<super::runtime::ConsensusMessage>> {
         self.msg_tx.as_ref()
     }
 
@@ -313,12 +316,16 @@ mod tests {
             recover_on_start: false,
         };
 
-        let mut node = AuthorityNode::start(ctx_epoch0, None, config.clone()).await.unwrap();
+        let mut node = AuthorityNode::start(ctx_epoch0, None, config.clone())
+            .await
+            .unwrap();
         assert_eq!(node.context().epoch(), 0);
 
         // Transition to epoch 1
         let ctx_epoch1 = Context::new_for_test(4);
-        node.transition_epoch(ctx_epoch1, None, config).await.unwrap();
+        node.transition_epoch(ctx_epoch1, None, config)
+            .await
+            .unwrap();
         assert_eq!(node.state(), AuthorityNodeState::Running);
 
         node.stop().await;

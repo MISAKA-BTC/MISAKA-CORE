@@ -352,15 +352,21 @@ impl ConsensusNetworkServer {
             let permit = match self.conn_semaphore.clone().try_acquire_owned() {
                 Ok(permit) => permit,
                 Err(_) => {
-                    warn!("Connection limit reached ({}), rejecting {}", MAX_INBOUND_CONNECTIONS, addr);
+                    warn!(
+                        "Connection limit reached ({}), rejecting {}",
+                        MAX_INBOUND_CONNECTIONS, addr
+                    );
                     drop(stream);
                     continue;
                 }
             };
 
-            debug!("Accepted connection from {} ({}/{} slots)", addr,
+            debug!(
+                "Accepted connection from {} ({}/{} slots)",
+                addr,
                 MAX_INBOUND_CONNECTIONS - self.conn_semaphore.available_permits(),
-                MAX_INBOUND_CONNECTIONS);
+                MAX_INBOUND_CONNECTIONS
+            );
 
             let block_tx = self.block_tx.clone();
             let subscriptions = self.subscriptions.clone();
@@ -403,7 +409,9 @@ impl ConsensusNetworkServer {
             let msg = match tokio::time::timeout(
                 std::time::Duration::from_secs(MESSAGE_READ_TIMEOUT_SECS),
                 read_message(&mut stream),
-            ).await {
+            )
+            .await
+            {
                 Ok(Ok(msg)) => msg,
                 Ok(Err(e)) => return Err(e),
                 Err(_) => return Err(ProtocolError::Timeout),
@@ -444,7 +452,9 @@ impl ConsensusNetworkServer {
                         sc.record(peer_id, super::peer_scorer::PeerSignal::VerifyFailed);
                         warn!(
                             "Block rejected at network edge: author={}, round={}, sig_len={}",
-                            block.author, block.round, block.signature.len()
+                            block.author,
+                            block.round,
+                            block.signature.len()
                         );
                         continue;
                     }

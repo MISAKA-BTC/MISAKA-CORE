@@ -65,7 +65,10 @@ impl BlockSubscriberConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BlockSubscriberError {
     /// Buffer is at capacity; oldest block was evicted to make room.
-    Evicted { evicted_round: u32, evicted_author: AuthorityIndex },
+    Evicted {
+        evicted_round: u32,
+        evicted_author: AuthorityIndex,
+    },
 }
 
 impl fmt::Display for BlockSubscriberError {
@@ -151,8 +154,8 @@ impl BlockSubscriber {
     /// if an eviction occurred (informational, not fatal).
     pub fn receive(&mut self, block: VerifiedBlock) -> Result<(), BlockSubscriberError> {
         let inner = block.inner();
-        let bytes = inner.signature.len() + 256
-            + inner.transactions.iter().map(|t| t.len()).sum::<usize>();
+        let bytes =
+            inner.signature.len() + 256 + inner.transactions.iter().map(|t| t.len()).sum::<usize>();
         self.metrics.blocks_received += 1;
         self.metrics.bytes_received += bytes as u64;
 

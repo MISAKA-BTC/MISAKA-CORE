@@ -1,11 +1,12 @@
-use serde_json::{json, Value};
-use crate::dag_rpc::DagRpcState;
 use super::HandlerResult;
+use crate::dag_rpc::DagRpcState;
 use crate::jsonrpc::error::*;
+use serde_json::{json, Value};
 
 /// `getrawtransaction` — look up a transaction by txid.
 pub async fn get_raw_transaction(rpc: &DagRpcState, params: &Value) -> HandlerResult {
-    let txid_hex = params.get(0)
+    let txid_hex = params
+        .get(0)
         .and_then(|v| v.as_str())
         .ok_or_else(|| (INVALID_PARAMS, "params[0]: expected txid hex".into(), None))?;
     let verbose = params.get(1).and_then(|v| v.as_bool()).unwrap_or(false);
@@ -47,12 +48,16 @@ pub async fn get_raw_transaction(rpc: &DagRpcState, params: &Value) -> HandlerRe
 
 /// `decoderawtransaction` — decode a hex-encoded transaction without state.
 pub async fn decode_raw_transaction(params: &Value) -> HandlerResult {
-    let hex_tx = params.get(0)
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| (INVALID_PARAMS, "params[0]: expected hex-encoded tx".into(), None))?;
+    let hex_tx = params.get(0).and_then(|v| v.as_str()).ok_or_else(|| {
+        (
+            INVALID_PARAMS,
+            "params[0]: expected hex-encoded tx".into(),
+            None,
+        )
+    })?;
 
-    let bytes = hex::decode(hex_tx)
-        .map_err(|e| (INVALID_PARAMS, format!("invalid hex: {}", e), None))?;
+    let bytes =
+        hex::decode(hex_tx).map_err(|e| (INVALID_PARAMS, format!("invalid hex: {}", e), None))?;
     // Phase 2c-A: borsh decoding for hex-encoded tx
     let tx: misaka_types::utxo::UtxoTransaction = borsh::from_slice(&bytes)
         .map_err(|e| (INVALID_PARAMS, format!("invalid tx format: {}", e), None))?;
@@ -64,12 +69,16 @@ pub async fn decode_raw_transaction(params: &Value) -> HandlerResult {
 ///
 /// Goes through verify_dag_pre_admission for validation.
 pub async fn send_raw_transaction(rpc: &DagRpcState, params: &Value) -> HandlerResult {
-    let hex_tx = params.get(0)
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| (INVALID_PARAMS, "params[0]: expected hex-encoded tx".into(), None))?;
+    let hex_tx = params.get(0).and_then(|v| v.as_str()).ok_or_else(|| {
+        (
+            INVALID_PARAMS,
+            "params[0]: expected hex-encoded tx".into(),
+            None,
+        )
+    })?;
 
-    let bytes = hex::decode(hex_tx)
-        .map_err(|e| (INVALID_PARAMS, format!("invalid hex: {}", e), None))?;
+    let bytes =
+        hex::decode(hex_tx).map_err(|e| (INVALID_PARAMS, format!("invalid hex: {}", e), None))?;
 
     // Size limit (same as dag_submit_tx: 128 KiB)
     if bytes.len() > 131_072 {
@@ -81,11 +90,20 @@ pub async fn send_raw_transaction(rpc: &DagRpcState, params: &Value) -> HandlerR
     }
 
     // Phase 2c-A: borsh decoding for hex-encoded tx
-    let tx: misaka_types::utxo::UtxoTransaction = borsh::from_slice(&bytes)
-        .map_err(|e| (TX_REJECTED_INVALID_FORMAT, format!("invalid tx format: {}", e), None))?;
+    let tx: misaka_types::utxo::UtxoTransaction = borsh::from_slice(&bytes).map_err(|e| {
+        (
+            TX_REJECTED_INVALID_FORMAT,
+            format!("invalid tx format: {}", e),
+            None,
+        )
+    })?;
 
     if let Err(e) = tx.validate_structure() {
-        return Err((TX_REJECTED_INVALID_FORMAT, format!("structural validation failed: {}", e), None));
+        return Err((
+            TX_REJECTED_INVALID_FORMAT,
+            format!("structural validation failed: {}", e),
+            None,
+        ));
     }
 
     let tx_hash = tx.tx_hash();
@@ -94,9 +112,8 @@ pub async fn send_raw_transaction(rpc: &DagRpcState, params: &Value) -> HandlerR
     // mempool admission, key-image checks, and dissemination pipeline.
     // Pre-admission validation (signature verification, UTXO existence)
     // is done inline via the validation closure.
-    let dissemination = crate::dag_tx_dissemination_service::DagTxDisseminationService::new(
-        rpc.node.clone(),
-    );
+    let dissemination =
+        crate::dag_tx_dissemination_service::DagTxDisseminationService::new(rpc.node.clone());
     // Simple admission without the full verify_dag_pre_admission (which is
     // crate-private in dag_rpc). The dissemination service already checks
     // key-image conflicts and mempool capacity.
@@ -110,19 +127,27 @@ pub async fn send_raw_transaction(rpc: &DagRpcState, params: &Value) -> HandlerR
 
 /// `gettxout` — look up a specific UTXO.
 pub async fn get_tx_out(rpc: &DagRpcState, params: &Value) -> HandlerResult {
-    let txid_hex = params.get(0)
+    let txid_hex = params
+        .get(0)
         .and_then(|v| v.as_str())
         .ok_or_else(|| (INVALID_PARAMS, "params[0]: expected txid hex".into(), None))?;
-    let vout = params.get(1)
-        .and_then(|v| v.as_u64())
-        .ok_or_else(|| (INVALID_PARAMS, "params[1]: expected vout (u64)".into(), None))? as u32;
+    let vout = params.get(1).and_then(|v| v.as_u64()).ok_or_else(|| {
+        (
+            INVALID_PARAMS,
+            "params[1]: expected vout (u64)".into(),
+            None,
+        )
+    })? as u32;
 
     let tx_hash: [u8; 32] = hex::decode(txid_hex)
         .map_err(|e| (INVALID_PARAMS, format!("invalid hex: {}", e), None))?
         .try_into()
         .map_err(|_| (INVALID_PARAMS, "txid must be 32 bytes".into(), None))?;
 
-    let outref = misaka_types::utxo::OutputRef { tx_hash, output_index: vout };
+    let outref = misaka_types::utxo::OutputRef {
+        tx_hash,
+        output_index: vout,
+    };
 
     let s = rpc.node.read().await;
     match s.utxo_set.get(&outref) {

@@ -85,9 +85,11 @@ impl ValidatorIdentity {
             let meta = std::fs::metadata(path)?;
             let mode = meta.permissions().mode() & 0o777;
             if mode != 0o600 {
-                return Err(IdentityError::InsecurePermissions(
-                    format!("got 0o{:o}, expected 0o600; run: chmod 600 {}", mode, path.display())
-                ));
+                return Err(IdentityError::InsecurePermissions(format!(
+                    "got 0o{:o}, expected 0o600; run: chmod 600 {}",
+                    mode,
+                    path.display()
+                )));
             }
         }
 
@@ -170,11 +172,15 @@ impl ValidatorIdentity {
 
     /// Public key bytes (1952 bytes).
     #[must_use]
-    pub fn public_key(&self) -> &[u8] { &self.pk_bytes }
+    pub fn public_key(&self) -> &[u8] {
+        &self.pk_bytes
+    }
 
     /// SHA3-256 fingerprint of public key.
     #[must_use]
-    pub fn fingerprint(&self) -> [u8; 32] { self.fingerprint }
+    pub fn fingerprint(&self) -> [u8; 32] {
+        self.fingerprint
+    }
 
     /// Public key as the validator transport type used by `misaka-p2p`.
     pub fn validator_public_key(
@@ -195,10 +201,14 @@ impl ValidatorIdentity {
                 self.sk_bytes.len()
             )));
         }
-        misaka_crypto::validator_sig::ValidatorPqSecretKey::from_bytes(&self.sk_bytes)
-            .ok_or_else(|| IdentityError::KeyParse(
-                format!("secret key must be 4032 bytes, got {}", self.sk_bytes.len())
-            ))
+        misaka_crypto::validator_sig::ValidatorPqSecretKey::from_bytes(&self.sk_bytes).ok_or_else(
+            || {
+                IdentityError::KeyParse(format!(
+                    "secret key must be 4032 bytes, got {}",
+                    self.sk_bytes.len()
+                ))
+            },
+        )
     }
 
     /// Sign a block digest with the validator's ML-DSA-65 secret key.
@@ -210,10 +220,8 @@ impl ValidatorIdentity {
     pub fn sign_block(&self, block_digest: &[u8]) -> Result<Vec<u8>, IdentityError> {
         let sk = misaka_pqc::pq_sign::MlDsaSecretKey::from_bytes(&self.sk_bytes)
             .map_err(|e| IdentityError::KeyParse(e.to_string()))?;
-        let sig = misaka_pqc::pq_sign::ml_dsa_sign_raw(
-            &sk,
-            block_digest,
-        ).map_err(|e| IdentityError::SignFailed(e.to_string()))?;
+        let sig = misaka_pqc::pq_sign::ml_dsa_sign_raw(&sk, block_digest)
+            .map_err(|e| IdentityError::SignFailed(e.to_string()))?;
         Ok(sig.as_bytes().to_vec())
     }
 
@@ -224,9 +232,8 @@ impl ValidatorIdentity {
     pub fn sign_raw(&self, msg: &[u8]) -> Result<Vec<u8>, IdentityError> {
         let sk = misaka_pqc::pq_sign::MlDsaSecretKey::from_bytes(&self.sk_bytes)
             .map_err(|e| IdentityError::KeyParse(e.to_string()))?;
-        let sig = misaka_pqc::pq_sign::ml_dsa_sign_raw(
-            &sk, msg,
-        ).map_err(|e| IdentityError::SignFailed(e.to_string()))?;
+        let sig = misaka_pqc::pq_sign::ml_dsa_sign_raw(&sk, msg)
+            .map_err(|e| IdentityError::SignFailed(e.to_string()))?;
         Ok(sig.as_bytes().to_vec())
     }
 
@@ -272,8 +279,11 @@ mod tests {
 
         let id1 = ValidatorIdentity::load_or_create(&path).unwrap();
         let id2 = ValidatorIdentity::load_or_create(&path).unwrap();
-        assert_eq!(id1.fingerprint(), id2.fingerprint(),
-            "REGRESSION: second startup must use same identity");
+        assert_eq!(
+            id1.fingerprint(),
+            id2.fingerprint(),
+            "REGRESSION: second startup must use same identity"
+        );
     }
 
     #[test]
@@ -317,11 +327,8 @@ mod tests {
         // Verify the signature with raw (no domain) verify
         let pk = misaka_pqc::pq_sign::MlDsaPublicKey::from_bytes(id.public_key()).unwrap();
         let sig_obj = misaka_pqc::pq_sign::MlDsaSignature::from_bytes(&sig).unwrap();
-        misaka_pqc::pq_sign::ml_dsa_verify_raw(
-            &pk,
-            b"test block digest",
-            &sig_obj,
-        ).expect("block signature must verify with raw verify");
+        misaka_pqc::pq_sign::ml_dsa_verify_raw(&pk, b"test block digest", &sig_obj)
+            .expect("block signature must verify with raw verify");
     }
 
     #[cfg(unix)]

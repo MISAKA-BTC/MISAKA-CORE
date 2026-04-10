@@ -38,7 +38,9 @@ pub fn execute_block(
 
     // SEC-FIX: Use checked_add to prevent silent overflow in release builds.
     // 256 txs with fee near u64::MAX would wrap to a small number.
-    let total_fees: u64 = block.transactions.iter()
+    let total_fees: u64 = block
+        .transactions
+        .iter()
         .map(|vtx| vtx.tx.fee)
         .try_fold(0u64, |acc, fee| acc.checked_add(fee))
         .ok_or(BlockError::FeeOverflow)?;
@@ -96,7 +98,9 @@ mod tests {
                     false,
                 )
                 .unwrap();
-            utxo_set.register_spending_key(outref, w.ml_dsa_pk().to_vec()).expect("test: register_spending_key");
+            utxo_set
+                .register_spending_key(outref, w.ml_dsa_pk().to_vec())
+                .expect("test: register_spending_key");
         }
         (utxo_set, wallets, a)
     }

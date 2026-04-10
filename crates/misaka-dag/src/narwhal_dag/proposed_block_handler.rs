@@ -333,7 +333,10 @@ mod tests {
         let outcome = handler.handle(make_block(1, 0));
 
         assert!(!outcome.wal_flushed);
-        assert!(!outcome.broadcast_enqueued, "must NOT broadcast after WAL failure");
+        assert!(
+            !outcome.broadcast_enqueued,
+            "must NOT broadcast after WAL failure"
+        );
         assert!(!outcome.self_vote_registered);
         assert_eq!(handler.metrics().wal_flush_errors, 1);
     }
@@ -356,7 +359,10 @@ mod tests {
         let o2 = handler.handle(make_block(2, 0));
         assert!(!o2.broadcast_enqueued);
         assert!(o2.backpressure);
-        assert!(o2.wal_flushed, "WAL must still flush even under back-pressure");
+        assert!(
+            o2.wal_flushed,
+            "WAL must still flush even under back-pressure"
+        );
         assert!(o2.self_vote_registered, "self-vote must still register");
     }
 

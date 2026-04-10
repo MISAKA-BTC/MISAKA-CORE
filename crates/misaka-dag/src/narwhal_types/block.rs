@@ -30,7 +30,20 @@ pub type BlockTimestampMs = u64;
 pub type Transaction = Vec<u8>;
 
 /// Slot = (round, authority).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    BorshSerialize,
+    BorshDeserialize,
+)]
 pub struct Slot {
     pub round: Round,
     pub authority: AuthorityIndex,
@@ -47,7 +60,19 @@ impl Slot {
 // ═══════════════════════════════════════════════════════════
 
 /// 32-byte block digest (BLAKE3).
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    BorshSerialize,
+    BorshDeserialize,
+)]
 pub struct BlockDigest(pub [u8; 32]);
 
 impl fmt::Debug for BlockDigest {
@@ -67,7 +92,18 @@ impl fmt::Display for BlockDigest {
 // ═══════════════════════════════════════════════════════════
 
 /// Lightweight reference to a block: (round, author, digest).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    BorshSerialize,
+    BorshDeserialize,
+)]
 pub struct BlockRef {
     pub round: Round,
     pub author: AuthorityIndex,
@@ -213,10 +249,7 @@ impl Block {
     /// Uses NarwhalBlockPayload wrapped in IntentMessage for
     /// domain separation and cross-chain replay protection.
     /// The content_digest is the existing BLAKE3 block digest.
-    pub fn signing_digest_v2(
-        &self,
-        app_id: misaka_types::intent::AppId,
-    ) -> BlockDigest {
+    pub fn signing_digest_v2(&self, app_id: misaka_types::intent::AppId) -> BlockDigest {
         use misaka_types::intent::{IntentMessage, IntentScope};
         use misaka_types::intent_payloads::NarwhalBlockPayload;
 
@@ -480,13 +513,10 @@ impl MlDsa65TestSigner {
 #[cfg(any(test, feature = "test-utils"))]
 impl BlockSigner for MlDsa65TestSigner {
     fn sign(&self, message: &[u8]) -> Vec<u8> {
-        misaka_pqc::pq_sign::ml_dsa_sign_raw(
-            &self.keypair.secret_key,
-            message,
-        )
-        .expect("test ML-DSA-65 signing must succeed")
-        .as_bytes()
-        .to_vec()
+        misaka_pqc::pq_sign::ml_dsa_sign_raw(&self.keypair.secret_key, message)
+            .expect("test ML-DSA-65 signing must succeed")
+            .as_bytes()
+            .to_vec()
     }
     fn public_key(&self) -> Vec<u8> {
         self.keypair.public_key.as_bytes().to_vec()

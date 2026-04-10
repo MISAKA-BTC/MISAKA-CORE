@@ -120,7 +120,11 @@ fn evict_oldest_entries(map: &mut HashMap<IpAddr, (Instant, u32)>, max: usize) {
     for (ip, _) in entries.into_iter().take(to_remove) {
         map.remove(&ip);
     }
-    tracing::debug!("rate limiter: evicted {} oldest entries (remaining: {})", to_remove, map.len());
+    tracing::debug!(
+        "rate limiter: evicted {} oldest entries (remaining: {})",
+        to_remove,
+        map.len()
+    );
 }
 
 /// SEC-FIX TM-15: Extended write path coverage to include all state-changing APIs.

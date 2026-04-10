@@ -120,8 +120,14 @@ impl TxBuilder {
     /// This function uses a custom `"MISAKA:tx:sighash:v1:"` domain separator
     /// that is INCOMPATIBLE with the executor's `IntentMessage::signing_digest()`.
     /// Transactions signed with this digest will be rejected by the DAG executor.
-    #[deprecated(note = "SEC-FIX: Use compute_intent_signing_digest() for executor-compatible signatures")]
-    pub(crate) fn compute_sig_hash(&self, unsigned: &UnsignedTransaction, input_index: usize) -> [u8; 32] {
+    #[deprecated(
+        note = "SEC-FIX: Use compute_intent_signing_digest() for executor-compatible signatures"
+    )]
+    pub(crate) fn compute_sig_hash(
+        &self,
+        unsigned: &UnsignedTransaction,
+        input_index: usize,
+    ) -> [u8; 32] {
         use sha3::{Digest, Sha3_256};
         let mut h = Sha3_256::new();
         h.update(b"MISAKA:tx:sighash:v1:");

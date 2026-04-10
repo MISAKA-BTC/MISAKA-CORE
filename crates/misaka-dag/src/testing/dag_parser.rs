@@ -54,7 +54,11 @@ pub fn parse_dag_signed(input: &str) -> Result<DagBuilder, ParseError> {
 #[derive(Debug, thiserror::Error)]
 pub enum ParseError {
     #[error("line {line}, col {col}: {msg}")]
-    Syntax { line: usize, col: usize, msg: String },
+    Syntax {
+        line: usize,
+        col: usize,
+        msg: String,
+    },
 }
 
 // ── Internal parser ────────────────────────────────────────
@@ -200,8 +204,7 @@ impl<'a> Parser<'a> {
 
                 // Check if any authority has equivocation
                 let max_eq = auths.iter().map(|(_, eq)| *eq).max().unwrap_or(0);
-                let auth_indices: Vec<AuthorityIndex> =
-                    auths.iter().map(|(a, _)| *a).collect();
+                let auth_indices: Vec<AuthorityIndex> = auths.iter().map(|(a, _)| *a).collect();
 
                 if max_eq > 0 {
                     // Build without equivocation first for non-equivocating authorities
@@ -365,8 +368,7 @@ impl<'a> Parser<'a> {
             match self.peek() {
                 Some(c) if c.is_ascii_uppercase() => {
                     self.adv();
-                    let auth =
-                        letter_to_authority(c).ok_or_else(|| self.err("bad authority"))?;
+                    let auth = letter_to_authority(c).ok_or_else(|| self.err("bad authority"))?;
                     // Count trailing '!' for equivocation
                     let mut eq_count = 0;
                     while self.peek() == Some('!') {

@@ -7,8 +7,8 @@
 //! while `NodeConfig` is flat. This module provides a TOML-specific wrapper that
 //! deserializes nested TOML and converts to `NodeConfig`.
 
-use serde::Deserialize;
 use super::node_config::NodeConfig;
+use serde::Deserialize;
 
 /// Top-level TOML configuration structure.
 ///
@@ -91,9 +91,10 @@ impl From<TomlConfig> for NodeConfig {
     fn from(t: TomlConfig) -> Self {
         let defaults = NodeConfig::default();
 
-        let rpc_bind = t.rpc.bind.or_else(|| {
-            t.rpc.port.map(|p| format!("0.0.0.0:{}", p))
-        });
+        let rpc_bind = t
+            .rpc
+            .bind
+            .or_else(|| t.rpc.port.map(|p| format!("0.0.0.0:{}", p)));
 
         NodeConfig {
             chain_id: t.chain.chain_id.unwrap_or(defaults.chain_id),

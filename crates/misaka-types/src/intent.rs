@@ -146,11 +146,7 @@ impl IntentMessage {
     ///
     /// This is the preferred constructor. It takes any borsh-serializable
     /// payload struct and serializes it into the `payload` field.
-    pub fn wrap<T: borsh::BorshSerialize>(
-        scope: IntentScope,
-        app_id: AppId,
-        payload: &T,
-    ) -> Self {
+    pub fn wrap<T: borsh::BorshSerialize>(scope: IntentScope, app_id: AppId, payload: &T) -> Self {
         Self {
             scope,
             app_id,
@@ -167,9 +163,7 @@ impl IntentMessage {
     pub fn signing_digest(&self) -> [u8; 32] {
         let mut h = Sha3_256::new();
         h.update(b"MISAKA-INTENT:v1:");
-        h.update(
-            &borsh::to_vec(self).expect("IntentMessage borsh serialization must not fail"),
-        );
+        h.update(&borsh::to_vec(self).expect("IntentMessage borsh serialization must not fail"));
         h.finalize().into()
     }
 }
@@ -196,7 +190,11 @@ mod tests {
     fn intent_message_different_scope_different_digest() {
         let app_id = AppId::new(2, [0xAA; 32]);
         let payload = vec![1, 2, 3];
-        let msg1 = IntentMessage::new(IntentScope::TransparentTransfer, app_id.clone(), payload.clone());
+        let msg1 = IntentMessage::new(
+            IntentScope::TransparentTransfer,
+            app_id.clone(),
+            payload.clone(),
+        );
         let msg2 = IntentMessage::new(IntentScope::StakeDeposit, app_id, payload);
         assert_ne!(msg1.signing_digest(), msg2.signing_digest());
     }

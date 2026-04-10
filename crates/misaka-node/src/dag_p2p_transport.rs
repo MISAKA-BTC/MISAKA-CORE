@@ -546,8 +546,7 @@ async fn tcp_initiator_handshake(
         // SEC-FIX: Removed responder pk bytes from error message to prevent
         // information leakage of peer identities via connection logs.
         return Err(
-            "TOFU rejected: no expected_responder_pk provided. Pin the peer's public key."
-                .into(),
+            "TOFU rejected: no expected_responder_pk provided. Pin the peer's public key.".into(),
         );
     }
 
@@ -1140,10 +1139,14 @@ mod tests {
 
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.expect("accept");
-            let (_hs, keys) =
-                tcp_responder_handshake(&mut stream, &keypair_a.public_key, &keypair_a.secret_key, None)
-                    .await
-                    .expect("responder handshake");
+            let (_hs, keys) = tcp_responder_handshake(
+                &mut stream,
+                &keypair_a.public_key,
+                &keypair_a.secret_key,
+                None,
+            )
+            .await
+            .expect("responder handshake");
             let (mut reader, _) = tokio::io::split(stream);
             let plaintext = read_encrypted_frame(&mut reader, &keys.recv_key)
                 .await
@@ -1221,10 +1224,14 @@ mod tests {
 
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.expect("accept");
-            let (_hs, keys) =
-                tcp_responder_handshake(&mut stream, &keypair_a.public_key, &keypair_a.secret_key, None)
-                    .await
-                    .expect("responder handshake");
+            let (_hs, keys) = tcp_responder_handshake(
+                &mut stream,
+                &keypair_a.public_key,
+                &keypair_a.secret_key,
+                None,
+            )
+            .await
+            .expect("responder handshake");
             let (_, mut writer) = tokio::io::split(stream);
             let mut nonce = NonceCounter::new();
             let message = DagP2pMessage::DagHello {
@@ -1308,10 +1315,14 @@ mod tests {
         let server_inbound = inbound_tx.clone();
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.expect("accept");
-            let (hs, dk) =
-                tcp_responder_handshake(&mut stream, &keypair_a.public_key, &keypair_a.secret_key, None)
-                    .await
-                    .expect("responder handshake");
+            let (hs, dk) = tcp_responder_handshake(
+                &mut stream,
+                &keypair_a.public_key,
+                &keypair_a.secret_key,
+                None,
+            )
+            .await
+            .expect("responder handshake");
             let peer_id = derive_peer_id(&hs.peer_pk, 31337);
             let (otx, orx) = mpsc::channel::<Vec<u8>>(PEER_OUTBOUND_CAPACITY);
             let hello = initial_dag_hello_bytes(
@@ -1410,10 +1421,14 @@ mod tests {
 
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.expect("accept");
-            let _ =
-                tcp_responder_handshake(&mut stream, &responder.public_key, &responder.secret_key, None)
-                    .await
-                    .expect("responder handshake");
+            let _ = tcp_responder_handshake(
+                &mut stream,
+                &responder.public_key,
+                &responder.secret_key,
+                None,
+            )
+            .await
+            .expect("responder handshake");
             tokio::time::sleep(Duration::from_millis(100)).await;
         });
 
@@ -1961,7 +1976,8 @@ pub async fn run_dag_p2p_transport(
                     };
 
                     // ── Handshake (while half-open slot is held) ──
-                    let (hs, dk) = match tcp_responder_handshake(&mut stream, &pk, &sk, None).await {
+                    let (hs, dk) = match tcp_responder_handshake(&mut stream, &pk, &sk, None).await
+                    {
                         Ok(r) => r,
                         Err(e) => {
                             warn!("Handshake fail {}: {}", addr, e);

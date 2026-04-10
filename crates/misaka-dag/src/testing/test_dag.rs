@@ -123,8 +123,16 @@ mod tests {
         )
         .unwrap();
         // A references 3, B references 4, C references 2, D references 4
-        let a = b.blocks_at_round(2).into_iter().find(|b| b.author() == 0).unwrap();
-        let c = b.blocks_at_round(2).into_iter().find(|b| b.author() == 2).unwrap();
+        let a = b
+            .blocks_at_round(2)
+            .into_iter()
+            .find(|b| b.author() == 0)
+            .unwrap();
+        let c = b
+            .blocks_at_round(2)
+            .into_iter()
+            .find(|b| b.author() == 2)
+            .unwrap();
         assert_eq!(a.ancestors().len(), 3);
         assert_eq!(c.ancestors().len(), 2);
     }
@@ -169,7 +177,10 @@ mod tests {
         };
         let refs1 = build();
         let refs2 = build();
-        assert_eq!(refs1, refs2, "DAG rebuilds must produce identical block refs");
+        assert_eq!(
+            refs1, refs2,
+            "DAG rebuilds must produce identical block refs"
+        );
     }
 
     /// Equivocation DAG: same author/round, 2 blocks.

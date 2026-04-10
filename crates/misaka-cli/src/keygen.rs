@@ -132,7 +132,10 @@ pub fn run(output_dir: &str, name: &str, chain_id: u32) -> Result<()> {
     println!();
     println!("✅ Wallet generated successfully!");
     println!("   Address:   {}", address);
-    println!("   Legacy KI: {}", hex::encode(&spending.canonical_spend_id()[..8]));
+    println!(
+        "   Legacy KI: {}",
+        hex::encode(&spending.canonical_spend_id()[..8])
+    );
     println!("   Tx KI:     {}", hex::encode(&tx_spend_id[..8]));
     println!();
     println!("   Secret key: {}", filepath.display());

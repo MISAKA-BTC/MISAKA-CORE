@@ -245,7 +245,8 @@ fn test_rocksdb_double_recovery_idempotent() {
     let committee = Committee::new_for_test(4);
 
     let store1 = RocksDbConsensusStore::open(&store_path).unwrap();
-    let dag1 = recover_dag_state(&store1, committee.clone(), DagStateConfig::default(), None).unwrap();
+    let dag1 =
+        recover_dag_state(&store1, committee.clone(), DagStateConfig::default(), None).unwrap();
     drop(store1);
 
     let store2 = RocksDbConsensusStore::open(&store_path).unwrap();

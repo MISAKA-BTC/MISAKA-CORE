@@ -19,12 +19,12 @@ pub mod invariant;
 pub mod mcs1;
 pub mod network_protocol;
 pub mod object;
+pub mod pq_kem_compat; // Phase 2c-B: retained for deserialization compat
 pub mod quarantine;
 pub mod scheme;
 pub mod seed_entry;
-pub mod pq_kem_compat; // Phase 2c-B: retained for deserialization compat
-pub mod tx_signable;
 pub mod transaction;
+pub mod tx_signable;
 pub mod utxo;
 pub mod validator;
 pub mod validator_stake_tx;

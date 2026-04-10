@@ -42,11 +42,9 @@ async fn test_notifier_scoped_events() {
     // Send a VirtualDaaScoreChanged notification (should be filtered out)
     let n2 = Notification {
         event_type: EventType::VirtualDaaScoreChanged,
-        payload: NotificationPayload::VirtualDaaScoreChanged(
-            VirtualDaaScoreChangedNotification {
-                virtual_daa_score: 100,
-            },
-        ),
+        payload: NotificationPayload::VirtualDaaScoreChanged(VirtualDaaScoreChangedNotification {
+            virtual_daa_score: 100,
+        }),
     };
     notifier.notify(n2).await.expect("filtered");
 
@@ -64,11 +62,9 @@ async fn test_notifier_try_notify() {
 
     let notification = Notification {
         event_type: EventType::SinkBlueScoreChanged,
-        payload: NotificationPayload::SinkBlueScoreChanged(
-            SinkBlueScoreChangedNotification {
-                sink_blue_score: 42,
-            },
-        ),
+        payload: NotificationPayload::SinkBlueScoreChanged(SinkBlueScoreChangedNotification {
+            sink_blue_score: 42,
+        }),
     };
     notifier.try_notify(notification).expect("try_notify");
 

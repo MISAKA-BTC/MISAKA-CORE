@@ -108,7 +108,9 @@ pub fn hash_eq(a: &Hash, b: &Hash) -> bool {
 /// (MuHash3072 over a large prime, as used by Kaspa/Bitcoin).
 ///
 /// TODO(MAINNET-BLOCKER): Replace XOR with multiplication mod large prime.
-#[deprecated(note = "SEC-FIX NM-14: XOR accumulation is NOT a secure multiset commitment. Replace with MuHash3072 before mainnet.")]
+#[deprecated(
+    note = "SEC-FIX NM-14: XOR accumulation is NOT a secure multiset commitment. Replace with MuHash3072 before mainnet."
+)]
 pub struct MuHash {
     state: [u8; 32],
 }

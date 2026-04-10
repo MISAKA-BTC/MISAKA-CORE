@@ -63,7 +63,9 @@ impl CheckpointManager {
         voter_stakes: HashMap<[u8; 32], u64>,
     ) -> Self {
         // SEC-FIX T3-H4: saturating fold to prevent u64 overflow
-        let total_stake: u64 = voter_stakes.values().fold(0u64, |a, &s| a.saturating_add(s));
+        let total_stake: u64 = voter_stakes
+            .values()
+            .fold(0u64, |a, &s| a.saturating_add(s));
         Self {
             next_sequence: 0,
             epoch,

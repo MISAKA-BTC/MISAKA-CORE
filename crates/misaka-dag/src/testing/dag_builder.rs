@@ -40,8 +40,9 @@ use std::sync::Arc;
 // ML-DSA-65 key generation is expensive (~1-2ms per keypair).
 // We cache a set of validators per committee size to avoid
 // regenerating keys for every test.
-static CACHED_VALIDATORS: std::sync::OnceLock<std::sync::Mutex<HashMap<usize, Arc<TestValidatorSet>>>> =
-    std::sync::OnceLock::new();
+static CACHED_VALIDATORS: std::sync::OnceLock<
+    std::sync::Mutex<HashMap<usize, Arc<TestValidatorSet>>>,
+> = std::sync::OnceLock::new();
 
 pub fn cached_validator_set(n: usize) -> Arc<TestValidatorSet> {
     let map = CACHED_VALIDATORS.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
@@ -821,7 +822,10 @@ mod tests {
         };
         let d1 = build();
         let d2 = build();
-        assert_eq!(d1, d2, "deterministic DAG builds must produce identical digests");
+        assert_eq!(
+            d1, d2,
+            "deterministic DAG builds must produce identical digests"
+        );
     }
 
     #[test]

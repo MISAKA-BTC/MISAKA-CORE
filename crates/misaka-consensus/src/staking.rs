@@ -586,7 +586,9 @@ impl StakingRegistry {
         let slash_bps = severity.penalty_bps(&self.config);
         // Audit fix: u128 arithmetic to prevent overflow on large stakes
         let slash_amount = ((a.stake_amount as u128) * (slash_bps as u128) / 10_000) as u64;
-        let reporter_reward = ((slash_amount as u128) * (self.config.slash_reporter_reward_bps as u128) / 10_000) as u64;
+        let reporter_reward = ((slash_amount as u128)
+            * (self.config.slash_reporter_reward_bps as u128)
+            / 10_000) as u64;
         a.stake_amount = a.stake_amount.saturating_sub(slash_amount);
         a.cumulative_slashed += slash_amount;
         a.last_slash_epoch = Some(current_epoch);

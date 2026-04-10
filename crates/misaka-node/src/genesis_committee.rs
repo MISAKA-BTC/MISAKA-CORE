@@ -103,13 +103,14 @@ impl GenesisCommitteeManifest {
                 return Err(ManifestError::DuplicateIndex(v.authority_index));
             }
             // PK length
-            let pk_bytes = Self::decode_pk(&v.public_key)
-                .map_err(|_| ManifestError::WrongKeyLength(
-                    v.authority_index, v.public_key.len() / 2, PK_LEN
-                ))?;
+            let pk_bytes = Self::decode_pk(&v.public_key).map_err(|_| {
+                ManifestError::WrongKeyLength(v.authority_index, v.public_key.len() / 2, PK_LEN)
+            })?;
             if pk_bytes.len() != PK_LEN {
                 return Err(ManifestError::WrongKeyLength(
-                    v.authority_index, pk_bytes.len(), PK_LEN
+                    v.authority_index,
+                    pk_bytes.len(),
+                    PK_LEN,
                 ));
             }
             // No duplicate PK
@@ -126,12 +127,12 @@ impl GenesisCommitteeManifest {
 
     /// Convert to a `Committee` for the DAG consensus layer.
     pub fn to_committee(&self) -> Result<Committee, ManifestError> {
-        let authorities: Vec<Authority> = self.validators.iter()
+        let authorities: Vec<Authority> = self
+            .validators
+            .iter()
             .map(|v| {
                 let pk = Self::decode_pk(&v.public_key)
-                    .map_err(|_| ManifestError::WrongKeyLength(
-                        v.authority_index, 0, PK_LEN
-                    ))?;
+                    .map_err(|_| ManifestError::WrongKeyLength(v.authority_index, 0, PK_LEN))?;
                 Ok(Authority {
                     hostname: v.network_address.clone(),
                     stake: v.stake,
@@ -164,19 +165,24 @@ mod tests {
     use super::*;
 
     fn sample_manifest(n: usize) -> GenesisCommitteeManifest {
-        let validators: Vec<GenesisValidator> = (0..n).map(|i| {
-            let pk = vec![0xAA; PK_LEN];
-            let mut pk_varied = pk.clone();
-            pk_varied[0] = i as u8; // make each PK unique
-            GenesisValidator {
-                authority_index: i as u32,
-                public_key: format!("0x{}", hex::encode(&pk_varied)),
-                stake: 1000,
-                network_address: format!("validator-{}.test:16111", i),
-                solana_stake_account: None,
-            }
-        }).collect();
-        GenesisCommitteeManifest { epoch: 0, validators }
+        let validators: Vec<GenesisValidator> = (0..n)
+            .map(|i| {
+                let pk = vec![0xAA; PK_LEN];
+                let mut pk_varied = pk.clone();
+                pk_varied[0] = i as u8; // make each PK unique
+                GenesisValidator {
+                    authority_index: i as u32,
+                    public_key: format!("0x{}", hex::encode(&pk_varied)),
+                    stake: 1000,
+                    network_address: format!("validator-{}.test:16111", i),
+                    solana_stake_account: None,
+                }
+            })
+            .collect();
+        GenesisCommitteeManifest {
+            epoch: 0,
+            validators,
+        }
     }
 
     #[test]
@@ -187,7 +193,10 @@ mod tests {
 
     #[test]
     fn test_empty_committee_rejected() {
-        let m = GenesisCommitteeManifest { epoch: 0, validators: vec![] };
+        let m = GenesisCommitteeManifest {
+            epoch: 0,
+            validators: vec![],
+        };
         assert!(matches!(m.validate(), Err(ManifestError::EmptyCommittee)));
     }
 
@@ -237,7 +246,8 @@ mod tests {
         let pk0 = hex::encode(vec![0x00u8; PK_LEN]);
         let pk1 = hex::encode(vec![0x01u8; PK_LEN]);
 
-        let toml_content = format!(r#"
+        let toml_content = format!(
+            r#"
 [committee]
 epoch = 0
 
@@ -252,7 +262,8 @@ authority_index = 1
 public_key = "0x{pk1}"
 stake = 1000
 network_address = "v1.test:16111"
-"#);
+"#
+        );
         std::fs::write(&path, toml_content).unwrap();
 
         let m = GenesisCommitteeManifest::load(&path).unwrap();

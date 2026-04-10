@@ -166,10 +166,7 @@ impl VoteRateLimiter {
     /// Check if a peer is within their vote budget for the given epoch.
     /// Returns true if allowed, false if the peer exceeded their limit.
     pub fn check(&mut self, peer_id: &[u8], epoch: u64) -> bool {
-        let entry = self
-            .counts
-            .entry(peer_id.to_vec())
-            .or_insert((epoch, 0));
+        let entry = self.counts.entry(peer_id.to_vec()).or_insert((epoch, 0));
         if entry.0 != epoch {
             *entry = (epoch, 0); // Reset on new epoch
         }

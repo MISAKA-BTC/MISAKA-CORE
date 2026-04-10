@@ -449,8 +449,7 @@ mod tests {
 
     #[test]
     fn test_capability_flags() {
-        let flags =
-            capabilities_to_flags(&[Capability::SpendLimited, Capability::Reserved0x0010]);
+        let flags = capabilities_to_flags(&[Capability::SpendLimited, Capability::Reserved0x0010]);
         assert!(Capability::SpendLimited.is_in(flags));
         assert!(Capability::Reserved0x0010.is_in(flags));
         assert!(!Capability::ValidatorSignOnly.is_in(flags));

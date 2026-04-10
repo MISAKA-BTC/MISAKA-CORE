@@ -3,17 +3,25 @@
 //! Phase 2c-B: privacy layer fully removed. All transfers are transparent
 //! with ML-DSA-65 direct signatures.
 
-use borsh::{BorshDeserialize, BorshSerialize};
 use crate::error::MisakaError;
 use crate::mcs1;
+use borsh::{BorshDeserialize, BorshSerialize};
 // Phase 2c-B: privacy imports removed.
 use sha3::{Digest as Sha3Digest, Sha3_256};
 
 /// Reference to a previous output (UTXO pointer).
 #[derive(
-    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash,
-    serde::Serialize, serde::Deserialize,
-    BorshSerialize, BorshDeserialize,
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+    BorshSerialize,
+    BorshDeserialize,
 )]
 pub struct OutputRef {
     pub tx_hash: [u8; 32],
@@ -42,7 +50,16 @@ pub struct TxInput {
 ///
 /// Phase 2c-B: privacy fields deleted. Uses `address` directly.
 /// Phase 3 will migrate to P2PKH (script_pubkey_hash: [u8; 32]).
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, BorshSerialize, BorshDeserialize)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    BorshSerialize,
+    BorshDeserialize,
+)]
 pub struct TxOutput {
     pub amount: u64,
     /// Recipient address (32 bytes). Phase 3 replaces with script_pubkey_hash.
@@ -432,7 +449,10 @@ mod tests {
             version: UTXO_TX_VERSION,
             tx_type: TxType::SystemEmission,
             inputs: vec![TxInput {
-                utxo_refs: vec![OutputRef { tx_hash: [1; 32], output_index: 0 }],
+                utxo_refs: vec![OutputRef {
+                    tx_hash: [1; 32],
+                    output_index: 0,
+                }],
                 proof: vec![],
             }],
             outputs: vec![TxOutput {

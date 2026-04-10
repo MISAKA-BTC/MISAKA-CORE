@@ -130,7 +130,9 @@ impl ApiKeyState {
 
     /// Legacy constructor for backward compatibility (no chain_id check).
     /// Use `from_env_checked()` for production.
-    #[deprecated(note = "Use from_env_checked(chain_id) instead — from_env bypasses mainnet safety checks")]
+    #[deprecated(
+        note = "Use from_env_checked(chain_id) instead — from_env bypasses mainnet safety checks"
+    )]
     pub fn from_env() -> Self {
         Self::from_env_checked(0).unwrap_or_else(|_| Self {
             required_key: std::env::var("MISAKA_RPC_API_KEY")

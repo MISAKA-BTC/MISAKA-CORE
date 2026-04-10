@@ -377,11 +377,7 @@ mod tests {
         f.set_leader(2, 0);
         f.dag().layer(2).authorities(&[0]).fully_connected().build();
         // Only 1 voter — not enough for quorum of 3
-        f.dag()
-            .layer(3)
-            .authorities(&[0])
-            .fully_connected()
-            .build();
+        f.dag().layer(3).authorities(&[0]).fully_connected().build();
         f.assert_direct_undecided(2);
     }
 
@@ -411,11 +407,7 @@ mod tests {
         f.set_leader(4, 0);
         f.dag().layer(2).authorities(&[0]).fully_connected().build();
         // Voter does NOT reference leader (skips authority 0)
-        f.dag()
-            .layer(3)
-            .authorities(&[1])
-            .skip_ancestor(0)
-            .build();
+        f.dag().layer(3).authorities(&[1]).skip_ancestor(0).build();
         // Anchor via voter only → leader NOT in causal history → skip
         f.dag()
             .layer(4)

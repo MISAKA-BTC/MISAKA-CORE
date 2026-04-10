@@ -189,10 +189,7 @@ pub fn reconcile_mempool(
         }
 
         // SpendTag conflict check (O(k) where k = number of spent_tags per TX)
-        let has_conflict = entry
-            .spent_tags
-            .iter()
-            .any(|nf| spent_tag_set.contains(nf));
+        let has_conflict = entry.spent_tags.iter().any(|nf| spent_tag_set.contains(nf));
 
         if has_conflict {
             entry_status.insert(entry.tx_hash, EntryStatus::SpendTagConflict);

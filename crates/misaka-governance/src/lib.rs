@@ -170,7 +170,12 @@ impl Proposal {
     /// Compute proposal ID from content.
     /// SEC-FIX TM-12: Includes action hash to prevent collision between
     /// proposals with the same title but different actions.
-    pub fn compute_id(proposer: &Address, title: &str, submitted_at: u64, action: &ProposalAction) -> ProposalId {
+    pub fn compute_id(
+        proposer: &Address,
+        title: &str,
+        submitted_at: u64,
+        action: &ProposalAction,
+    ) -> ProposalId {
         let mut h = Sha3_256::new();
         h.update(b"MISAKA:governance:proposal_id:v2:");
         h.update(proposer);
@@ -211,7 +216,8 @@ impl Proposal {
 
         // Quorum check (yes + no only; abstain counts for participation but not quorum)
         // SEC-FIX M-21: Use u128 intermediate to prevent u64 overflow
-        let quorum_required = ((self.total_power_snapshot as u128) * (params.quorum_bps as u128) / 10_000) as u64;
+        let quorum_required =
+            ((self.total_power_snapshot as u128) * (params.quorum_bps as u128) / 10_000) as u64;
         let yes_plus_no = yes.saturating_add(no);
         if yes_plus_no < quorum_required {
             self.status = ProposalStatus::Rejected;
@@ -220,7 +226,8 @@ impl Proposal {
 
         // Approval threshold (of yes+no votes, not total)
         // SEC-FIX M-21: Use u128 intermediate to prevent u64 overflow
-        let approval_required = ((yes_plus_no as u128) * (params.approval_threshold_bps as u128) / 10_000) as u64;
+        let approval_required =
+            ((yes_plus_no as u128) * (params.approval_threshold_bps as u128) / 10_000) as u64;
         if yes >= approval_required {
             self.status = ProposalStatus::Passed;
         } else {
@@ -434,14 +441,12 @@ impl GovernanceRegistry {
         // Passed proposals that have not been executed within retention_epochs
         // are also pruned to prevent unbounded growth.
         let retention_epochs = params.voting_period_epochs * 2 + params.execution_timelock_epochs;
-        self.proposals.retain(|_, p| {
-            match p.status {
-                ProposalStatus::Active => true,
-                ProposalStatus::Passed => {
-                    current_epoch.saturating_sub(p.voting_end) <= retention_epochs
-                }
-                _ => current_epoch.saturating_sub(p.voting_end) <= retention_epochs,
+        self.proposals.retain(|_, p| match p.status {
+            ProposalStatus::Active => true,
+            ProposalStatus::Passed => {
+                current_epoch.saturating_sub(p.voting_end) <= retention_epochs
             }
+            _ => current_epoch.saturating_sub(p.voting_end) <= retention_epochs,
         });
     }
 
@@ -685,6 +690,9 @@ mod tests {
         gov.cast_vote(&id, [2; 32], VoteChoice::Yes, 9999, 3)
             .unwrap();
         let vote = gov.get(&id).unwrap().votes.get(&[2; 32]).unwrap();
-        assert_eq!(vote.power, 400, "voting power should be capped at snapshot stake");
+        assert_eq!(
+            vote.power, 400,
+            "voting power should be capped at snapshot stake"
+        );
     }
 }

@@ -1,7 +1,7 @@
-use serde_json::{json, Value};
-use crate::dag_rpc::DagRpcState;
 use super::HandlerResult;
+use crate::dag_rpc::DagRpcState;
 use crate::jsonrpc::error::*;
+use serde_json::{json, Value};
 
 /// `getblockchaininfo` — summary of the DAG chain state.
 pub async fn get_blockchain_info(rpc: &DagRpcState) -> HandlerResult {
@@ -37,9 +37,13 @@ pub async fn get_best_block_hash(rpc: &DagRpcState) -> HandlerResult {
 
 /// `getblockhash` — hash of the block at a given height (blue score).
 pub async fn get_block_hash(rpc: &DagRpcState, params: &Value) -> HandlerResult {
-    let height = params.get(0)
-        .and_then(|v| v.as_u64())
-        .ok_or_else(|| (INVALID_PARAMS, "params[0]: expected height (u64)".into(), None))?;
+    let height = params.get(0).and_then(|v| v.as_u64()).ok_or_else(|| {
+        (
+            INVALID_PARAMS,
+            "params[0]: expected height (u64)".into(),
+            None,
+        )
+    })?;
 
     let s = rpc.node.read().await;
     let snapshot = s.dag_store.snapshot();
@@ -56,14 +60,22 @@ pub async fn get_block_hash(rpc: &DagRpcState, params: &Value) -> HandlerResult 
     }
     // Fallback: scan all known blocks via the tip chain walk
     // TODO: implement a height→hash index for O(1) lookup
-    Err((BLOCK_NOT_FOUND, format!("no block at height {}", height), None))
+    Err((
+        BLOCK_NOT_FOUND,
+        format!("no block at height {}", height),
+        None,
+    ))
 }
 
 /// `getblock` — block data by hash.
 pub async fn get_block(rpc: &DagRpcState, params: &Value) -> HandlerResult {
-    let hash_hex = params.get(0)
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| (INVALID_PARAMS, "params[0]: expected blockhash hex".into(), None))?;
+    let hash_hex = params.get(0).and_then(|v| v.as_str()).ok_or_else(|| {
+        (
+            INVALID_PARAMS,
+            "params[0]: expected blockhash hex".into(),
+            None,
+        )
+    })?;
     let _verbosity = params.get(1).and_then(|v| v.as_u64()).unwrap_or(1);
 
     let hash_bytes: [u8; 32] = hex::decode(hash_hex)
@@ -74,8 +86,13 @@ pub async fn get_block(rpc: &DagRpcState, params: &Value) -> HandlerResult {
     let s = rpc.node.read().await;
     let snapshot = s.dag_store.snapshot();
 
-    let header = snapshot.get_header(&hash_bytes)
-        .ok_or_else(|| (BLOCK_NOT_FOUND, format!("block {} not found", hash_hex), None))?;
+    let header = snapshot.get_header(&hash_bytes).ok_or_else(|| {
+        (
+            BLOCK_NOT_FOUND,
+            format!("block {} not found", hash_hex),
+            None,
+        )
+    })?;
     let ghostdag = snapshot.get_ghostdag_data(&hash_bytes);
     let txs = s.dag_store.get_block_txs(&hash_bytes);
 
@@ -100,9 +117,13 @@ pub async fn get_block(rpc: &DagRpcState, params: &Value) -> HandlerResult {
 
 /// `getblockheader` — block header (no transactions).
 pub async fn get_block_header(rpc: &DagRpcState, params: &Value) -> HandlerResult {
-    let hash_hex = params.get(0)
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| (INVALID_PARAMS, "params[0]: expected blockhash hex".into(), None))?;
+    let hash_hex = params.get(0).and_then(|v| v.as_str()).ok_or_else(|| {
+        (
+            INVALID_PARAMS,
+            "params[0]: expected blockhash hex".into(),
+            None,
+        )
+    })?;
 
     let hash_bytes: [u8; 32] = hex::decode(hash_hex)
         .map_err(|e| (INVALID_PARAMS, format!("invalid hex: {}", e), None))?
@@ -112,8 +133,13 @@ pub async fn get_block_header(rpc: &DagRpcState, params: &Value) -> HandlerResul
     let s = rpc.node.read().await;
     let snapshot = s.dag_store.snapshot();
 
-    let header = snapshot.get_header(&hash_bytes)
-        .ok_or_else(|| (BLOCK_NOT_FOUND, format!("block {} not found", hash_hex), None))?;
+    let header = snapshot.get_header(&hash_bytes).ok_or_else(|| {
+        (
+            BLOCK_NOT_FOUND,
+            format!("block {} not found", hash_hex),
+            None,
+        )
+    })?;
     let ghostdag = snapshot.get_ghostdag_data(&hash_bytes);
 
     Ok(json!({

@@ -788,7 +788,10 @@ mod tests {
         ));
 
         let ip = extract_ip(&req, true);
-        assert_eq!(ip, Some("203.0.113.10".parse::<IpAddr>().expect("forwarded")));
+        assert_eq!(
+            ip,
+            Some("203.0.113.10".parse::<IpAddr>().expect("forwarded"))
+        );
 
         std::env::remove_var("MISAKA_TRUSTED_PROXY_CIDR");
     }

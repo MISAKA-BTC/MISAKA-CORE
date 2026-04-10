@@ -181,9 +181,7 @@ impl TestnetConfig {
         // ── M7: Validate parsed seed entries ──
         for (i, seed) in self.parsed_seeds.iter().enumerate() {
             if let Err(e) = seed.validate() {
-                errors.push(ConfigError::Custom(format!(
-                    "seed_nodes[{}]: {}", i, e
-                )));
+                errors.push(ConfigError::Custom(format!("seed_nodes[{}]: {}", i, e)));
             }
         }
 

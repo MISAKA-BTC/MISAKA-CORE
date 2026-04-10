@@ -5,8 +5,8 @@
 //!
 //! Extracted from `misaka-node/src/config_validation.rs`.
 
-use serde::{Deserialize, Serialize};
 use super::error::ConfigError;
+use serde::{Deserialize, Serialize};
 
 /// Testnet-specific configuration.
 ///
@@ -69,7 +69,8 @@ impl TestnetConfig {
         }
         if self.min_ring_size > self.max_anonymity_set {
             errors.push(ConfigError::RingSizeExceedsAnonymitySet(
-                self.min_ring_size, self.max_anonymity_set,
+                self.min_ring_size,
+                self.max_anonymity_set,
             ));
         }
 
@@ -90,7 +91,11 @@ impl TestnetConfig {
             }
         }
 
-        if errors.is_empty() { Ok(()) } else { Err(errors) }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors)
+        }
     }
 
     /// Check if a ring scheme tag is allowed.

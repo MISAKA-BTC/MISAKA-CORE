@@ -193,23 +193,22 @@ fn derive_key(
     // NO memory-hard protection. GPU cracking was >1M hash/sec vs Argon2id's
     // <1 hash/sec with proper parameters. This directly endangered all wallet
     // private keys if keystore files were exfiltrated.
-    use argon2::{Argon2, Algorithm, Version, Params};
+    use argon2::{Algorithm, Argon2, Params, Version};
 
     let argon2_params = Params::new(
         params.memory_cost,
         params.time_cost,
         params.parallelism,
         Some(32),
-    ).map_err(|e| KeystoreError::Kdf(format!("argon2 params: {}", e)))?;
+    )
+    .map_err(|e| KeystoreError::Kdf(format!("argon2 params: {}", e)))?;
 
     let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, argon2_params);
 
     let mut okm = [0u8; 32];
-    argon2.hash_password_into(
-        password.as_bytes(),
-        salt,
-        &mut okm,
-    ).map_err(|e| KeystoreError::Kdf(format!("argon2id hash failed: {}", e)))?;
+    argon2
+        .hash_password_into(password.as_bytes(), salt, &mut okm)
+        .map_err(|e| KeystoreError::Kdf(format!("argon2id hash failed: {}", e)))?;
 
     Ok(okm)
 }

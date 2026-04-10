@@ -228,10 +228,7 @@ impl CoreEngine {
             leader_round_wave,
             blocks_processed: 0,
             commits_produced: 0,
-            app_id: misaka_types::intent::AppId::new(
-                chain_ctx.chain_id,
-                chain_ctx.genesis_hash,
-            ),
+            app_id: misaka_types::intent::AppId::new(chain_ctx.chain_id, chain_ctx.genesis_hash),
             committee,
             chain_ctx,
             ledger: SlotEquivocationLedger::new(),
@@ -297,7 +294,13 @@ impl CoreEngine {
             .map(|v| BlockRef::new(0, 0, BlockDigest(v.commit_digest.0)))
             .collect();
 
-        let block = self.build_and_sign_block(round, ancestors, ctx.transactions, commit_votes, ctx.state_root);
+        let block = self.build_and_sign_block(
+            round,
+            ancestors,
+            ctx.transactions,
+            commit_votes,
+            ctx.state_root,
+        );
 
         // Accept our own block — Scenario 10: detect self-equivocation
         let own_accept = dag_state.accept_block(block.clone());
@@ -872,7 +875,9 @@ impl CoreEngine {
         let smart = self.ancestor_selector.select_ancestors(dag_state, round);
         let quorum = self.committee.quorum_threshold();
         // SEC-FIX NM-2: saturating fold to prevent u64 overflow
-        let smart_stake: u64 = smart.iter().fold(0u64, |acc, r| acc.saturating_add(self.committee.stake(r.author)));
+        let smart_stake: u64 = smart.iter().fold(0u64, |acc, r| {
+            acc.saturating_add(self.committee.stake(r.author))
+        });
 
         if smart_stake >= quorum {
             smart
@@ -1217,7 +1222,10 @@ mod tests {
             CoreEngine::new(0, 0, committee.clone(), tvs.signer(0), verifier, chain_ctx);
         let mut dag = DagState::new(committee, DagStateConfig::default());
 
-        let block = engine.propose_block(&mut dag, ProposeContext::normal(vec![vec![1, 2, 3]], [0u8; 32]));
+        let block = engine.propose_block(
+            &mut dag,
+            ProposeContext::normal(vec![vec![1, 2, 3]], [0u8; 32]),
+        );
         assert_eq!(block.round(), 1);
         assert_eq!(block.author(), 0);
         assert_eq!(block.transactions().len(), 1);
@@ -1402,7 +1410,8 @@ mod tests {
         engine.threshold_clock.observe(1, 1);
         engine.threshold_clock.observe(1, 2);
 
-        let block = engine.propose_block(&mut dag, ProposeContext::normal(vec![vec![42]], [0u8; 32]));
+        let block =
+            engine.propose_block(&mut dag, ProposeContext::normal(vec![vec![42]], [0u8; 32]));
         assert!(block.round() >= 2);
         assert_eq!(block.author(), 0);
         // Smart ancestors should include all 4 (none excluded yet)

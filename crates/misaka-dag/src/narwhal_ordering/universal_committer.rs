@@ -321,10 +321,7 @@ mod tests {
         b.layer(2).fully_connected().build();
         // R3: A,B reference all R2 (including leader); C,D skip leader
         let r2_leader = b.leader_of(2);
-        b.layer(3)
-            .authorities(&[0, 1])
-            .fully_connected()
-            .build();
+        b.layer(3).authorities(&[0, 1]).fully_connected().build();
         b.layer(3)
             .authorities(&[2, 3])
             .skip_ancestor(r2_leader)

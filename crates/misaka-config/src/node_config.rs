@@ -5,8 +5,8 @@
 //!
 //! Extracted from `misaka-node/src/config.rs`.
 
-use serde::{Deserialize, Serialize};
 use super::error::ConfigError;
+use serde::{Deserialize, Serialize};
 
 /// Full node configuration.
 ///
@@ -99,11 +99,15 @@ impl NodeConfig {
 
     /// Check if this is a mainnet configuration.
     #[must_use]
-    pub fn is_mainnet(&self) -> bool { self.chain_id == 1 }
+    pub fn is_mainnet(&self) -> bool {
+        self.chain_id == 1
+    }
 
     /// Check if this is a testnet configuration.
     #[must_use]
-    pub fn is_testnet(&self) -> bool { self.chain_id == 2 }
+    pub fn is_testnet(&self) -> bool {
+        self.chain_id == 2
+    }
 }
 
 #[cfg(test)]

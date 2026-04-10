@@ -136,8 +136,12 @@ pub fn distribute_epoch_rewards(
 
     // ── Merge results ──
     // SEC-FIX NH-6: saturating_add for totals
-    let active_total: u64 = active_rewards.iter().fold(0u64, |a, r| a.saturating_add(r.1));
-    let backup_total: u64 = backup_rewards.iter().fold(0u64, |a, r| a.saturating_add(r.1));
+    let active_total: u64 = active_rewards
+        .iter()
+        .fold(0u64, |a, r| a.saturating_add(r.1));
+    let backup_total: u64 = backup_rewards
+        .iter()
+        .fold(0u64, |a, r| a.saturating_add(r.1));
     let carry_over = total_emission.saturating_sub(active_total.saturating_add(backup_total));
 
     let mut rewards: Vec<ValidatorReward> = Vec::new();
@@ -193,7 +197,13 @@ fn distribute_pool(pool: u64, scores: &[([u8; 32], f64)]) -> Vec<([u8; 32], u64)
     const SCALE: u128 = 1_000_000_000;
     let scaled_scores: Vec<u128> = scores
         .iter()
-        .map(|(_, s)| if *s > 0.0 { (*s * SCALE as f64) as u128 } else { 0 })
+        .map(|(_, s)| {
+            if *s > 0.0 {
+                (*s * SCALE as f64) as u128
+            } else {
+                0
+            }
+        })
         .collect();
 
     let total_scaled: u128 = scaled_scores.iter().sum();

@@ -13,7 +13,9 @@ use misaka_crypto::validator_sig::{
     ValidatorPqSignature,
 };
 use misaka_p2p::handshake::{responder_handle, HandshakeResult, InitiatorHandshake};
-use misaka_p2p::narwhal_block_relay::{NarwhalRelayMessage, VoteRateLimiter, MAX_VOTES_PER_PEER_PER_EPOCH};
+use misaka_p2p::narwhal_block_relay::{
+    NarwhalRelayMessage, VoteRateLimiter, MAX_VOTES_PER_PEER_PER_EPOCH,
+};
 use misaka_p2p::payload_type::MisakaMessage;
 use misaka_p2p::secure_transport::{
     decrypt_frame, encode_wire_frame, AeadError, DirectionalKeys, NonceCounter, RecvNonceTracker,
@@ -201,8 +203,8 @@ async fn tcp_initiator_handshake(
         .map_err(|e| format!("bad ct: {e}"))?;
 
     let resp_pk_buf = read_lp(stream, 8192, "resp_pk").await?;
-    let responder_pk = ValidatorPqPublicKey::from_bytes(&resp_pk_buf)
-        .map_err(|e| format!("bad resp pk: {e}"))?;
+    let responder_pk =
+        ValidatorPqPublicKey::from_bytes(&resp_pk_buf).map_err(|e| format!("bad resp pk: {e}"))?;
     if &responder_pk != expected_responder_pk {
         return Err(format!(
             "MITM: responder pk mismatch (expected {}, got {})",
@@ -353,14 +355,20 @@ async fn run_peer_session(
             let plaintext = match serde_json::to_vec(&msg) {
                 Ok(bytes) => bytes,
                 Err(err) => {
-                    warn!("Failed to encode relay message for {}: {}", short_writer, err);
+                    warn!(
+                        "Failed to encode relay message for {}: {}",
+                        short_writer, err
+                    );
                     continue;
                 }
             };
             let wire = match encode_wire_frame(&keys.send_key, &mut nonce, &plaintext) {
                 Ok(wire) => wire,
                 Err(err) => {
-                    warn!("Failed to encrypt relay message for {}: {}", short_writer, err);
+                    warn!(
+                        "Failed to encrypt relay message for {}: {}",
+                        short_writer, err
+                    );
                     break;
                 }
             };
@@ -416,9 +424,15 @@ async fn run_peer_session(
             Err(err) => {
                 // SEC-FIX TM-7: Count consecutive decode failures and disconnect
                 decode_fail_count += 1;
-                warn!("relay envelope decode failed for {} ({}/{}): {}", short, decode_fail_count, MAX_CONSECUTIVE_DECODE_FAILURES, err);
+                warn!(
+                    "relay envelope decode failed for {} ({}/{}): {}",
+                    short, decode_fail_count, MAX_CONSECUTIVE_DECODE_FAILURES, err
+                );
                 if decode_fail_count >= MAX_CONSECUTIVE_DECODE_FAILURES {
-                    warn!("too many consecutive decode failures for {} — disconnecting", short);
+                    warn!(
+                        "too many consecutive decode failures for {} — disconnecting",
+                        short
+                    );
                     break;
                 }
                 continue;
@@ -450,9 +464,15 @@ async fn run_peer_session(
             Err(misaka_p2p::narwhal_block_relay::NarwhalRelayDecodeError::RateLimited) => {
                 // SEC-FIX TM-6: Count rate limit violations and disconnect persistent offenders
                 rate_limit_violations += 1;
-                warn!("CommitVote rate limited for peer {} ({}/{})", short, rate_limit_violations, MAX_RATE_LIMIT_VIOLATIONS);
+                warn!(
+                    "CommitVote rate limited for peer {} ({}/{})",
+                    short, rate_limit_violations, MAX_RATE_LIMIT_VIOLATIONS
+                );
                 if rate_limit_violations >= MAX_RATE_LIMIT_VIOLATIONS {
-                    warn!("persistent rate limit violations from {} — disconnecting", short);
+                    warn!(
+                        "persistent rate limit violations from {} — disconnecting",
+                        short
+                    );
                     break;
                 }
             }
@@ -517,9 +537,7 @@ async fn connect_outbound_peer(
                     Err(err) => {
                         warn!(
                             "Narwhal relay outbound handshake failed (authority={}, addr={}): {}",
-                            peer.authority_index,
-                            peer.address,
-                            err
+                            peer.authority_index, peer.address, err
                         );
                     }
                 }
@@ -527,9 +545,7 @@ async fn connect_outbound_peer(
             Err(err) => {
                 debug!(
                     "Narwhal relay connect retry (authority={}, addr={}): {}",
-                    peer.authority_index,
-                    peer.address,
-                    err
+                    peer.authority_index, peer.address, err
                 );
             }
         }
@@ -553,8 +569,7 @@ pub fn spawn_narwhal_block_relay_transport(
         };
         info!(
             "Narwhal relay transport listening on {} (authority={})",
-            config.listen_addr,
-            config.authority_index
+            config.listen_addr, config.authority_index
         );
 
         let registry = Arc::new(RwLock::new(PeerRegistry::new()));
@@ -581,7 +596,11 @@ pub fn spawn_narwhal_block_relay_transport(
                         message,
                     } => {
                         if let Ok(wire) = message.to_message() {
-                            outbound_registry.read().await.send(authority_index, wire).await;
+                            outbound_registry
+                                .read()
+                                .await
+                                .send(authority_index, wire)
+                                .await;
                         }
                     }
                 }
@@ -602,11 +621,10 @@ pub fn spawn_narwhal_block_relay_transport(
             });
         }
 
-        let conn_guard: Arc<tokio::sync::Mutex<misaka_p2p::ConnectionGuard>> = Arc::new(
-            tokio::sync::Mutex::new(misaka_p2p::ConnectionGuard::with_config(
-                config.guard_config.clone(),
-            )),
-        );
+        let conn_guard: Arc<tokio::sync::Mutex<misaka_p2p::ConnectionGuard>> =
+            Arc::new(tokio::sync::Mutex::new(
+                misaka_p2p::ConnectionGuard::with_config(config.guard_config.clone()),
+            ));
         {
             let guard = conn_guard.clone();
             tokio::spawn(async move {
@@ -685,7 +703,10 @@ pub fn spawn_narwhal_block_relay_transport(
                         {
                             Ok(result) => result,
                             Err(err) => {
-                                warn!("Narwhal relay inbound handshake failed {}: {}", address, err);
+                                warn!(
+                                    "Narwhal relay inbound handshake failed {}: {}",
+                                    address, err
+                                );
                                 return;
                             }
                         };

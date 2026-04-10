@@ -505,7 +505,9 @@ impl WriteAheadLog {
             if line.len() > MAX_WAL_LINE_LEN {
                 warn!(
                     "WAL: line {} exceeds max length ({} > {}) — skipping",
-                    line_num + 1, line.len(), MAX_WAL_LINE_LEN
+                    line_num + 1,
+                    line.len(),
+                    MAX_WAL_LINE_LEN
                 );
                 continue;
             }

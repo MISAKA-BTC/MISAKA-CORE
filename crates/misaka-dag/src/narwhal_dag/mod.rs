@@ -7,16 +7,15 @@
 
 pub mod admission;
 pub mod ancestor;
-pub mod authority_node;
-pub mod clock;
-pub mod authority_service;
-pub mod context;
 #[cfg(feature = "anemo-legacy")]
 pub mod anemo_network;
+pub mod authority_node;
+pub mod authority_service;
 pub mod block_manager;
 pub mod block_subscriber;
 pub mod block_verifier;
 pub mod broadcaster;
+pub mod clock;
 pub mod commit_consumer;
 pub mod commit_finalizer;
 pub mod commit_observer;
@@ -24,6 +23,7 @@ pub mod commit_subscriber;
 pub mod commit_syncer;
 pub mod commit_vote_monitor;
 pub mod consensus_wal;
+pub mod context;
 pub mod core_engine;
 pub mod core_thread;
 pub mod dag_state;

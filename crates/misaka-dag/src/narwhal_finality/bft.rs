@@ -20,7 +20,7 @@ use super::Checkpoint;
 use crate::narwhal_types::block::SignatureVerifier;
 use crate::narwhal_types::committee::Stake;
 use misaka_types::intent::{AppId, IntentMessage, IntentScope};
-use misaka_types::intent_payloads::{BftPrevotePayload, BftPrecommitPayload};
+use misaka_types::intent_payloads::{BftPrecommitPayload, BftPrevotePayload};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -95,7 +95,9 @@ impl BftRound {
     ) -> Result<Self, String> {
         let app_id = AppId::new(chain_id, genesis_hash);
         // SEC-FIX T3-C1 + T3-H10: Use saturating fold instead of .sum()
-        let total_stake: u64 = voter_stakes.values().fold(0u64, |a, &s| a.saturating_add(s));
+        let total_stake: u64 = voter_stakes
+            .values()
+            .fold(0u64, |a, &s| a.saturating_add(s));
         if total_stake > 0 {
             let f = (total_stake - 1) / 3;
             // Use u128 to prevent overflow in the check itself
@@ -105,7 +107,11 @@ impl BftRound {
                 return Err(format!(
                     "BFT SAFETY VIOLATION: 2*Q={} must be > total+f={} \
                      (threshold={}, total={}, f={})",
-                    2 * effective_quorum, rhs, finality_threshold, total_stake, f
+                    2 * effective_quorum,
+                    rhs,
+                    finality_threshold,
+                    total_stake,
+                    f
                 ));
             }
         }
@@ -143,8 +149,14 @@ impl BftRound {
         genesis_hash: [u8; 32],
     ) -> Self {
         Self::try_new(
-            voter_pubkeys, verifier, voter_stakes, finality_threshold,
-            chain_id, epoch, round, genesis_hash,
+            voter_pubkeys,
+            verifier,
+            voter_stakes,
+            finality_threshold,
+            chain_id,
+            epoch,
+            round,
+            genesis_hash,
         )
         .expect("BFT safety invariant violated — cannot construct BftRound")
     }
@@ -185,11 +197,7 @@ impl BftRound {
             checkpoint_digest,
             voter,
         };
-        let intent = IntentMessage::wrap(
-            IntentScope::BftPrevote,
-            self.app_id.clone(),
-            &payload,
-        );
+        let intent = IntentMessage::wrap(IntentScope::BftPrevote, self.app_id.clone(), &payload);
         let digest = intent.signing_digest();
         if self.verifier.verify(&pubkey, &digest, &signature).is_err() {
             return false;
@@ -277,11 +285,7 @@ impl BftRound {
             checkpoint_digest,
             voter,
         };
-        let intent = IntentMessage::wrap(
-            IntentScope::BftPrecommit,
-            self.app_id.clone(),
-            &payload,
-        );
+        let intent = IntentMessage::wrap(IntentScope::BftPrecommit, self.app_id.clone(), &payload);
         let digest = intent.signing_digest();
         if self.verifier.verify(&pubkey, &digest, &signature).is_err() {
             return false;

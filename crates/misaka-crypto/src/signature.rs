@@ -53,11 +53,8 @@ const _: () = assert!(MLDSA65_SIG_SIZE == 3309);
 static DUMMY_VERIFY_MATERIAL: Lazy<(Vec<u8>, Vec<u8>, Vec<u8>)> = Lazy::new(|| {
     let kp = misaka_pqc::pq_sign::MlDsaKeypair::generate();
     let dummy_msg = b"MISAKA:timing-equalization:dummy-message:v2";
-    let sig = misaka_pqc::pq_sign::ml_dsa_sign_raw(
-        &kp.secret_key,
-        dummy_msg,
-    )
-    .expect("dummy signing must succeed");
+    let sig = misaka_pqc::pq_sign::ml_dsa_sign_raw(&kp.secret_key, dummy_msg)
+        .expect("dummy signing must succeed");
     (
         kp.public_key.as_bytes().to_vec(),
         sig.as_bytes().to_vec(),
@@ -93,10 +90,8 @@ pub fn verify_mldsa65(
     let sig_parsed = misaka_pqc::pq_sign::MlDsaSignature::from_bytes(signature);
 
     match (pk_parsed, sig_parsed) {
-        (Ok(pk), Ok(sig)) => {
-            misaka_pqc::pq_sign::ml_dsa_verify_raw(&pk, &domain_msg, &sig)
-                .map_err(|_| VerifyError::MlDsaVerifyFailed)
-        }
+        (Ok(pk), Ok(sig)) => misaka_pqc::pq_sign::ml_dsa_verify_raw(&pk, &domain_msg, &sig)
+            .map_err(|_| VerifyError::MlDsaVerifyFailed),
         _ => {
             // MEDIUM #10 (v2): Run dummy verify with a REAL valid signature.
             let (ref dummy_pk, ref dummy_sig, ref _dummy_msg) = *DUMMY_VERIFY_MATERIAL;
@@ -171,12 +166,8 @@ impl MlDsa65BlockVerifier {
             .map_err(|e| format!("invalid ML-DSA-65 public key: {}", e))?;
         let sig = misaka_pqc::pq_sign::MlDsaSignature::from_bytes(signature)
             .map_err(|e| format!("invalid ML-DSA-65 signature: {}", e))?;
-        misaka_pqc::pq_sign::ml_dsa_verify_raw(
-            &pk,
-            message,
-            &sig,
-        )
-        .map_err(|e| format!("ML-DSA-65 verification failed: {}", e))
+        misaka_pqc::pq_sign::ml_dsa_verify_raw(&pk, message, &sig)
+            .map_err(|e| format!("ML-DSA-65 verification failed: {}", e))
     }
 }
 
@@ -245,7 +236,14 @@ impl BatchVerifier {
             if invalid.contains(&i) {
                 continue; // already failed length check
             }
-            if verify_mldsa65(&entry.domain, &entry.public_key, &entry.message, &entry.signature).is_err() {
+            if verify_mldsa65(
+                &entry.domain,
+                &entry.public_key,
+                &entry.message,
+                &entry.signature,
+            )
+            .is_err()
+            {
                 invalid.insert(i);
             }
         }
@@ -374,7 +372,9 @@ impl SigVerifyCache {
     pub fn new(max_entries: usize) -> Self {
         Self {
             cache: RwLock::new(HashMap::with_capacity(max_entries.min(100_000))),
-            order: RwLock::new(std::collections::VecDeque::with_capacity(max_entries.min(100_000))),
+            order: RwLock::new(std::collections::VecDeque::with_capacity(
+                max_entries.min(100_000),
+            )),
             max_entries,
             hits: std::sync::atomic::AtomicU64::new(0),
             misses: std::sync::atomic::AtomicU64::new(0),
@@ -504,7 +504,11 @@ mod tests {
     }
 
     /// Helper: sign with domain prefix concatenation (mirrors verify_mldsa65 internally).
-    fn sign_with_domain(sk: &misaka_pqc::pq_sign::MlDsaSecretKey, domain: &[u8], msg: &[u8]) -> misaka_pqc::pq_sign::MlDsaSignature {
+    fn sign_with_domain(
+        sk: &misaka_pqc::pq_sign::MlDsaSecretKey,
+        domain: &[u8],
+        msg: &[u8],
+    ) -> misaka_pqc::pq_sign::MlDsaSignature {
         let mut dm = Vec::with_capacity(domain.len() + msg.len());
         dm.extend_from_slice(domain);
         dm.extend_from_slice(msg);
@@ -525,7 +529,9 @@ mod tests {
         let kp = misaka_pqc::pq_sign::MlDsaKeypair::generate();
         let domain = b"test-domain:";
         let sig = sign_with_domain(&kp.secret_key, domain, b"correct");
-        assert!(verify_mldsa65(domain, kp.public_key.as_bytes(), b"wrong", sig.as_bytes()).is_err());
+        assert!(
+            verify_mldsa65(domain, kp.public_key.as_bytes(), b"wrong", sig.as_bytes()).is_err()
+        );
     }
 
     #[test]
@@ -602,7 +608,12 @@ mod tests {
     fn test_error_does_not_leak_parse_vs_crypto() {
         // Both parse failure and crypto failure produce the same error variant
         let parse_err = verify_mldsa65(b"", &[0u8; 10], b"msg", &[0u8; 10]);
-        let crypto_err = verify_mldsa65(b"", &[0u8; MLDSA65_PK_SIZE], b"msg", &[0u8; MLDSA65_SIG_SIZE]);
+        let crypto_err = verify_mldsa65(
+            b"",
+            &[0u8; MLDSA65_PK_SIZE],
+            b"msg",
+            &[0u8; MLDSA65_SIG_SIZE],
+        );
         // Both should be MlDsaVerifyFailed (no distinguishing information)
         assert!(matches!(parse_err, Err(VerifyError::MlDsaVerifyFailed)));
         assert!(matches!(crypto_err, Err(VerifyError::MlDsaVerifyFailed)));

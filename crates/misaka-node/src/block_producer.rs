@@ -471,28 +471,31 @@ pub async fn run_block_producer(state: SharedState, block_time_secs: u64, propos
                     let utxo_count = s.utxo_set.len();
                     tokio::spawn(async move {
                         let result = tokio::task::spawn_blocking(move || {
-                            let json = serde_json::to_string(&snapshot)
-                                .map_err(|e| e.to_string())?;
-                            std::fs::write(&snap_path, json)
-                                .map_err(|e| e.to_string())
-                        }).await;
+                            let json =
+                                serde_json::to_string(&snapshot).map_err(|e| e.to_string())?;
+                            std::fs::write(&snap_path, json).map_err(|e| e.to_string())
+                        })
+                        .await;
                         match result {
                             Ok(Ok(())) => {
                                 tracing::info!(
                                     "UTXO snapshot saved | height={} | utxos={}",
-                                    height, utxo_count
+                                    height,
+                                    utxo_count
                                 );
                             }
                             Ok(Err(e)) => {
                                 tracing::warn!(
                                     "UTXO snapshot save failed at height {}: {}",
-                                    height, e
+                                    height,
+                                    e
                                 );
                             }
                             Err(e) => {
                                 tracing::warn!(
                                     "UTXO snapshot task panicked at height {}: {}",
-                                    height, e
+                                    height,
+                                    e
                                 );
                             }
                         }
@@ -510,8 +513,7 @@ pub async fn run_block_producer(state: SharedState, block_time_secs: u64, propos
 mod tests {
     use super::*;
     use misaka_types::utxo::{
-        OutputRef, TxInput, TxOutput as UtxoTxOutput, TxType, UtxoTransaction,
-        UTXO_TX_VERSION,
+        OutputRef, TxInput, TxOutput as UtxoTxOutput, TxType, UtxoTransaction, UTXO_TX_VERSION,
     };
 
     fn sample_tx(with_inputs: bool, with_extra: bool) -> UtxoTransaction {

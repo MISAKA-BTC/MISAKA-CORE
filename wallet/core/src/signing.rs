@@ -92,7 +92,9 @@ pub struct SigningContext {
 /// let intent = IntentMessage::wrap(IntentScope::TransparentTransfer, app_id, &payload);
 /// let digest = intent.signing_digest();
 /// ```
-#[deprecated(note = "SEC-FIX: Use IntentMessage::signing_digest() for executor-compatible signatures")]
+#[deprecated(
+    note = "SEC-FIX: Use IntentMessage::signing_digest() for executor-compatible signatures"
+)]
 pub fn compute_sig_hash(
     ctx: &SigningContext,
     inputs: &[InputForSigning],

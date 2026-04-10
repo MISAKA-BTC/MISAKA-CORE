@@ -71,11 +71,12 @@ pub fn compute_block_rewards(
         params.chain_year,
         params.epochs_per_year,
     );
-    let emission: u64 = emission_u128.try_into().map_err(|_| {
-        BlockRewardError::EmissionOverflow {
-            emission: emission_u128,
-        }
-    })?;
+    let emission: u64 =
+        emission_u128
+            .try_into()
+            .map_err(|_| BlockRewardError::EmissionOverflow {
+                emission: emission_u128,
+            })?;
 
     let (proposer_total, treasury_share, burn_share) = compute_block_reward(emission, total_fees);
 

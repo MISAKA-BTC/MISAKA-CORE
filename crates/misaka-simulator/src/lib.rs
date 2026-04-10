@@ -100,8 +100,7 @@ impl SimNetwork {
         // simulator shortcut.
         if self.blocked_pairs.contains(&(from, to)) {
             self.total_dropped += 1;
-            self.blocked_buffer
-                .push((to, SimMessage { from, block }));
+            self.blocked_buffer.push((to, SimMessage { from, block }));
             return;
         }
 
@@ -547,7 +546,8 @@ mod tests {
             h.run_rounds(rounds);
             let seq = extract(&h);
             assert_eq!(
-                seq, reference,
+                seq,
+                reference,
                 "trial {} diverged: {} leaders vs {} reference",
                 trial,
                 seq.len(),
@@ -565,10 +565,7 @@ mod tests {
             total_ms,
             total_ms as f64 / repeats as f64,
         );
-        eprintln!(
-            "[test_a] committed {} leaders per trial",
-            reference.len()
-        );
+        eprintln!("[test_a] committed {} leaders per trial", reference.len());
     }
 
     // ── Test (b): ML-DSA-65 full verification path ──
@@ -599,14 +596,21 @@ mod tests {
             signature: vec![],
         };
         vs.sign_block(0, &mut valid_block);
-        assert_eq!(valid_block.signature.len(), 3309, "ML-DSA-65 sig must be 3309 bytes");
+        assert_eq!(
+            valid_block.signature.len(),
+            3309,
+            "ML-DSA-65 sig must be 3309 bytes"
+        );
         let result = verifier.verify(&valid_block);
         assert!(result.is_ok(), "valid sig must pass: {:?}", result.err());
 
         // 2. Tampered signature fails
         let mut tampered = valid_block.clone();
         tampered.signature[0] ^= 0xFF;
-        assert!(verifier.verify(&tampered).is_err(), "tampered sig must fail");
+        assert!(
+            verifier.verify(&tampered).is_err(),
+            "tampered sig must fail"
+        );
 
         // 3. Wrong-author signature fails
         let mut wrong_author = valid_block.clone();
@@ -625,14 +629,8 @@ mod tests {
         );
 
         // 5. Process through CoreEngine (full path)
-        let mut engine = CoreEngine::new(
-            0,
-            0,
-            committee.clone(),
-            vs.signer(0),
-            verifier,
-            chain_ctx,
-        );
+        let mut engine =
+            CoreEngine::new(0, 0, committee.clone(), vs.signer(0), verifier, chain_ctx);
         let mut bm = BlockManager::new(committee.clone());
         let mut dag = DagState::new(committee, DagStateConfig::default());
 
@@ -691,7 +689,11 @@ mod tests {
         h.validator_set.sign_block(0, &mut block_b);
         let vb_b = VerifiedBlock::new_for_test(block_b);
 
-        assert_ne!(vb_a.digest(), vb_b.digest(), "equivocating blocks must differ");
+        assert_ne!(
+            vb_a.digest(),
+            vb_b.digest(),
+            "equivocating blocks must differ"
+        );
 
         // Deliver both blocks to all nodes
         for node in &mut h.nodes {
@@ -703,7 +705,12 @@ mod tests {
         let detected_count = h
             .nodes
             .iter()
-            .filter(|n| n.dag.equivocations().iter().any(|eq| eq.slot.authority == 0))
+            .filter(|n| {
+                n.dag
+                    .equivocations()
+                    .iter()
+                    .any(|eq| eq.slot.authority == 0)
+            })
             .count();
         assert!(
             detected_count >= 15, // at least quorum should detect
@@ -847,10 +854,7 @@ mod tests {
         h.assert_convergence();
         let pre_partition_commits = h.committed_leaders().len();
         assert!(pre_partition_commits > 0, "must have pre-partition commits");
-        eprintln!(
-            "[test_f] Pre-partition: {} commits",
-            pre_partition_commits
-        );
+        eprintln!("[test_f] Pre-partition: {} commits", pre_partition_commits);
 
         // ── Phase 2: 4-3 partition ──
         //
@@ -927,7 +931,13 @@ mod tests {
                     (b.round, b.author),
                     "SAFETY VIOLATION: node {} commit[{}] = ({},{}) but \
                      node 0 commit[{}] = ({},{})",
-                    i, j, b.round, b.author, j, a.round, a.author,
+                    i,
+                    j,
+                    b.round,
+                    b.author,
+                    j,
+                    a.round,
+                    a.author,
                 );
             }
         }
@@ -985,8 +995,8 @@ mod tests {
 
     #[test]
     fn test_h_broadcaster_subscriber_pipeline() {
-        use misaka_dag::narwhal_dag::broadcaster::{Broadcaster, BroadcasterConfig};
         use misaka_dag::narwhal_dag::block_subscriber::{BlockSubscriber, BlockSubscriberConfig};
+        use misaka_dag::narwhal_dag::broadcaster::{Broadcaster, BroadcasterConfig};
 
         let n = 7;
         let rounds = 50;
@@ -1071,17 +1081,25 @@ mod tests {
         h.assert_convergence();
 
         // Metrics check
-        let total_enqueued: u64 = broadcasters.iter().map(|b| b.metrics().blocks_enqueued).sum();
-        let total_received: u64 = subscribers.iter().map(|s| s.metrics().blocks_received).sum();
+        let total_enqueued: u64 = broadcasters
+            .iter()
+            .map(|b| b.metrics().blocks_enqueued)
+            .sum();
+        let total_received: u64 = subscribers
+            .iter()
+            .map(|s| s.metrics().blocks_received)
+            .sum();
 
         assert!(total_enqueued > 0, "broadcaster must have enqueued blocks");
         assert!(total_received > 0, "subscriber must have received blocks");
         assert_eq!(
-            broadcasters[0].metrics().blocks_dropped, 0,
+            broadcasters[0].metrics().blocks_dropped,
+            0,
             "no blocks should be dropped under normal load"
         );
         assert_eq!(
-            subscribers[0].metrics().blocks_evicted, 0,
+            subscribers[0].metrics().blocks_evicted,
+            0,
             "no blocks should be evicted under normal load"
         );
 
@@ -1096,7 +1114,9 @@ mod tests {
     #[test]
     fn test_i_commit_consumer_pipeline() {
         use misaka_dag::narwhal_dag::commit_consumer::{CommitConsumer, LogCommitConsumer};
-        use misaka_dag::narwhal_dag::commit_subscriber::{CommitSubscriber, CommitSubscriberConfig};
+        use misaka_dag::narwhal_dag::commit_subscriber::{
+            CommitSubscriber, CommitSubscriberConfig,
+        };
 
         let n = 7;
         let mut h = SimHarness::new(n, 0x2102);
@@ -1168,8 +1188,8 @@ mod tests {
 
     #[test]
     fn test_j_pq_backpressure_stress() {
-        use misaka_dag::narwhal_dag::broadcaster::{Broadcaster, BroadcasterConfig};
         use misaka_dag::narwhal_dag::block_subscriber::{BlockSubscriber, BlockSubscriberConfig};
+        use misaka_dag::narwhal_dag::broadcaster::{Broadcaster, BroadcasterConfig};
 
         // Stress test: small buffer, flood with blocks
         let n = 7;

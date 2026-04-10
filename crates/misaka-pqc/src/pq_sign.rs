@@ -25,7 +25,6 @@ pub const ML_DSA_PK_LEN: usize = 1952;
 pub const ML_DSA_SK_LEN: usize = 4032;
 pub const ML_DSA_SIG_LEN: usize = 3309;
 
-
 // ─── Strongly-typed wrappers ─────────────────────────────────
 
 /// ML-DSA-65 public key (1952 bytes).
@@ -173,10 +172,7 @@ impl MlDsaKeypair {
 ///
 /// Phase 2c-B D5b: reintroduced as the sole signing entry point.
 /// Domain separation is now handled upstream (IntentMessage, signing_digest, etc.).
-pub fn ml_dsa_sign_raw(
-    sk: &MlDsaSecretKey,
-    msg: &[u8],
-) -> Result<MlDsaSignature, CryptoError> {
+pub fn ml_dsa_sign_raw(sk: &MlDsaSecretKey, msg: &[u8]) -> Result<MlDsaSignature, CryptoError> {
     let pq_sk = sk.to_pqcrypto().ok_or(CryptoError::MlDsaVerifyFailed)?;
     let sig = mldsa65::detached_sign(msg, &pq_sk);
     Ok(MlDsaSignature(sig.as_bytes().to_vec()))
@@ -229,8 +225,10 @@ mod tests {
     #[test]
     fn test_pk_length_validation() {
         assert!(MlDsaPublicKey::from_bytes(&[0; 1951]).is_err());
-        assert!(MlDsaPublicKey::from_bytes(&[0; 1952]).is_err(),
-            "zero pubkey must be rejected");
+        assert!(
+            MlDsaPublicKey::from_bytes(&[0; 1952]).is_err(),
+            "zero pubkey must be rejected"
+        );
         assert!(MlDsaPublicKey::from_bytes(&[0; 1953]).is_err());
     }
 
