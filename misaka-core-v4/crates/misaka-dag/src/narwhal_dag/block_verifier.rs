@@ -249,10 +249,7 @@ impl BlockVerifier {
         // the stake-weighted distinct-author check further down. BFT
         // safety is preserved by the stake check, not the count.
         if block.ancestors.is_empty() {
-            return Err(BlockVerifyError::InsufficientAncestors {
-                have: 0,
-                need: 1,
-            });
+            return Err(BlockVerifyError::InsufficientAncestors { have: 0, need: 1 });
         }
 
         // Check for duplicates and collect distinct authors
@@ -525,8 +522,8 @@ mod tests {
     /// the `check_ancestors` quorum. Confirms the WP8 follow-up.
     #[test]
     fn banned_authority_excluded_from_ancestor_stake() {
-        use crate::narwhal_types::committee::{Authority, Committee};
         use crate::narwhal_types::block::{BlockSigner, MlDsa65TestSigner};
+        use crate::narwhal_types::committee::{Authority, Committee};
 
         // 4-validator committee, stake = 1 each → quorum = 3.
         let signers: Vec<_> = (0..4)
@@ -609,8 +606,8 @@ mod tests {
     /// causing sync to stall at round 0 forever.
     #[test]
     fn single_validator_stake_gt_one_accepts_single_ancestor() {
-        use crate::narwhal_types::committee::{Authority, Committee};
         use crate::narwhal_types::block::{BlockSigner, MlDsa65TestSigner};
+        use crate::narwhal_types::committee::{Authority, Committee};
 
         // Committee of one, with operator-style stake = 10000.
         let signer = std::sync::Arc::new(MlDsa65TestSigner::generate());

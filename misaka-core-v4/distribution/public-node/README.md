@@ -14,25 +14,37 @@
 <platform>/
 ├── misaka-node(.exe)               # 実行バイナリ
 ├── start-public-node.{sh,.command,.bat}  # ワンクリック launcher
-├── README.md                       # この文書
 └── config/
     ├── public-node.toml            # ノード設定 (chain_id=2)
-    ├── genesis_committee.toml      # testnet genesis + validator pubkey
-    ├── seeds.txt                   # 公式 seed 接続先
-    └── bundled-validator.key       # 初回起動用 bootstrap key (暗号化)
+    ├── genesis_committee.toml      # testnet genesis + operator pubkey
+    ├── seeds.txt                   # 公式 seed (133.167.126.51:16110)
+    └── seed-pubkeys.txt            # seed の ML-DSA-65 公開鍵 (PK-pinning 必須)
 ```
+
+**v0.5.7+ から `bundled-validator.key` は配布されません**。起動時に ephemeral な `validator.key` が `misaka-data/` に自動生成され、ノードは observer mode で動作します (運営の authority からブロックを受信・検証するだけで、提案はしない)。
+
+## 起動フロー
+
+1. launcher を実行すると `misaka-data/validator.key` が自動生成される
+2. `OBSERVER MODE` メッセージが出て、運営 seed `133.167.126.51:16110` に接続
+3. 運営 authority からブロックが流れ始め、`highest_accepted_round` が増加
+4. `curl http://127.0.0.1:3001/api/get_chain_info` で `"topology":"joined"`, `"peerCount":1` を確認
+
+**運営側の要件**: observer mode は運営サーバーが `MISAKA_ACCEPT_OBSERVERS=1` で起動していることが前提です。公開 testnet の運営ノードは既にこの設定で稼働しています。
 
 ## 接続確認
 
-ノード起動後、別のターミナルで:
-
 ```bash
-curl http://localhost:3001/api/health
-# => {"blocks":N,"round":N,"status":"ok"}
+curl http://127.0.0.1:3001/api/health
+# => {"status":"ok","consensus":"mysticeti-equivalent",
+#     "blocks":N,"round":N,"safeMode":{"halted":false}}
 
-curl http://localhost:3001/api/get_chain_info
-# => {"chain":"MISAKA Network","chainId":2,"consensus":"Mysticeti-equivalent",
-#     "metrics":{"blocksProposed":N,"commitsTotal":M},...}
+curl http://127.0.0.1:3001/api/get_chain_info
+# => {"chain":"MISAKA Network","chainId":2,
+#     "consensus":"Mysticeti-equivalent",
+#     "version":"0.5.13","topology":"joined","nodeMode":"public",
+#     "role":"observer","peerCount":1,
+#     "status":{"current_round":N,"highest_accepted_round":N,...}}
 ```
 
 正常に動作していれば `commitsTotal` が時間とともに増加します。
@@ -40,7 +52,7 @@ curl http://localhost:3001/api/get_chain_info
 ## ディレクトリ
 
 - `misaka-data/` — チェーン状態と validator 鍵（初回起動時に作成）
-- データを削除して初期化するには `misaka-data/` を削除してから再起動
+- データを削除して初期化するには `misaka-data/` 全体を削除してから再起動
 
 ## 停止
 
@@ -50,55 +62,26 @@ curl http://localhost:3001/api/get_chain_info
 
 | 症状 | 対処 |
 |---|---|
-| ポート 3001 / 6691 使用中 | 他プロセスを停止、または `config/public-node.toml` で変更 |
+| ポート 3001 / 16110 使用中 | 他プロセスを停止してから再起動 |
 | macOS Gatekeeper | `start-public-node.command` を右クリック → 「開く」 |
 | Windows SmartScreen | 「詳細情報」→「実行」 |
 | Linux: 権限エラー | `chmod +x start-public-node.sh misaka-node` |
+| `insufficient ancestors` / `peer_sig_verify_failed` ログ | v0.5.8 未満を使っている証拠です。v0.5.13 以降へアップグレードしてください |
+| `mode:"solo"` のまま | 運営 seed が到達不能、またはファイアウォールが 16110 を塞いでいる可能性 |
 
 ## セキュリティ
 
-### bundled-validator.key について
+### 公開ポート
 
-同梱の `bundled-validator.key` は **暗号化された testnet bootstrap 鍵** です。
-複数ノードが同じ鍵で公式 testnet に参加すると equivocation を起こすため、
-**単独テスト / self-host 用途のみで使用してください**。
+- **16110/tcp** (Narwhal relay) — 運営と他クライアントとの P2P 通信に使用。必要に応じて inbound を開けてください
+- **3001/tcp** (RPC) — **loopback (127.0.0.1) にのみバインド**されます。**インターネットに晒さないでください**
+- launcher は `MISAKA_RPC_AUTH_MODE=open` を設定するので、RPC が外部に露出すると認証なしで読み書きされます。公開が必要なら reverse proxy + Bearer auth + IP allowlist を別途設定してください
 
-ノードは起動時に bundled key を検知すると：
+### Release asset の署名検証 (Sigstore cosign keyless)
 
-- `chain_id=1` (mainnet) では **起動を拒否** (`FATAL: refusing to start ...`)
-- `chain_id=2` (testnet) では **警告を出して続行**
+GitHub Release の `SHA256SUMS` は Sigstore の keyless signing で署名されています (`SHA256SUMS.sig` + `SHA256SUMS.pem`)。配布経路全体の改竄検知ができます。
 
-公式 testnet の validator として参加する場合は、運営から配布される鍵と
-genesis に差し替えが必要です。
-
-### Genesis の整合性確認
-
-ダウンロード先のミラーが改竄されている可能性を排除するため、解凍後に
-以下の SHA256 と一致することを確認してください:
-
-```
-config/genesis_committee.toml   c51d57a6d49c56e977d5b6e4b2ef673e752042785b42105027b7943a34ccceea
-config/bundled-validator.key    9a6d82004781195a9af06c768fdc3b70e148c63ef0c08fcc7298d52efee12c93
-```
-
-macOS / Linux:
-```bash
-shasum -a 256 config/genesis_committee.toml config/bundled-validator.key
-```
-
-Windows (PowerShell):
-```powershell
-Get-FileHash config\genesis_committee.toml -Algorithm SHA256
-Get-FileHash config\bundled-validator.key -Algorithm SHA256
-```
-
-ハッシュが上記と一致しない場合は **絶対に起動しないでください**。
-公式の配布元 (GitHub Releases) から再ダウンロードしてください。
-
-### SHA256SUMS の署名検証 (Sigstore cosign keyless)
-
-GitHub Release の `SHA256SUMS` は Sigstore の keyless signing で署名されています
-(`SHA256SUMS.sig` + `SHA256SUMS.pem`)。配布経路全体の改竄検知ができます:
+**cosign 2.x 以降** — そのまま verify できます:
 
 ```bash
 # cosign のインストール: https://docs.sigstore.dev/system_config/installation/
@@ -110,12 +93,44 @@ cosign verify-blob \
   SHA256SUMS
 ```
 
-`Verified OK` が出れば、この SHA256SUMS は当該リポジトリの GitHub Actions
-ワークフローから生成されたものであることが暗号学的に保証されます。
+**cosign 1.x または検証がエラーになる場合** — GitHub Release の `SHA256SUMS.pem` / `SHA256SUMS.sig` は base64 1 行テキストで、一部の古い cosign は直接解釈できません。`base64 -d` を明示的に挟んでください:
 
-### 公開ポート
+```bash
+base64 -d SHA256SUMS.pem > SHA256SUMS.decoded.pem
+base64 -d SHA256SUMS.sig > SHA256SUMS.decoded.sig
+cosign verify-blob \
+  --certificate SHA256SUMS.decoded.pem \
+  --signature SHA256SUMS.decoded.sig \
+  --certificate-identity-regexp 'https://github\.com/sasakiyuuu/misaka-test-net/.*' \
+  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+  SHA256SUMS
+```
 
-launcher は `MISAKA_RPC_AUTH_MODE=open` で起動します。**RPC ポート 3001 を
-インターネットに晒さないでください**。LAN / localhost 限定で使う想定です。
-公開するなら reverse proxy + 認証 + firewall を別途設定してください。
-P2P ポート 6691 は公開 OK。
+`Verified OK` が出れば、この SHA256SUMS は当該リポジトリの GitHub Actions ワークフローから生成されたものであることが暗号学的に保証されます。
+
+### ダウンロードしたアーカイブの SHA256 検証
+
+```bash
+# macOS / Linux
+shasum -a 256 -c SHA256SUMS
+
+# Windows (PowerShell)
+Get-FileHash misaka-public-node-windows-x86_64.zip -Algorithm SHA256
+```
+
+`SHA256SUMS` 内のハッシュと一致することを確認してから展開してください。
+
+### 運営 authority の fingerprint
+
+`config/genesis_committee.toml` には運営の ML-DSA-65 公開鍵が焼き込まれています。`python3 -c "import hashlib; import re; ..."` で SHA3-256 fingerprint を計算し、GitHub Release の notes と照合することで、配布ミラーの改竄を検出できます。
+
+## 運営側 (operator) の起動手順
+
+自分で testnet operator を動かしたい場合:
+
+1. `misaka-node --keygen-only --chain-id 2 --data-dir ...` で鍵を生成
+2. 生成された pubkey を抽出して `config/genesis_committee.toml` の `public_key` に書き込む
+3. `MISAKA_ACCEPT_OBSERVERS=1` / `MISAKA_RPC_AUTH_MODE=open` / `--advertise-addr <public-ip>:16110` 付きで起動
+4. systemd unit は `scripts/testnet-deploy.sh` を参照 (v0.5.13 以降、passphrase は `MISAKA_VALIDATOR_PASSPHRASE_FILE=/opt/misaka/.passphrase` で読み込めます)
+
+詳細は `scripts/testnet-deploy.sh` の実装を参照してください。
