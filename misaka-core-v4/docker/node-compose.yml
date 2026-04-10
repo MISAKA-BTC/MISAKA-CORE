@@ -35,6 +35,14 @@ services:
       NODE_DAG_RPC_PEERS: ${NODE_DAG_RPC_PEERS:-}
       NODE_EXPERIMENTAL_ZK_PATH: ${NODE_EXPERIMENTAL_ZK_PATH:-false}
       MISAKA_VALIDATOR_PASSPHRASE: ${MISAKA_VALIDATOR_PASSPHRASE:-}
+      # v0.5.12 audit Docker doc fix: v0.5.7+ defaults RPC auth to
+      # fail-closed on all chains. Without an explicit mode or API
+      # key the node refuses to start. For compose-based dev setups
+      # default to `open`; override with MISAKA_RPC_AUTH_MODE=require
+      # and MISAKA_RPC_API_KEY=<key> in the .env file for a locked
+      # deployment.
+      MISAKA_RPC_AUTH_MODE: ${MISAKA_RPC_AUTH_MODE:-open}
+      MISAKA_RPC_API_KEY: ${MISAKA_RPC_API_KEY:-}
     ports:
       - "${NODE_RPC_PORT:-3001}:${NODE_RPC_PORT:-3001}"
       - "${NODE_P2P_PORT:-6690}:${NODE_P2P_PORT:-6690}"

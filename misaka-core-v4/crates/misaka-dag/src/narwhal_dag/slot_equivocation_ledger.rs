@@ -292,6 +292,39 @@ impl SlotEquivocationLedger {
         &self.banned_set
     }
 
+    /// v0.5.12 audit Mid 5 (vote wiring): ban an authority whose CommitVote
+    /// messages disagree on the same round.
+    ///
+    /// Unlike `observe()` which takes full block signatures for a
+    /// complete equivocation proof, this is a lightweight ban path
+    /// used when the evidence is a pair of `CommitVote` messages
+    /// observed over the Narwhal relay ingress. The full signatures
+    /// are not preserved (vote messages are not signed block contents),
+    /// so the evidence list is not extended — only the banned_set /
+    /// banned map are updated so that subsequent `check_ancestors`
+    /// calls and committer vote aggregation will correctly exclude
+    /// this authority.
+    ///
+    /// Returns `true` if this is a fresh ban (the authority was not
+    /// already banned), `false` otherwise.
+    pub fn ban_for_vote_equivocation(
+        &mut self,
+        authority: AuthorityIndex,
+        round: Round,
+    ) -> bool {
+        if self.banned_set.insert(authority) {
+            self.banned.entry(authority).or_insert(round);
+            tracing::warn!(
+                "commit_vote_equivocation: authority {} banned at round {}",
+                authority,
+                round
+            );
+            true
+        } else {
+            false
+        }
+    }
+
     /// Number of banned authorities.
     pub fn num_banned(&self) -> usize {
         self.banned_set.len()
@@ -593,6 +626,25 @@ mod tests {
         assert!(ledger.is_banned(0));
         assert_eq!(ledger.num_banned(), 1);
         assert_eq!(ledger.evidence().len(), 1);
+    }
+
+    /// v0.5.12 audit Mid 5 (vote wiring): the lightweight
+    /// `ban_for_vote_equivocation` path marks an authority banned
+    /// without requiring full block signatures.
+    #[test]
+    fn test_ban_for_vote_equivocation() {
+        let mut ledger = SlotEquivocationLedger::new();
+        assert!(!ledger.is_banned(3));
+        let first = ledger.ban_for_vote_equivocation(3, 42);
+        assert!(first, "first ban must return true");
+        assert!(ledger.is_banned(3));
+        assert_eq!(ledger.num_banned(), 1);
+        assert!(ledger.banned_authorities().contains(&3));
+        assert_eq!(ledger.ban_round(3), Some(42));
+        // Second call is a no-op.
+        let second = ledger.ban_for_vote_equivocation(3, 99);
+        assert!(!second, "re-ban must return false");
+        assert_eq!(ledger.ban_round(3), Some(42));
     }
 
     // ─── Quorum exclusion ────────────────────────────────────
