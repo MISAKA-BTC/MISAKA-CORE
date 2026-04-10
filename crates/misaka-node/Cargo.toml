@@ -6,32 +6,46 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-default = []
-# ═══ DAG Consensus (v2) ═══
-# Replaces linear blockchain with GhostDAG BlockDAG.
-# Build: cargo build -p misaka-node --features experimental_dag
-experimental_dag = ["misaka-dag"]
-# ═══ Q-DAG-CT (v4) ═══
-# Enable confidential transaction verification in DAG mode.
-# Build: cargo build -p misaka-node --features experimental_dag,qdag_ct
-qdag_ct = ["experimental_dag", "misaka-dag/qdag-ct"]
-# ═══ Development features ═══
+# ═══ DAG Consensus — Production Default ═══
+# GhostDAG BlockDAG with multi-parent blocks, UTXO/DAG virtual state,
+# PQ-encrypted P2P transport, economic finality checkpoints.
+# This is the mainnet consensus layer.
+default = ["dag"]
+dag = ["misaka-dag", "misaka-dag/rocksdb", "misaka-mempool/dag"]
+# GhostDAG compatibility layer (legacy — being phased out)
+ghostdag-compat = ["dag"]
+# Legacy feature alias retained for older builds that still reference it.
+experimental_dag = ["dag"]
+# REMOVED: Q-DAG-CT — deprecated in v1.0.
+# ═══ Dev-only features (NEVER enable in production) ═══
+swagger-cdn = []
+# ═══ RocksDB Persistent Storage ═══
+# NOTE: Since Phase 1, RocksDB is enabled by default via dag feature.
+# This feature is retained for explicit opt-in in non-default builds.
+rocksdb = ["dag", "misaka-dag/rocksdb"]
+# ═══ Development features (PHYSICALLY ISOLATED from production) ═══
 # Development-only RPC endpoints (get_address_outputs — privacy leak).
-# MUST NOT be enabled in mainnet/production builds.
 dev-rpc = []
-# Testnet faucet endpoint. MUST NOT be enabled in production.
+# Testnet faucet endpoint.
 faucet = []
-# Development bridge mock verifier. MUST NOT be enabled in production.
+# Development bridge mock verifier.
 dev-bridge-mock = []
-# Experimental zero-knowledge stub track.
-stark-stub = ["misaka-pqc/stark-stub", "misaka-mempool/stark-stub", "misaka-consensus/stark-stub", "misaka-execution/stark-stub"]
 # General dev feature — compile_error! in release builds prevents shipping.
 dev = ["dev-rpc", "faucet", "dev-bridge-mock"]
+# ═══ Testnet Feature ═══
+# Enables faucet in release builds for public testnet deployment.
+# MUST NOT be used for mainnet.
+testnet = ["faucet"]
+# SEC-FIX [Audit #2]: Legacy plaintext P2P — testnet only, compile_error! in release.
+legacy-p2p = []
+# Phase 2c-B D8: TOFU feature deleted.
 
 [dependencies]
 misaka-types = { path = "../misaka-types" }
+misaka-config = { path = "../misaka-config" }
 misaka-crypto = { path = "../misaka-crypto" }
 misaka-pqc = { path = "../misaka-pqc" }
+borsh = { workspace = true }
 misaka-execution = { path = "../misaka-execution" }
 misaka-storage = { path = "../misaka-storage" }
 misaka-mempool = { path = "../misaka-mempool" }
@@ -39,7 +53,8 @@ misaka-consensus = { path = "../misaka-consensus" }
 misaka-p2p = { path = "../misaka-p2p" }
 misaka-tokenomics = { path = "../misaka-tokenomics" }
 misaka-rpc = { path = "../misaka-rpc" }
-# DAG crate — only compiled when experimental_dag feature is enabled
+parking_lot = { workspace = true }
+# DAG crate — compiled by default (production consensus layer)
 misaka-dag = { path = "../misaka-dag", optional = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
@@ -53,11 +68,19 @@ rand = { workspace = true }
 hex = { workspace = true }
 thiserror = { workspace = true }
 chrono = { workspace = true }
+zeroize = { workspace = true }
 axum = { workspace = true }
 tower-http = { workspace = true }
-tower = { workspace = true }
+tower = { workspace = true, features = ["util"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 toml = "0.8"
+base64 = "0.22"
+sha2 = "0.10"
+blake3 = { workspace = true }
+bs58 = "0.5"
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+tempfile = "3"

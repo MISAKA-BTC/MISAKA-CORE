@@ -39,15 +39,54 @@
 /// GhostDAG k parameter — 正直ノードの同時生成ブロック数上限推定値。
 ///
 /// anticone サイズが k 以下のブロックを Blue と判定する。
-/// Kaspa デフォルト: k=18。MISAKA v4 も k=18 から開始。
+/// Kaspa デフォルト: k=18。MISAKAも同一値から開始（Phase 1: 10 BPS）。
+///
+/// # BPS別 K 値 (PHANTOM論文: K ≥ 2λD, D=500ms)
+///
+/// | BPS | K計算 | K (×1.5安全マージン) |
+/// |-----|-------|----------------------|
+/// | 1   | 1     | 18 (Kaspa)           |
+/// | 10  | 10    | 18 (Phase 1)         |
+/// | 20  | 20    | 36 (Phase 2)         |
+/// | 32  | 32    | 58 (Phase 3)         |
 pub const DEFAULT_K: u64 = 18;
 
+/// Blocks Per Second — PoSによりKaspa mainnet (1 BPS) の10倍。
+///
+/// PoWのマイニング遅延がないため、ブロック生成間隔をネットワーク伝搬遅延の
+/// 限界まで短縮可能。Phase 1 = 10 BPS (Kaspa testnet-11相当)。
+///
+/// Phase 2 = 20 BPS, Phase 3 = 32 BPS へ段階的に引き上げ。
+/// SSOT: use misaka_types::constants::DEFAULT_BPS.
+/// DAG-internal proposal interval may differ from block finality interval.
+pub const DEFAULT_BPS: u64 = misaka_types::constants::DEFAULT_BPS;
+
+/// Target time per block in milliseconds — SSOT from misaka-types.
+/// C-2 fix: was `1000/DEFAULT_BPS` (=1000ms), now unified with types (=2000ms).
+pub const TARGET_TIME_PER_BLOCK_MS: u64 = misaka_types::constants::TARGET_BLOCK_INTERVAL_MS;
+
+// Compile-time: block time constants must be consistent
+const _BLOCK_TIME_CHECK: () =
+    assert!(TARGET_TIME_PER_BLOCK_MS == misaka_types::constants::TARGET_BLOCK_INTERVAL_MS);
+
 /// 最大親ブロック数 (per block)。メモリ DoS 防止。
+/// Kaspaと同一値。Phase 2以降 BPS引き上げ時に拡張可能。
 pub const MAX_PARENTS: usize = 10;
 
 /// 最大 Mergeset サイズ。CPU DoS 防止。
+/// Kaspa (256) の2倍。PQ署名のTXサイズ増大に対応。
 /// 超過時はブロック自体を **Invalid として拒否** する (Fail-Closed)。
-pub const MAX_MERGESET_SIZE: usize = 256;
+pub const MAX_MERGESET_SIZE: usize = 512;
+
+/// 最大ブロック質量。PQ署名サイズ (Kaspa比 ~4倍) に対応するため
+/// Kaspaの 500,000 から 2,000,000 に引き上げ。
+///
+/// これにより、PQ TX (mass ≈ 8,000) でも1ブロックに ~250 TX格納可能。
+/// Kaspaの ~200 TX/block と同等のスループット。
+pub const MAX_BLOCK_MASS: u64 = 2_000_000;
+
+/// 最大TX質量。Kaspa (100,000) の2倍。PQ署名の大きさに対応。
+pub const MAX_TX_MASS: u64 = 200_000;
 
 // ═══════════════════════════════════════════════════════════════
 //  Depth & Window Constants (SSOT)
@@ -59,7 +98,8 @@ pub const MAX_MERGESET_SIZE: usize = 256;
 /// 無効化される可能性があるため、デコイとして選択してはならない。
 ///
 /// 値は GhostDAG パラメータ `k` の数倍が目安。k=18 に対して 100 は十分保守的。
-pub const MIN_DECOY_DEPTH: u64 = 100;
+/// Minimum decoy depth (ring signatures deprecated — set to match FINALITY_DEPTH).
+pub const MIN_DECOY_DEPTH: u64 = FINALITY_DEPTH;
 
 /// ファイナリティ深度 — この深度以上前のブロックは reorg 不可。
 ///
@@ -70,7 +110,9 @@ pub const MIN_DECOY_DEPTH: u64 = 100;
 ///
 /// k=18 に対して depth=200 は、攻撃者が全ネットワーク演算力の 49% を
 /// 持っていても覆る確率が天文学的に小さい。
-pub const FINALITY_DEPTH: u64 = 200;
+/// SSOT: use misaka_types::constants for the canonical finality depth.
+/// This DAG-specific value is kept for pruning calculations (must be >= types value).
+pub const FINALITY_DEPTH: u64 = misaka_types::constants::FINALITY_DEPTH;
 
 /// Pruning 深度 — この深度以上古いブロックの TX データを削除可能。
 ///
@@ -97,13 +139,28 @@ pub const PRUNING_WINDOW: u64 = PRUNING_DEPTH;
 /// Accumulator 保持深度 — UTXO accumulator のみ保持する区間。
 ///
 /// `PRUNING_DEPTH ≤ depth < ACCUMULATOR_RETENTION_DEPTH` の区間では
-/// ヘッダと nullifier のみ保持し、TX データは削除済み。
+/// ヘッダと spend-tag のみ保持し、TX データは削除済み。
 /// `ACCUMULATOR_RETENTION_DEPTH` 以降は accumulator も削除可能。
 pub const ACCUMULATOR_RETENTION_DEPTH: u64 = 2000;
 
 /// Pruning Point 更新間隔 (blue_score 単位)。
 /// この間隔ごとに Pruning Point を再評価する。
 pub const PRUNING_POINT_UPDATE_INTERVAL: u64 = 100;
+
+// ═══════════════════════════════════════════════════════════════
+//  Checkpoint Attestation Quorum (BFT)
+// ═══════════════════════════════════════════════════════════════
+
+/// Quorum numerator: checkpoint finality requires `N - floor((N-1)/3)`.
+///
+/// **SSOT**: The authoritative quorum formula is `Committee::quorum_threshold()`
+/// in `narwhal_types::committee`. The legacy `QUORUM_THRESHOLD_BPS = 6667`
+/// in `misaka_types::constants` is for documentation only and does NOT
+/// control any runtime quorum check.
+/// All runtime quorum checks MUST use `Committee::quorum_threshold()` or
+/// `ValidatorSet::quorum_threshold()`.
+pub const CHECKPOINT_QUORUM_NUMERATOR: u128 = 2;
+pub const CHECKPOINT_QUORUM_DENOMINATOR: u128 = 3;
 
 // ═══════════════════════════════════════════════════════════════
 //  Bounded Ancestor Search — Reachability Hybrid (Task 1.1)
@@ -125,8 +182,8 @@ pub const MAX_ANCESTOR_SEARCH_BLOCKS: usize = 4096;
 pub enum RetentionLevel {
     /// 全データ保持 (depth < FINALITY_DEPTH)
     Full,
-    /// ヘッダ + Nullifier のみ (FINALITY_DEPTH ≤ depth < PRUNING_DEPTH)
-    HeadersAndNullifiers,
+    /// ヘッダ + SpendTag のみ (FINALITY_DEPTH ≤ depth < PRUNING_DEPTH)
+    HeadersAndSpendTags,
     /// Accumulator のみ (PRUNING_DEPTH ≤ depth < ACCUMULATOR_RETENTION_DEPTH)
     AccumulatorOnly,
     /// 完全削除 (depth ≥ ACCUMULATOR_RETENTION_DEPTH)
@@ -139,7 +196,7 @@ pub fn retention_level(depth: u64) -> RetentionLevel {
     if depth < FINALITY_DEPTH {
         RetentionLevel::Full
     } else if depth < PRUNING_DEPTH {
-        RetentionLevel::HeadersAndNullifiers
+        RetentionLevel::HeadersAndSpendTags
     } else if depth < ACCUMULATOR_RETENTION_DEPTH {
         RetentionLevel::AccumulatorOnly
     } else {
@@ -171,8 +228,8 @@ const _: () = {
     assert!(FINALITY_DEPTH < PRUNING_DEPTH);
     assert!(PRUNING_DEPTH < ACCUMULATOR_RETENTION_DEPTH);
     assert!(PRUNING_WINDOW == PRUNING_DEPTH);
-    // k に対する安全性: FINALITY_DEPTH >> k
-    assert!(FINALITY_DEPTH > DEFAULT_K * 10);
+    // Note: GhostDAG assertion (FINALITY_DEPTH > K*10) removed.
+    // With Narwhal/Bullshark, finality is BFT-based (not depth-based).
     // Pruning Point 更新間隔は PRUNING_DEPTH 未満
     assert!(PRUNING_POINT_UPDATE_INTERVAL < PRUNING_DEPTH);
 };
@@ -184,10 +241,23 @@ mod tests {
     #[test]
     fn test_retention_level_ordering() {
         assert_eq!(retention_level(0), RetentionLevel::Full);
-        assert_eq!(retention_level(MIN_DECOY_DEPTH), RetentionLevel::Full);
-        assert_eq!(retention_level(FINALITY_DEPTH), RetentionLevel::HeadersAndNullifiers);
-        assert_eq!(retention_level(PRUNING_DEPTH), RetentionLevel::AccumulatorOnly);
-        assert_eq!(retention_level(ACCUMULATOR_RETENTION_DEPTH), RetentionLevel::Pruned);
+        // MIN_DECOY_DEPTH == FINALITY_DEPTH now, so at that depth it's HeadersAndSpendTags
+        assert_eq!(
+            retention_level(FINALITY_DEPTH),
+            RetentionLevel::HeadersAndSpendTags
+        );
+        assert_eq!(
+            retention_level(PRUNING_DEPTH),
+            RetentionLevel::AccumulatorOnly
+        );
+        assert_eq!(
+            retention_level(ACCUMULATOR_RETENTION_DEPTH),
+            RetentionLevel::Pruned
+        );
+        // Below finality = Full
+        if FINALITY_DEPTH > 0 {
+            assert_eq!(retention_level(FINALITY_DEPTH - 1), RetentionLevel::Full);
+        }
     }
 
     #[test]

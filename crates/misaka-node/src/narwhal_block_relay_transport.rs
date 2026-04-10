@@ -1,0 +1,737 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 MISAKA Foundation
+//
+//! Narwhal block relay transport over MISAKA's PQ-secure P2P primitives.
+
+use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
+use std::time::Duration;
+
+use misaka_crypto::validator_sig::{
+    validator_sign, validator_verify, ValidatorPqPublicKey, ValidatorPqSecretKey,
+    ValidatorPqSignature,
+};
+use misaka_p2p::handshake::{responder_handle, HandshakeResult, InitiatorHandshake};
+use misaka_p2p::narwhal_block_relay::{NarwhalRelayMessage, VoteRateLimiter, MAX_VOTES_PER_PEER_PER_EPOCH};
+use misaka_p2p::payload_type::MisakaMessage;
+use misaka_p2p::secure_transport::{
+    decrypt_frame, encode_wire_frame, AeadError, DirectionalKeys, NonceCounter, RecvNonceTracker,
+    FRAME_HEADER_SIZE, MAX_FRAME_SIZE, NONCE_SIZE, TAG_SIZE,
+};
+use misaka_pqc::pq_kem::MlKemPublicKey;
+use sha3::{Digest, Sha3_256};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::{mpsc, RwLock};
+use tracing::{debug, error, info, warn};
+
+const HANDSHAKE_TIMEOUT_SECS: u64 = 15;
+const READ_TIMEOUT_SECS: u64 = 120;
+const PEER_OUTBOUND_CAPACITY: usize = 256;
+const MAINNET_CHAIN_ID: u32 = 1;
+
+#[derive(Clone, Debug)]
+pub struct RelayPeer {
+    pub authority_index: u32,
+    pub address: SocketAddr,
+    pub public_key: ValidatorPqPublicKey,
+}
+
+#[derive(Clone, Debug)]
+pub struct NarwhalRelayTransportConfig {
+    pub listen_addr: SocketAddr,
+    pub chain_id: u32,
+    pub authority_index: u32,
+    pub public_key: ValidatorPqPublicKey,
+    pub secret_key: Arc<ValidatorPqSecretKey>,
+    pub peers: Vec<RelayPeer>,
+    pub guard_config: misaka_p2p::GuardConfig,
+}
+
+#[derive(Clone, Debug)]
+pub enum OutboundNarwhalRelayEvent {
+    Broadcast(NarwhalRelayMessage),
+    ToAuthority {
+        authority_index: u32,
+        message: NarwhalRelayMessage,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub enum InboundNarwhalRelayEvent {
+    PeerConnected {
+        authority_index: u32,
+        peer_id: misaka_p2p::PeerId,
+        address: SocketAddr,
+    },
+    PeerDisconnected {
+        authority_index: u32,
+        peer_id: misaka_p2p::PeerId,
+        address: SocketAddr,
+    },
+    Message {
+        authority_index: u32,
+        peer_id: misaka_p2p::PeerId,
+        address: SocketAddr,
+        message: NarwhalRelayMessage,
+    },
+}
+
+fn derive_peer_id(pk: &ValidatorPqPublicKey, chain_id: u32) -> misaka_p2p::PeerId {
+    misaka_p2p::PeerId::from_pubkey(&pk.to_bytes(), chain_id)
+}
+
+fn reject_inbound_bogon_ip(ip: &IpAddr, chain_id: u32) -> bool {
+    if chain_id != MAINNET_CHAIN_ID && ip.is_loopback() {
+        return false;
+    }
+    misaka_p2p::is_bogon_ip(ip)
+}
+
+async fn read_fixed(stream: &mut TcpStream, n: usize, label: &str) -> Result<Vec<u8>, String> {
+    let timeout = Duration::from_secs(HANDSHAKE_TIMEOUT_SECS);
+    let mut buf = vec![0u8; n];
+    tokio::time::timeout(timeout, stream.read_exact(&mut buf))
+        .await
+        .map_err(|_| format!("timeout: {label}"))?
+        .map_err(|e| format!("I/O {label}: {e}"))?;
+    Ok(buf)
+}
+
+async fn read_lp(stream: &mut TcpStream, max: usize, label: &str) -> Result<Vec<u8>, String> {
+    let lb = read_fixed(stream, 4, &format!("{label} len")).await?;
+    let len = u32::from_le_bytes([lb[0], lb[1], lb[2], lb[3]]) as usize;
+    if len > max {
+        return Err(format!("{label} too large: {len}"));
+    }
+    read_fixed(stream, len, label).await
+}
+
+async fn write_lp(stream: &mut TcpStream, data: &[u8]) -> Result<(), String> {
+    stream
+        .write_all(&(data.len() as u32).to_le_bytes())
+        .await
+        .map_err(|e| e.to_string())?;
+    stream.write_all(data).await.map_err(|e| e.to_string())
+}
+
+async fn tcp_responder_handshake(
+    stream: &mut TcpStream,
+    our_pk: &ValidatorPqPublicKey,
+    our_sk: &ValidatorPqSecretKey,
+) -> Result<(HandshakeResult, DirectionalKeys), String> {
+    let kem_pk_buf = read_fixed(stream, 1184, "kem_pk").await?;
+    let ephemeral_pk =
+        MlKemPublicKey::from_bytes(&kem_pk_buf).map_err(|e| format!("bad kem pk: {e}"))?;
+
+    let id_pk_buf = read_lp(stream, 8192, "init_pk").await?;
+    let initiator_pk =
+        ValidatorPqPublicKey::from_bytes(&id_pk_buf).map_err(|e| format!("bad init pk: {e}"))?;
+
+    let nonce_i_buf = read_fixed(stream, 32, "nonce_i").await?;
+    let mut nonce_i = [0u8; 32];
+    nonce_i.copy_from_slice(&nonce_i_buf);
+
+    let ver_buf = read_fixed(stream, 1, "version").await?;
+    let initiator_version = ver_buf[0];
+
+    let reply = responder_handle(
+        &ephemeral_pk,
+        &nonce_i,
+        initiator_version,
+        our_pk.clone(),
+        our_sk,
+    )
+    .map_err(|e| format!("responder_handle: {e}"))?;
+
+    stream
+        .write_all(reply.ciphertext.as_bytes())
+        .await
+        .map_err(|e| e.to_string())?;
+    write_lp(stream, &our_pk.to_bytes()).await?;
+    write_lp(stream, &reply.responder_sig.to_bytes()).await?;
+    stream
+        .write_all(&reply.nonce_r)
+        .await
+        .map_err(|e| e.to_string())?;
+    stream
+        .write_all(&[reply.protocol_version])
+        .await
+        .map_err(|e| e.to_string())?;
+    stream.flush().await.map_err(|e| e.to_string())?;
+
+    let init_sig_buf = read_lp(stream, 8192, "init_sig").await?;
+    let init_sig = ValidatorPqSignature::from_bytes(&init_sig_buf)
+        .map_err(|e| format!("bad init sig: {e}"))?;
+
+    let hs = reply
+        .verify_initiator(&init_sig, &initiator_pk)
+        .map_err(|e| format!("verify init: {e}"))?;
+
+    let keys = DirectionalKeys::derive(&hs.session_key, false);
+    Ok((hs, keys))
+}
+
+async fn tcp_initiator_handshake(
+    stream: &mut TcpStream,
+    our_pk: &ValidatorPqPublicKey,
+    our_sk: &ValidatorPqSecretKey,
+    expected_responder_pk: &ValidatorPqPublicKey,
+) -> Result<(HandshakeResult, DirectionalKeys), String> {
+    let hs = InitiatorHandshake::new(our_pk.clone()).map_err(|e| format!("kem keygen: {e}"))?;
+
+    stream
+        .write_all(hs.ephemeral_pk.as_bytes())
+        .await
+        .map_err(|e| e.to_string())?;
+    write_lp(stream, &our_pk.to_bytes()).await?;
+    stream
+        .write_all(&hs.nonce_i)
+        .await
+        .map_err(|e| e.to_string())?;
+    stream
+        .write_all(&[hs.protocol_version])
+        .await
+        .map_err(|e| e.to_string())?;
+    stream.flush().await.map_err(|e| e.to_string())?;
+
+    let ct_buf = read_fixed(stream, 1088, "ct").await?;
+    let ciphertext = misaka_pqc::pq_kem::MlKemCiphertext::from_bytes(&ct_buf)
+        .map_err(|e| format!("bad ct: {e}"))?;
+
+    let resp_pk_buf = read_lp(stream, 8192, "resp_pk").await?;
+    let responder_pk = ValidatorPqPublicKey::from_bytes(&resp_pk_buf)
+        .map_err(|e| format!("bad resp pk: {e}"))?;
+    if &responder_pk != expected_responder_pk {
+        return Err(format!(
+            "MITM: responder pk mismatch (expected {}, got {})",
+            hex::encode(&expected_responder_pk.to_bytes()[..8]),
+            hex::encode(&responder_pk.to_bytes()[..8]),
+        ));
+    }
+
+    let resp_sig_buf = read_lp(stream, 8192, "resp_sig").await?;
+    let responder_sig = ValidatorPqSignature::from_bytes(&resp_sig_buf)
+        .map_err(|e| format!("bad resp sig: {e}"))?;
+
+    let nonce_r_buf = read_fixed(stream, 32, "nonce_r").await?;
+    let mut nonce_r = [0u8; 32];
+    nonce_r.copy_from_slice(&nonce_r_buf);
+
+    let rver_buf = read_fixed(stream, 1, "resp_version").await?;
+    let responder_version = rver_buf[0];
+    if responder_version < misaka_p2p::handshake::MIN_PROTOCOL_VERSION {
+        return Err(format!(
+            "responder version {} below minimum {}",
+            responder_version,
+            misaka_p2p::handshake::MIN_PROTOCOL_VERSION,
+        ));
+    }
+    let negotiated_version = hs.protocol_version.min(responder_version);
+
+    use misaka_pqc::pq_kem::{kdf_derive, ml_kem_decapsulate};
+    let ss =
+        ml_kem_decapsulate(&hs.ephemeral_sk, &ciphertext).map_err(|e| format!("decap: {e}"))?;
+    let session_key = kdf_derive(&ss, b"MISAKA-v3:p2p:session-key:", 0);
+
+    let ipk_hash: [u8; 32] = {
+        let mut h = Sha3_256::new();
+        h.update(b"MISAKA-v3:initiator-pk:");
+        h.update(&ValidatorPqPublicKey::zero().to_bytes());
+        h.finalize().into()
+    };
+    let rpk_hash: [u8; 32] = {
+        let mut h = Sha3_256::new();
+        h.update(b"MISAKA-v3:responder-pk:");
+        h.update(&responder_pk.to_bytes());
+        h.finalize().into()
+    };
+    let mut transcript = Vec::with_capacity(512 + 1184 + 1088);
+    transcript.extend_from_slice(b"MISAKA-v3:p2p:transcript:");
+    transcript.push(negotiated_version);
+    transcript.extend_from_slice(&hs.nonce_i);
+    transcript.extend_from_slice(&nonce_r);
+    transcript.extend_from_slice(hs.ephemeral_pk.as_bytes());
+    transcript.extend_from_slice(ciphertext.as_bytes());
+    transcript.extend_from_slice(&ipk_hash);
+    transcript.extend_from_slice(&rpk_hash);
+
+    validator_verify(&transcript, &responder_sig, &responder_pk)
+        .map_err(|e| format!("resp sig verify: {e}"))?;
+
+    let our_sig = validator_sign(&transcript, our_sk).map_err(|e| format!("sign: {e}"))?;
+    write_lp(stream, &our_sig.to_bytes()).await?;
+    stream.flush().await.map_err(|e| e.to_string())?;
+
+    let dir_keys = DirectionalKeys::derive(&session_key, true);
+    Ok((
+        HandshakeResult {
+            session_key,
+            peer_pk: responder_pk,
+            our_signature: our_sig,
+            protocol_version: negotiated_version,
+        },
+        dir_keys,
+    ))
+}
+
+async fn read_raw_frame(reader: &mut tokio::io::ReadHalf<TcpStream>) -> Result<Vec<u8>, AeadError> {
+    let mut len_buf = [0u8; FRAME_HEADER_SIZE];
+    tokio::time::timeout(
+        Duration::from_secs(READ_TIMEOUT_SECS),
+        reader.read_exact(&mut len_buf),
+    )
+    .await
+    .map_err(|_| AeadError::Io("timeout".into()))?
+    .map_err(|e| AeadError::Io(e.to_string()))?;
+
+    let frame_len = u32::from_le_bytes(len_buf);
+    if frame_len > MAX_FRAME_SIZE {
+        return Err(AeadError::FrameTooLarge { size: frame_len });
+    }
+    if frame_len < (NONCE_SIZE + TAG_SIZE) as u32 {
+        return Err(AeadError::DecryptFailed);
+    }
+
+    let mut frame = vec![0u8; frame_len as usize];
+    reader
+        .read_exact(&mut frame)
+        .await
+        .map_err(|e| AeadError::Io(e.to_string()))?;
+    Ok(frame)
+}
+
+struct PeerRegistry {
+    peers: HashMap<u32, mpsc::Sender<MisakaMessage>>,
+}
+
+impl PeerRegistry {
+    fn new() -> Self {
+        Self {
+            peers: HashMap::new(),
+        }
+    }
+
+    fn insert(&mut self, authority_index: u32, tx: mpsc::Sender<MisakaMessage>) {
+        self.peers.insert(authority_index, tx);
+    }
+
+    fn remove(&mut self, authority_index: u32) {
+        self.peers.remove(&authority_index);
+    }
+
+    async fn send(&self, authority_index: u32, msg: MisakaMessage) {
+        if let Some(tx) = self.peers.get(&authority_index) {
+            let _ = tx.send(msg).await;
+        }
+    }
+
+    async fn broadcast(&self, msg: MisakaMessage) {
+        for tx in self.peers.values() {
+            let _ = tx.send(msg.clone()).await;
+        }
+    }
+}
+
+async fn run_peer_session(
+    stream: TcpStream,
+    peer: RelayPeer,
+    peer_id: misaka_p2p::PeerId,
+    address: SocketAddr,
+    keys: DirectionalKeys,
+    inbound_tx: mpsc::Sender<InboundNarwhalRelayEvent>,
+    mut peer_out_rx: mpsc::Receiver<MisakaMessage>,
+) {
+    let (mut reader, mut writer) = tokio::io::split(stream);
+    let short = peer_id.short_hex();
+    let short_writer = short.clone();
+
+    let writer_task = tokio::spawn(async move {
+        let mut nonce = NonceCounter::new();
+        while let Some(msg) = peer_out_rx.recv().await {
+            let plaintext = match serde_json::to_vec(&msg) {
+                Ok(bytes) => bytes,
+                Err(err) => {
+                    warn!("Failed to encode relay message for {}: {}", short_writer, err);
+                    continue;
+                }
+            };
+            let wire = match encode_wire_frame(&keys.send_key, &mut nonce, &plaintext) {
+                Ok(wire) => wire,
+                Err(err) => {
+                    warn!("Failed to encrypt relay message for {}: {}", short_writer, err);
+                    break;
+                }
+            };
+            if writer.write_all(&wire).await.is_err() || writer.flush().await.is_err() {
+                break;
+            }
+        }
+    });
+
+    // SEC-FIX NH-2: Wire VoteRateLimiter into the peer session decode path
+    let mut vote_limiter = VoteRateLimiter::new(MAX_VOTES_PER_PEER_PER_EPOCH);
+    let peer_id_bytes = peer_id.as_bytes().to_vec();
+
+    // SEC-FIX TM-6/TM-7: Counters for disconnect thresholds
+    const MAX_RATE_LIMIT_VIOLATIONS: u32 = 10;
+    const MAX_CONSECUTIVE_DECODE_FAILURES: u32 = 20;
+    let mut rate_limit_violations: u32 = 0;
+    let mut decode_fail_count: u32 = 0;
+
+    let mut recv_tracker = RecvNonceTracker::new();
+    loop {
+        let raw_frame = match read_raw_frame(&mut reader).await {
+            Ok(frame) => frame,
+            Err(AeadError::Io(err)) if err.contains("timeout") => break,
+            Err(err) => {
+                debug!("relay read ended for {}: {}", short, err);
+                break;
+            }
+        };
+
+        let nonce_value = match raw_frame.get(..8).and_then(|b| <[u8; 8]>::try_from(b).ok()) {
+            Some(bytes) => u64::from_le_bytes(bytes),
+            None => {
+                warn!("relay frame from {} missing nonce prefix", short);
+                break;
+            }
+        };
+        if let Err(err) = recv_tracker.check_and_record(nonce_value) {
+            warn!("relay nonce check failed for {}: {}", short, err);
+            break;
+        }
+
+        let plaintext = match decrypt_frame(&keys.recv_key, &raw_frame) {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                warn!("relay decrypt failed for {}: {}", short, err);
+                break;
+            }
+        };
+
+        let message: MisakaMessage = match serde_json::from_slice(&plaintext) {
+            Ok(message) => message,
+            Err(err) => {
+                // SEC-FIX TM-7: Count consecutive decode failures and disconnect
+                decode_fail_count += 1;
+                warn!("relay envelope decode failed for {} ({}/{}): {}", short, decode_fail_count, MAX_CONSECUTIVE_DECODE_FAILURES, err);
+                if decode_fail_count >= MAX_CONSECUTIVE_DECODE_FAILURES {
+                    warn!("too many consecutive decode failures for {} — disconnecting", short);
+                    break;
+                }
+                continue;
+            }
+        };
+        decode_fail_count = 0; // reset on successful decode
+
+        // SEC-FIX NH-2: Use rate-limited decoder to prevent CommitVote flooding
+        match NarwhalRelayMessage::from_message_rate_limited(
+            &message,
+            &mut vote_limiter,
+            &peer_id_bytes,
+            0, // epoch is reset by VoteRateLimiter::check on change
+        ) {
+            Ok(message) => {
+                if inbound_tx
+                    .send(InboundNarwhalRelayEvent::Message {
+                        authority_index: peer.authority_index,
+                        peer_id,
+                        address,
+                        message,
+                    })
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            Err(misaka_p2p::narwhal_block_relay::NarwhalRelayDecodeError::RateLimited) => {
+                // SEC-FIX TM-6: Count rate limit violations and disconnect persistent offenders
+                rate_limit_violations += 1;
+                warn!("CommitVote rate limited for peer {} ({}/{})", short, rate_limit_violations, MAX_RATE_LIMIT_VIOLATIONS);
+                if rate_limit_violations >= MAX_RATE_LIMIT_VIOLATIONS {
+                    warn!("persistent rate limit violations from {} — disconnecting", short);
+                    break;
+                }
+            }
+            Err(err) => {
+                warn!("relay payload decode failed for {}: {}", short, err);
+            }
+        }
+    }
+
+    writer_task.abort();
+    let _ = inbound_tx
+        .send(InboundNarwhalRelayEvent::PeerDisconnected {
+            authority_index: peer.authority_index,
+            peer_id,
+            address,
+        })
+        .await;
+}
+
+async fn connect_outbound_peer(
+    peer: RelayPeer,
+    config: NarwhalRelayTransportConfig,
+    registry: Arc<RwLock<PeerRegistry>>,
+    inbound_tx: mpsc::Sender<InboundNarwhalRelayEvent>,
+) {
+    let retry_delay = Duration::from_secs(2);
+
+    loop {
+        match TcpStream::connect(peer.address).await {
+            Ok(mut stream) => {
+                match tcp_initiator_handshake(
+                    &mut stream,
+                    &config.public_key,
+                    &config.secret_key,
+                    &peer.public_key,
+                )
+                .await
+                {
+                    Ok((hs, keys)) => {
+                        let peer_id = derive_peer_id(&hs.peer_pk, config.chain_id);
+                        let (peer_tx, peer_rx) = mpsc::channel(PEER_OUTBOUND_CAPACITY);
+                        registry.write().await.insert(peer.authority_index, peer_tx);
+                        let _ = inbound_tx
+                            .send(InboundNarwhalRelayEvent::PeerConnected {
+                                authority_index: peer.authority_index,
+                                peer_id,
+                                address: peer.address,
+                            })
+                            .await;
+                        run_peer_session(
+                            stream,
+                            peer.clone(),
+                            peer_id,
+                            peer.address,
+                            keys,
+                            inbound_tx.clone(),
+                            peer_rx,
+                        )
+                        .await;
+                        registry.write().await.remove(peer.authority_index);
+                    }
+                    Err(err) => {
+                        warn!(
+                            "Narwhal relay outbound handshake failed (authority={}, addr={}): {}",
+                            peer.authority_index,
+                            peer.address,
+                            err
+                        );
+                    }
+                }
+            }
+            Err(err) => {
+                debug!(
+                    "Narwhal relay connect retry (authority={}, addr={}): {}",
+                    peer.authority_index,
+                    peer.address,
+                    err
+                );
+            }
+        }
+
+        tokio::time::sleep(retry_delay).await;
+    }
+}
+
+pub fn spawn_narwhal_block_relay_transport(
+    config: NarwhalRelayTransportConfig,
+    inbound_tx: mpsc::Sender<InboundNarwhalRelayEvent>,
+    mut outbound_rx: mpsc::Receiver<OutboundNarwhalRelayEvent>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let listener = match TcpListener::bind(config.listen_addr).await {
+            Ok(listener) => listener,
+            Err(err) => {
+                error!("Narwhal relay bind {} failed: {}", config.listen_addr, err);
+                return;
+            }
+        };
+        info!(
+            "Narwhal relay transport listening on {} (authority={})",
+            config.listen_addr,
+            config.authority_index
+        );
+
+        let registry = Arc::new(RwLock::new(PeerRegistry::new()));
+        let peer_by_pk: Arc<HashMap<Vec<u8>, RelayPeer>> = Arc::new(
+            config
+                .peers
+                .iter()
+                .cloned()
+                .map(|peer| (peer.public_key.to_bytes(), peer))
+                .collect(),
+        );
+
+        let outbound_registry = registry.clone();
+        tokio::spawn(async move {
+            while let Some(event) = outbound_rx.recv().await {
+                match event {
+                    OutboundNarwhalRelayEvent::Broadcast(message) => {
+                        if let Ok(wire) = message.to_message() {
+                            outbound_registry.read().await.broadcast(wire).await;
+                        }
+                    }
+                    OutboundNarwhalRelayEvent::ToAuthority {
+                        authority_index,
+                        message,
+                    } => {
+                        if let Ok(wire) = message.to_message() {
+                            outbound_registry.read().await.send(authority_index, wire).await;
+                        }
+                    }
+                }
+            }
+        });
+
+        for peer in config
+            .peers
+            .iter()
+            .filter(|peer| peer.authority_index > config.authority_index)
+            .cloned()
+        {
+            let registry = registry.clone();
+            let inbound_tx = inbound_tx.clone();
+            let config = config.clone();
+            tokio::spawn(async move {
+                connect_outbound_peer(peer, config, registry, inbound_tx).await;
+            });
+        }
+
+        let conn_guard: Arc<tokio::sync::Mutex<misaka_p2p::ConnectionGuard>> = Arc::new(
+            tokio::sync::Mutex::new(misaka_p2p::ConnectionGuard::with_config(
+                config.guard_config.clone(),
+            )),
+        );
+        {
+            let guard = conn_guard.clone();
+            tokio::spawn(async move {
+                let mut ticker = tokio::time::interval(Duration::from_secs(30));
+                loop {
+                    ticker.tick().await;
+                    guard.lock().await.cleanup();
+                }
+            });
+        }
+
+        loop {
+            match listener.accept().await {
+                Ok((mut stream, address)) => {
+                    let remote_ip = address.ip();
+                    let slot_id = {
+                        let mut guard = conn_guard.lock().await;
+                        if reject_inbound_bogon_ip(&remote_ip, config.chain_id) {
+                            debug!("Rejecting bogon Narwhal relay inbound {}", address);
+                            drop(stream);
+                            continue;
+                        }
+                        match guard.check_inbound(remote_ip) {
+                            misaka_p2p::GuardDecision::Allow => guard.register_half_open(remote_ip),
+                            misaka_p2p::GuardDecision::Reject(reason) => {
+                                debug!("Rejecting Narwhal relay inbound {}: {}", address, reason);
+                                drop(stream);
+                                continue;
+                            }
+                        }
+                    };
+
+                    let guard = conn_guard.clone();
+                    let inbound_tx = inbound_tx.clone();
+                    let registry = registry.clone();
+                    let config = config.clone();
+                    let peer_by_pk = peer_by_pk.clone();
+                    tokio::spawn(async move {
+                        struct ConnSlotGuard {
+                            guard: Arc<tokio::sync::Mutex<misaka_p2p::ConnectionGuard>>,
+                            ip: IpAddr,
+                            slot_id: u64,
+                            promoted: bool,
+                        }
+
+                        impl Drop for ConnSlotGuard {
+                            fn drop(&mut self) {
+                                let guard = self.guard.clone();
+                                let ip = self.ip;
+                                let slot_id = self.slot_id;
+                                let promoted = self.promoted;
+                                tokio::spawn(async move {
+                                    let mut guard = guard.lock().await;
+                                    if promoted {
+                                        guard.on_disconnect(ip);
+                                    } else {
+                                        guard.cancel_half_open(slot_id);
+                                    }
+                                });
+                            }
+                        }
+
+                        let mut slot_guard = ConnSlotGuard {
+                            guard,
+                            ip: remote_ip,
+                            slot_id,
+                            promoted: false,
+                        };
+
+                        let (hs, keys) = match tcp_responder_handshake(
+                            &mut stream,
+                            &config.public_key,
+                            &config.secret_key,
+                        )
+                        .await
+                        {
+                            Ok(result) => result,
+                            Err(err) => {
+                                warn!("Narwhal relay inbound handshake failed {}: {}", address, err);
+                                return;
+                            }
+                        };
+
+                        {
+                            let mut guard = slot_guard.guard.lock().await;
+                            guard.promote_to_established(slot_id);
+                        }
+                        slot_guard.promoted = true;
+
+                        let peer = match peer_by_pk.get(&hs.peer_pk.to_bytes()) {
+                            Some(peer) => peer.clone(),
+                            None => {
+                                warn!("Rejecting unknown relay peer {}", address);
+                                return;
+                            }
+                        };
+
+                        let peer_id = derive_peer_id(&hs.peer_pk, config.chain_id);
+                        let (peer_tx, peer_rx) = mpsc::channel(PEER_OUTBOUND_CAPACITY);
+                        registry.write().await.insert(peer.authority_index, peer_tx);
+                        let _ = inbound_tx
+                            .send(InboundNarwhalRelayEvent::PeerConnected {
+                                authority_index: peer.authority_index,
+                                peer_id,
+                                address,
+                            })
+                            .await;
+                        run_peer_session(
+                            stream,
+                            peer.clone(),
+                            peer_id,
+                            address,
+                            keys,
+                            inbound_tx.clone(),
+                            peer_rx,
+                        )
+                        .await;
+                        registry.write().await.remove(peer.authority_index);
+                    });
+                }
+                Err(err) => {
+                    error!("Narwhal relay accept failed: {}", err);
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            }
+        }
+    })
+}

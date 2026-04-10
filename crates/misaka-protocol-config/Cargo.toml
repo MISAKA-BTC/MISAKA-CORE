@@ -1,0 +1,12 @@
+[package]
+name = "misaka-protocol-config"
+description = "MISAKA Protocol Configuration — Single Source of Truth for all protocol constants"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+
+[lints]
+workspace = true

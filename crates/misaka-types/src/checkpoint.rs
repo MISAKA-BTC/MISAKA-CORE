@@ -46,14 +46,18 @@ pub fn compute_tx_digest_merkle_root(tx_digests: &[Digest]) -> Digest {
         .collect();
     while layer.len() > 1 {
         if layer.len() % 2 == 1 {
-            let last = *layer.last().unwrap();
+            // SAFETY: layer.len() >= 2 (while condition) and odd, so last() always Some
+            let last = match layer.last() {
+                Some(v) => *v,
+                None => break,
+            };
             layer.push(last);
         }
         let mut next = Vec::with_capacity(layer.len() / 2);
         for pair in layer.chunks_exact(2) {
             let mut h = Sha3_256::new();
-            h.update(&pair[0]);
-            h.update(&pair[1]);
+            h.update(pair[0]);
+            h.update(pair[1]);
             next.push(h.finalize().into());
         }
         layer = next;

@@ -2,7 +2,7 @@
 //!
 //! MISAKA Network uses exclusively post-quantum cryptography:
 //! - **ML-DSA-65** (FIPS 204): Required for all signatures
-//! - **LaRRS**: Reserved for future ring signature extensions
+//! - **LaRRS**: Reserved for future ML-DSA signature extensions
 //!
 //! No ECC (Ed25519, ECDSA, etc.) is used anywhere.
 
@@ -18,7 +18,7 @@ use sha3::{Digest as Sha3Digest, Sha3_256};
 pub enum SignatureScheme {
     /// ML-DSA-65 (FIPS 204 / Dilithium3). pk=1952, sig=3309.
     MlDsa65 = 0x01,
-    /// Lattice ring signature (MISAKA-LRS-v1). Variable size.
+    /// Lattice ML-DSA signature (MISAKA-LRS-v1). Variable size.
     LatticeRing = 0x02,
 }
 
@@ -74,8 +74,8 @@ impl MisakaPublicKey {
         hasher.update([self.scheme as u8]);
         hasher.update(&self.bytes);
         let hash: [u8; 32] = hasher.finalize().into();
-        let mut addr = [0u8; 20];
-        addr.copy_from_slice(&hash[..20]);
+        let mut addr = [0u8; 32];
+        addr.copy_from_slice(&hash);
         addr
     }
 
@@ -172,9 +172,9 @@ impl MisakaSecretKey {
 
 impl Drop for MisakaSecretKey {
     fn drop(&mut self) {
-        for b in self.bytes.iter_mut() {
-            *b = 0;
-        }
+        // SEC-AUDIT-V5 MED-001: use zeroize crate to prevent compiler elision.
+        use zeroize::Zeroize;
+        self.bytes.zeroize();
     }
 }
 
@@ -192,7 +192,7 @@ mod tests {
     fn test_ml_dsa_address_derivation() {
         let pk = MisakaPublicKey::ml_dsa(vec![0xAA; 1952]).unwrap();
         let addr = pk.to_address();
-        assert_eq!(addr.len(), 20);
+        assert_eq!(addr.len(), 32);
         assert_eq!(pk.to_address(), pk.to_address()); // deterministic
     }
 

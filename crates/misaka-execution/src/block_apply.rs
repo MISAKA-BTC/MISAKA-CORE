@@ -8,10 +8,6 @@ use misaka_consensus::validator_set::ValidatorSet;
 use misaka_storage::utxo_set::{BlockDelta, UtxoSet};
 
 // 必要な型を misaka-types からインポート
-use misaka_types::utxo::{
-    OutputRef, RingInput, TxOutput, TxType, UtxoTransaction, RING_SCHEME_LRS, UTXO_TX_VERSION,
-};
-
 /// Full block execution result.
 #[derive(Debug)]
 pub struct BlockResult {
@@ -20,7 +16,7 @@ pub struct BlockResult {
     pub total_fees: u64,
     pub utxos_created: usize,
     pub utxos_spent: usize,
-    pub key_images_added: usize,
+    // Phase 2c-B D4c: spend_ids_added deleted
 }
 
 /// Execute a block: validate all txs, apply state changes, return result.
@@ -40,176 +36,126 @@ pub fn execute_block(
     // Single entry point for all validation — no duplicate proposer check.
     let delta = block_validation::validate_and_apply_block(block, utxo_set, validator_set)?;
 
-    let total_fees: u64 = block.transactions.iter().map(|vtx| vtx.tx.fee).sum();
+    // SEC-FIX: Use checked_add to prevent silent overflow in release builds.
+    // 256 txs with fee near u64::MAX would wrap to a small number.
+    let total_fees: u64 = block.transactions.iter()
+        .map(|vtx| vtx.tx.fee)
+        .try_fold(0u64, |acc, fee| acc.checked_add(fee))
+        .ok_or(BlockError::FeeOverflow)?;
 
     Ok(BlockResult {
         height: block.height,
         tx_count: block.transactions.len(),
         total_fees,
         utxos_created: delta.created.len(),
-        // In anonymous nullifier model, "spent" count = nullifiers added
-        utxos_spent: delta.key_images_added.len(),
-        key_images_added: delta.key_images_added.len(),
+        utxos_spent: delta.spent.len(),
     })
 }
 
-#[cfg(feature = "stark-stub")]
-pub fn execute_block_zero_knowledge(
-    block: &BlockCandidate,
-    utxo_set: &mut UtxoSet,
-    validator_set: Option<&ValidatorSet>,
-) -> Result<BlockResult, BlockError> {
-    let delta =
-        block_validation::validate_and_apply_block_zero_knowledge(block, utxo_set, validator_set)?;
-
-    let total_fees: u64 = block.transactions.iter().map(|vtx| vtx.tx.fee).sum();
-
-    Ok(BlockResult {
-        height: block.height,
-        tx_count: block.transactions.len(),
-        total_fees,
-        utxos_created: delta.created.len(),
-        utxos_spent: delta.key_images_added.len(),
-        key_images_added: delta.key_images_added.len(),
-    })
-}
-
-/// Undo the last block (for reorg).
-pub fn rollback_last_block(utxo_set: &mut UtxoSet) -> Result<BlockDelta, BlockError> {
-    block_validation::rollback_block(utxo_set)
+/// Undo the last block (for SPC switch only).
+///
+/// This is NOT a protocol-level rollback. Used exclusively during
+/// shallow Selected Parent Chain switches. Finality boundary check
+/// MUST be performed by the caller before invoking this.
+pub fn undo_last_block(utxo_set: &mut UtxoSet) -> Result<BlockDelta, BlockError> {
+    block_validation::undo_last_block(utxo_set)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use misaka_consensus::block_validation::{VerifiedRingProof, VerifiedTx};
-    use misaka_pqc::ki_proof::{canonical_strong_ki, prove_key_image};
-    use misaka_pqc::pq_ring::*;
+    use misaka_consensus::block_validation::{VerifiedProof, VerifiedTx};
+    use misaka_pqc::key_derivation::{derive_public_param, Poly, SpendingKeypair, DEFAULT_A_SEED};
     use misaka_pqc::pq_sign::MlDsaKeypair;
-    use misaka_pqc::{TransactionPrivacyConstraints, TransactionPublicStatement};
+    use misaka_types::utxo::*;
 
     fn setup() -> (UtxoSet, Vec<SpendingKeypair>, Poly) {
         let a = derive_public_param(&DEFAULT_A_SEED);
         let mut utxo_set = UtxoSet::new(100);
         let wallets: Vec<SpendingKeypair> = (0..6)
-            .map(|_| SpendingKeypair::from_ml_dsa(MlDsaKeypair::generate().secret_key).unwrap())
+            .map(|_| {
+                let kp = MlDsaKeypair::generate();
+                let pk_bytes = kp.public_key.as_bytes().to_vec();
+                SpendingKeypair::from_ml_dsa_pair(kp.secret_key, pk_bytes).unwrap()
+            })
             .collect();
-        for (i, _w) in wallets.iter().enumerate() {
+        for (i, w) in wallets.iter().enumerate() {
             let outref = OutputRef {
                 tx_hash: [(i + 1) as u8; 32],
                 output_index: 0,
             };
             utxo_set
                 .add_output(
-                    outref,
+                    outref.clone(),
                     TxOutput {
                         amount: 10_000,
-                        one_time_address: [0xAA; 32],
-                        pq_stealth: None,
-                        spending_pubkey: None,
+                        address: [0xAA; 32],
+                        spending_pubkey: Some(w.ml_dsa_pk().to_vec()),
                     },
                     0,
+                    false,
                 )
                 .unwrap();
+            utxo_set.register_spending_key(outref, w.ml_dsa_pk().to_vec()).expect("test: register_spending_key");
         }
         (utxo_set, wallets, a)
     }
 
-    fn make_vtx(a: &Poly, wallets: &[SpendingKeypair], amount: u64, fee: u64) -> VerifiedTx {
-        let ring_pks: Vec<Poly> = (0..4).map(|i| wallets[i].public_poly.clone()).collect();
+    fn make_vtx(wallets: &[SpendingKeypair], amount: u64, fee: u64) -> VerifiedTx {
+        let ring_pks: Vec<Poly> = vec![wallets[0].public_poly.clone()];
 
-        // Use strong-binding canonical key image (matches ki_proof algebra)
-        let (_, strong_ki) = canonical_strong_ki(&wallets[0].public_poly, &wallets[0].secret_poly);
+        // D4b: spend-tag field removed from TxInput
 
         let tx = UtxoTransaction {
-            ring_scheme: RING_SCHEME_LRS,
-            tx_type: TxType::Transfer,
+            tx_type: TxType::TransparentTransfer,
             version: UTXO_TX_VERSION,
-            inputs: vec![RingInput {
-                ring_members: (0..4)
-                    .map(|i| OutputRef {
-                        tx_hash: [(i + 1) as u8; 32],
-                        output_index: 0,
-                    })
-                    .collect(),
-                ring_signature: vec![],
-                key_image: strong_ki,
-                ki_proof: vec![],
+            inputs: vec![TxInput {
+                utxo_refs: vec![OutputRef {
+                    tx_hash: [1u8; 32],
+                    output_index: 0,
+                }],
+                proof: vec![], // will be filled with ML-DSA sig
             }],
             outputs: vec![
                 TxOutput {
                     amount,
-                    one_time_address: [0xBB; 32],
-                    pq_stealth: None,
+                    address: [0xCC; 32],
                     spending_pubkey: None,
                 },
                 TxOutput {
                     amount: 10_000 - amount - fee,
-                    one_time_address: [0xCC; 32],
-                    pq_stealth: None,
+                    address: [0xCC; 32],
                     spending_pubkey: None,
                 },
             ],
             fee,
             extra: vec![],
-            zk_proof: None,
+            expiry: 0,
         };
 
-        let sig = ring_sign(
-            a,
-            &ring_pks,
-            0,
-            &wallets[0].secret_poly,
-            &tx.signing_digest(),
-        )
-        .unwrap();
-        let kip = prove_key_image(
-            a,
-            &wallets[0].secret_poly,
-            &wallets[0].public_poly,
-            &strong_ki,
-        )
-        .unwrap();
+        // Sign with ML-DSA-65
+        // Phase 2c-B: signing_digest deleted; use tx_hash for v1 compat
+        let digest = tx.tx_hash();
+        let sig = misaka_pqc::ml_dsa_sign_raw(&wallets[0].ml_dsa_sk, &digest).unwrap();
 
-        // 3. 署名データをセット
         let mut tx_final = tx;
-        tx_final.inputs[0].ring_signature = sig.to_bytes();
-        tx_final.inputs[0].ki_proof = kip.to_bytes();
+        tx_final.inputs[0].proof = sig.as_bytes().to_vec();
 
         VerifiedTx {
-            tx: tx_final.clone(),
-            ring_pubkeys: vec![ring_pks.clone()],
-            ring_amounts: vec![vec![10_000; 4]], // same-amount ring
-            ring_proofs: vec![VerifiedRingProof::Lrs {
-                sig,
-                ki_proof: Some(kip),
+            tx: tx_final,
+            ring_pubkeys: vec![ring_pks],
+            raw_spending_keys: vec![wallets[0].ml_dsa_pk().to_vec()],
+            ring_amounts: vec![vec![10_000]],
+            ring_proofs: vec![VerifiedProof::Transparent {
+                raw_sig: sig.as_bytes().to_vec(),
             }],
-            privacy_constraints: TransactionPrivacyConstraints::from_tx_and_input_amounts(
-                &tx_final,
-                &[10_000],
-            )
-            .ok(),
-            privacy_statement: TransactionPrivacyConstraints::from_tx_and_input_amounts(
-                &tx_final,
-                &[10_000],
-            )
-            .ok()
-            .and_then(|constraints| {
-                TransactionPublicStatement::from_constraints_and_resolved_rings(
-                    &tx_final,
-                    &constraints,
-                    &[ring_pks.clone()],
-                    misaka_pqc::PrivacyBackendFamily::RingSignature,
-                )
-                .ok()
-            }),
         }
     }
 
     #[test]
     fn test_execute_block_ok() {
-        let (mut utxo_set, wallets, a) = setup();
-        let vtx = make_vtx(&a, &wallets, 7000, 100);
+        let (mut utxo_set, wallets, _a) = setup();
+        let vtx = make_vtx(&wallets, 7000, 100);
         let block = BlockCandidate {
             height: 1,
             slot: 1,
@@ -226,9 +172,9 @@ mod tests {
 
     #[test]
     fn test_execute_and_rollback() {
-        let (mut utxo_set, wallets, a) = setup();
-        let _initial = utxo_set.len(); // 警告回避のため _ を追加
-        let vtx = make_vtx(&a, &wallets, 7000, 100);
+        let (mut utxo_set, wallets, _a) = setup();
+        let _initial = utxo_set.len();
+        let vtx = make_vtx(&wallets, 7000, 100);
         let block = BlockCandidate {
             height: 1,
             slot: 1,
@@ -238,7 +184,7 @@ mod tests {
         };
         execute_block(&block, &mut utxo_set, None).unwrap();
         assert_eq!(utxo_set.height, 1);
-        rollback_last_block(&mut utxo_set).unwrap();
+        undo_last_block(&mut utxo_set).unwrap();
         assert_eq!(utxo_set.height, 0);
     }
 }

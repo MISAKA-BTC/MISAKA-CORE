@@ -38,10 +38,10 @@ pub enum MisakaError {
     #[error("Kyber-768 error: {0}")]
     KyberError(String),
 
-    #[error("LaRRS ring signature error: {0}")]
+    #[error("LaRRS ML-DSA signature error: {0}")]
     LaRRSError(String),
 
-    #[error("Jamtis stealth address error: {0}")]
+    #[error("Jamtis address error: {0}")]
     JamtisError(String),
 
     // ── Transaction ──────────────────────────
@@ -56,6 +56,33 @@ pub enum MisakaError {
 
     #[error("gas budget exceeded: charged={charged}, limit={limit}")]
     GasBudgetExceeded { charged: u64, limit: u64 },
+
+    #[error("too many inputs: {count} > {max}")]
+    TooManyInputs { count: usize, max: usize },
+
+    #[error("too many actions: {count} > {max}")]
+    TooManyActions { count: usize, max: usize },
+
+    #[error("action args too large: {size} bytes > {max}")]
+    ActionArgsTooLarge { size: usize, max: usize },
+
+    #[error("gas price too low: {price} < {min}")]
+    GasPriceTooLow { price: u64, min: u64 },
+
+    #[error("gas budget too high: {budget} > {max}")]
+    GasBudgetTooHigh { budget: u64, max: u64 },
+
+    #[error("signature size mismatch: expected {expected}, got {got}")]
+    SignatureSizeMismatch { expected: usize, got: usize },
+
+    #[error("transaction expired: epoch {tx_epoch} < current {current_epoch}")]
+    TransactionExpired { tx_epoch: u64, current_epoch: u64 },
+
+    #[error("module name too long: {len} > {max}")]
+    ModuleNameTooLong { len: usize, max: usize },
+
+    #[error("function name too long: {len} > {max}")]
+    FunctionNameTooLong { len: usize, max: usize },
 
     #[error("arithmetic overflow")]
     ArithmeticOverflow,

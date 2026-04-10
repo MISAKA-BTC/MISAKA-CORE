@@ -12,11 +12,38 @@ pub fn run(
     treasury_amount: u64,
     chain_id: u32,
     output_path: &str,
+    treasury_address_hex: Option<&str>,
 ) -> Result<()> {
     println!("🔧 Generating genesis configuration...");
     println!("   Validators: {}", validator_count);
     println!("   Treasury:   {} MISAKA", treasury_amount);
     println!("   Chain ID:   {}", chain_id);
+
+    // ── Resolve treasury address ──
+    let treasury_address: [u8; 32] = if let Some(hex_str) = treasury_address_hex {
+        let bytes = hex::decode(hex_str)
+            .map_err(|e| anyhow::anyhow!("invalid treasury address hex: {}", e))?;
+        if bytes.len() != 32 {
+            anyhow::bail!(
+                "treasury address must be 32 bytes (got {}). \
+                 Generate with: misaka-cli keygen --treasury",
+                bytes.len()
+            );
+        }
+        let mut addr = [0u8; 32];
+        addr.copy_from_slice(&bytes);
+        println!("   Treasury address: {}", hex_str);
+        addr
+    } else if chain_id == 1 {
+        anyhow::bail!(
+            "Mainnet genesis requires --treasury-address <hex>. \
+             This must be a real PQ-KEM address that the treasury \
+             operator can spend. Generate with: misaka-cli keygen --treasury"
+        );
+    } else {
+        println!("   ⚠ No treasury address specified — using testnet placeholder");
+        [0x01; 32]
+    };
 
     // ── Load validator keys if available ──
     let validator_keys_path = "validator_keys.json";
@@ -58,8 +85,8 @@ pub fn run(
         pq_tx_required: true,
         ki_proof_required: true,
         min_ring_size: 4,
-        max_ring_size: 16,
-        block_time_secs: 60,
+        max_anonymity_set: 16,
+        block_time_secs: misaka_types::constants::FAST_LANE_BLOCK_TIME_SECS, // M-4: was 60, now SSOT
         max_txs_per_block: 1000,
     };
 
@@ -67,8 +94,7 @@ pub fn run(
     let treasury = GenesisUtxo {
         output: TxOutput {
             amount: treasury_amount,
-            one_time_address: [0x01; 32],
-            pq_stealth: None,
+            address: treasury_address,
             spending_pubkey: None,
         },
         label: "treasury".into(),
@@ -137,12 +163,12 @@ pub fn run(
     Ok(())
 }
 
-fn derive_validator_id(index: usize) -> [u8; 20] {
+fn derive_validator_id(index: usize) -> [u8; 32] {
     let mut h = Sha3_256::new();
     h.update(b"MISAKA:validator:id:v1:");
     h.update((index as u64).to_le_bytes());
     let hash: [u8; 32] = h.finalize().into();
-    let mut id = [0u8; 20];
-    id.copy_from_slice(&hash[..20]);
+    let mut id = [0u8; 32];
+    id.copy_from_slice(&hash);
     id
 }

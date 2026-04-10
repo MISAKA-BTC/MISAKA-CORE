@@ -110,6 +110,31 @@ impl RpcClient {
             .await
             .with_context(|| format!("failed to parse JSON response from {}", url))
     }
+
+    /// GET JSON from an endpoint path.
+    pub async fn get_json(&self, path: &str) -> Result<Value> {
+        let url = format!("{}{}", self.base_url, path);
+        let response = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .with_context(|| format!("HTTP GET to {} failed", &url))?;
+        let status = response.status();
+        if !status.is_success() {
+            let body_text = response.text().await.unwrap_or_default();
+            anyhow::bail!(
+                "RPC error: HTTP {} from {} — {}",
+                status.as_u16(),
+                url,
+                &body_text[..body_text.len().min(200)]
+            );
+        }
+        response
+            .json::<Value>()
+            .await
+            .with_context(|| format!("failed to parse JSON response from {}", url))
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -162,7 +187,7 @@ pub async fn get_balance(rpc_url: &str, address: &str) -> Result<()> {
     let client = RpcClient::new(rpc_url)?;
     let resp = client
         .post_json(
-            "/api/get_address_outputs",
+            "/api/get_utxos_by_address",
             &serde_json::json!({
                 "address": address
             }),
@@ -181,13 +206,13 @@ pub async fn get_balance(rpc_url: &str, address: &str) -> Result<()> {
         Some(bal) => println!("  Balance: {} MISAKA", bal),
         None => println!("  Balance: [privacy-protected]"),
     }
-    println!("  TX Count: {}", resp["txCount"]);
+    println!("  UTXOs: {}", resp["utxoCount"]);
 
-    if let Some(outputs) = resp["outputs"].as_array() {
-        if !outputs.is_empty() {
+    if let Some(utxos) = resp["utxos"].as_array() {
+        if !utxos.is_empty() {
             println!();
-            println!("  Outputs ({}):", outputs.len());
-            for o in outputs {
+            println!("  UTXOs ({}):", utxos.len());
+            for o in utxos {
                 let tx = o["txHash"].as_str().unwrap_or("?");
                 let idx = &o["outputIndex"];
                 print!("    {}..:{}", &tx[..tx.len().min(12)], idx);

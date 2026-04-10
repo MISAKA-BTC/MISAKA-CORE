@@ -37,23 +37,8 @@ pub enum CryptoError {
     #[error("ML-KEM invalid ciphertext length: expected 1088, got {0}")]
     MlKemInvalidCtLen(usize),
 
-    #[error("stealth: domain separation tag mismatch")]
-    StealthDomainMismatch,
-
-    #[error("stealth: HMAC verification failed — output not for this recipient")]
-    StealthHmacMismatch,
-
-    #[error("stealth: encrypted payload too short (need ≥{min}, got {got})")]
-    StealthPayloadTooShort { min: usize, got: usize },
-
-    #[error("stealth: output index out of range")]
-    StealthIndexOutOfRange,
-
-    #[error("output recovery: no matching outputs found")]
-    NoMatchingOutputs,
-
-    #[error("ring signature invalid: {0}")]
-    RingSignatureInvalid(String),
+    #[error("ML-DSA signature invalid: {0}")]
+    ProofInvalid(String),
 
     #[error("ring: duplicate key image")]
     DuplicateKeyImage,
@@ -61,6 +46,6 @@ pub enum CryptoError {
     #[error("invalid seed length: expected {expected}, got {got}")]
     InvalidSeedLength { expected: usize, got: usize },
 
-    #[error("ZKP verification incomplete")]
-    IncompleteVerification,
+    #[error("internal cryptographic error: {0}")]
+    Internal(&'static str),
 }

@@ -38,13 +38,13 @@ mod tests {
     };
     use misaka_types::validator::*;
 
-    fn setup() -> (ValidatorSet, Vec<ValidatorKeypair>, Vec<[u8; 20]>) {
+    fn setup() -> (ValidatorSet, Vec<ValidatorKeypair>, Vec<[u8; 32]>) {
         let mut vs = Vec::new();
         let mut kps = Vec::new();
         let mut ids = Vec::new();
         for i in 0..4u8 {
             let kp = generate_validator_keypair();
-            let mut vid = [0u8; 20];
+            let mut vid = [0u8; 32];
             vid[0] = i;
             vs.push(ValidatorIdentity {
                 validator_id: vid,
@@ -60,12 +60,14 @@ mod tests {
         (ValidatorSet::new(vs), kps, ids)
     }
 
-    fn mk(kp: &ValidatorKeypair, vid: [u8; 20], s: u64, bh: [u8; 32]) -> CommitteeVote {
+    fn mk(kp: &ValidatorKeypair, vid: [u8; 32], s: u64, bh: [u8; 32]) -> CommitteeVote {
         let stub = CommitteeVote {
             slot: s,
             voter: vid,
             block_hash: bh,
             signature: ValidatorSignature { bytes: vec![] },
+            epoch: 0,
+            chain_id: 0,
         };
         let sig = validator_sign(&stub.signing_bytes(), &kp.secret_key).unwrap();
         CommitteeVote {
@@ -114,14 +116,14 @@ mod tests {
             block_hash: [0xC1; 32],
             blue_score: 99,
             utxo_root: [0xC2; 32],
-            total_key_images: 15,
+            total_spent_count: 15,
             total_applied_txs: 30,
         }
     }
 
     fn dag_vote(
         kp: &ValidatorKeypair,
-        vid: [u8; 20],
+        vid: [u8; 32],
         target: DagCheckpointTarget,
     ) -> DagCheckpointVote {
         let stub = DagCheckpointVote {

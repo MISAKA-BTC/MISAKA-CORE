@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MISAKA Testnet Explorer</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#0d1117;color:#c9d1d9;min-height:100vh}
+.header{background:linear-gradient(135deg,#161b22,#1f2937);padding:24px;border-bottom:1px solid #30363d;text-align:center}
+.header h1{font-size:1.8rem;color:#58a6ff;margin-bottom:4px}
+.header .sub{font-size:0.85rem;color:#8b949e}
+.container{max-width:900px;margin:0 auto;padding:20px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px;margin:20px 0}
+.card{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:20px;text-align:center}
+.card .label{font-size:0.75rem;text-transform:uppercase;color:#8b949e;letter-spacing:1px}
+.card .value{font-size:1.6rem;font-weight:700;color:#58a6ff;margin-top:8px}
+.card .value.green{color:#3fb950}
+.card .value.orange{color:#d29922}
+.section{background:#161b22;border:1px solid #30363d;border-radius:8px;padding:20px;margin:20px 0}
+.section h2{font-size:1.1rem;color:#f0f6fc;margin-bottom:16px;padding-bottom:8px;border-bottom:1px solid #21262d}
+.faucet-form{display:flex;gap:12px}
+.faucet-form input{flex:1;padding:10px 14px;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:0.95rem}
+.faucet-form input:focus{outline:none;border-color:#58a6ff}
+.faucet-form button{padding:10px 24px;background:#238636;color:#fff;border:none;border-radius:6px;cursor:pointer;font-weight:600;font-size:0.95rem}
+.faucet-form button:hover{background:#2ea043}
+.faucet-form button:disabled{opacity:0.5;cursor:not-allowed}
+.msg{margin-top:12px;padding:10px;border-radius:6px;font-size:0.85rem}
+.msg.ok{background:#0d2818;border:1px solid #238636;color:#3fb950}
+.msg.err{background:#2d1117;border:1px solid #da3633;color:#f85149}
+.blocks-list{max-height:300px;overflow-y:auto}
+.block-item{display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid #21262d;font-size:0.85rem}
+.block-item .hash{font-family:'Fira Code',monospace;color:#8b949e}
+.block-item .height{color:#58a6ff;font-weight:600;min-width:80px}
+.block-item .txs{color:#d29922;min-width:60px;text-align:right}
+.status-dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px}
+.status-dot.on{background:#3fb950}
+.status-dot.off{background:#da3633}
+footer{text-align:center;padding:24px;color:#484f58;font-size:0.75rem}
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>MISAKA Testnet Explorer</h1>
+  <div class="sub">Post-Quantum Native L1 Blockchain &mdash; ML-DSA-65 / Narwhal-Bullshark</div>
+</div>
+<div class="container">
+  <div class="grid">
+    <div class="card"><div class="label">Block Height</div><div class="value" id="height">--</div></div>
+    <div class="card"><div class="label">BPS</div><div class="value" id="bps">--</div></div>
+    <div class="card"><div class="label">Finality</div><div class="value green" id="finality">--</div></div>
+    <div class="card"><div class="label">Node Status</div><div class="value" id="status"><span class="status-dot off"></span>Offline</div></div>
+  </div>
+
+  <div class="section">
+    <h2>Faucet</h2>
+    <div class="faucet-form">
+      <input type="text" id="faucet-addr" placeholder="misaka1... or misakatest1...">
+      <button id="faucet-btn" onclick="requestFaucet()">Request 1 MISAKA</button>
+    </div>
+    <div id="faucet-msg"></div>
+  </div>
+
+  <div class="section">
+    <h2>Recent Blocks</h2>
+    <div class="blocks-list" id="blocks-list">
+      <div style="color:#484f58;text-align:center;padding:20px">Loading...</div>
+    </div>
+  </div>
+</div>
+<footer>MISAKA Network &copy; 2026 &mdash; Chain ID: 2 (testnet)</footer>
+
+<script>
+const API = window.location.origin;
+let prevHeight = 0;
+let lastTs = Date.now();
+
+async function poll() {
+  try {
+    const r = await fetch(API + '/api/get_chain_info');
+    const d = await r.json();
+    const h = d.block_height || d.dag_round || 0;
+    const now = Date.now();
+    const elapsed = (now - lastTs) / 1000;
+    const diff = h - prevHeight;
+    const bps = elapsed > 0 && prevHeight > 0 ? (diff / elapsed).toFixed(1) : '--';
+
+    document.getElementById('height').textContent = h.toLocaleString();
+    document.getElementById('bps').textContent = bps;
+    document.getElementById('finality').textContent = d.finality_height
+      ? d.finality_height.toLocaleString() : (d.committed_round || '--');
+    document.getElementById('status').innerHTML =
+      '<span class="status-dot on"></span>Online';
+
+    prevHeight = h;
+    lastTs = now;
+  } catch (e) {
+    document.getElementById('status').innerHTML =
+      '<span class="status-dot off"></span>Offline';
+  }
+
+  try {
+    const r2 = await fetch(API + '/api/get_recent_blocks');
+    const blocks = await r2.json();
+    const list = document.getElementById('blocks-list');
+    if (Array.isArray(blocks) && blocks.length > 0) {
+      list.innerHTML = blocks.map(b => {
+        const hash = (b.hash || b.block_hash || '').substring(0, 16) + '...';
+        const height = b.height || b.round || '?';
+        const txs = b.tx_count || b.transactions || 0;
+        return '<div class="block-item">' +
+          '<span class="height">#' + height + '</span>' +
+          '<span class="hash">' + hash + '</span>' +
+          '<span class="txs">' + txs + ' tx</span></div>';
+      }).join('');
+    }
+  } catch (e) {}
+}
+
+async function requestFaucet() {
+  const addr = document.getElementById('faucet-addr').value.trim();
+  const btn = document.getElementById('faucet-btn');
+  const msg = document.getElementById('faucet-msg');
+  if (!addr) { msg.innerHTML = '<div class="msg err">Please enter an address</div>'; return; }
+  btn.disabled = true;
+  btn.textContent = 'Sending...';
+  try {
+    const r = await fetch(API + '/api/faucet', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({address: addr})
+    });
+    const d = await r.json();
+    if (r.ok) {
+      msg.innerHTML = '<div class="msg ok">Sent! TX: ' + (d.tx_id || d.txid || 'OK') + '</div>';
+    } else {
+      msg.innerHTML = '<div class="msg err">' + (d.error || 'Request failed') + '</div>';
+    }
+  } catch (e) {
+    msg.innerHTML = '<div class="msg err">Network error: ' + e.message + '</div>';
+  }
+  btn.disabled = false;
+  btn.textContent = 'Request 1 MISAKA';
+}
+
+poll();
+setInterval(poll, 5000);
+</script>
+</body>
+</html>

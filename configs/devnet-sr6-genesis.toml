@@ -1,0 +1,66 @@
+# MISAKA SR6 Devnet Genesis Configuration
+#
+# 3-validator devnet on Sakura VPS (ConoHa).
+# Replace placeholder pubkeys with real ML-DSA-65 keys generated via:
+#   ./misaka-node --data-dir ./data keygen
+#
+# Hosts:
+#   validator-0: 133.167.126.213
+#   validator-1: 160.16.131.119
+#   validator-2: 49.212.166.172
+
+[chain]
+chain_id = 3
+chain_name = "MISAKA SR6 Devnet"
+
+[committee]
+epoch = 0
+
+[[committee.validators]]
+authority_index = 0
+public_key = "0x<VALIDATOR_0_PUBKEY>"
+stake = 1000
+network_address = "133.167.126.213:16111"
+
+[[committee.validators]]
+authority_index = 1
+public_key = "0x<VALIDATOR_1_PUBKEY>"
+stake = 1000
+network_address = "160.16.131.119:16111"
+
+[[committee.validators]]
+authority_index = 2
+public_key = "0x<VALIDATOR_2_PUBKEY>"
+stake = 1000
+network_address = "49.212.166.172:16111"
+
+[node]
+mode = "validator"
+data_dir = "/home/ubuntu/misaka-data"
+log_level = "info"
+
+[p2p]
+port = 6690
+max_inbound_peers = 32
+max_outbound_peers = 8
+max_handshake_attempts_per_ip = 5
+max_half_open = 64
+half_open_timeout_secs = 15
+max_inbound_per_subnet = 4
+max_inbound_per_ip = 2
+max_session_lifetime_secs = 86400
+min_protocol_version = 3
+
+[rpc]
+port = 3000
+
+[consensus]
+fast_block_time_secs = 2
+zkp_block_time_secs = 30
+
+[faucet]
+enabled = true
+amount = 1000000000
+cooldown_secs = 60
+
+# [shielded] — REMOVED: Shielded transfers deprecated in v1.0.

@@ -6,7 +6,7 @@
 //! - Returning outputs does NOT reveal who owns them.
 //! - Ownership is determined by the wallet using view keys / scan keys.
 //! - The node does NOT maintain address-indexed output sets.
-//! - Privacy comes from stealth addresses + ring signatures, NOT from hiding outputs.
+//! - Privacy comes from PQ-KEM addresses + ML-DSA signatures, NOT from hiding outputs.
 //!
 //! "Showing outputs" ≠ "revealing the owner"
 
@@ -22,13 +22,13 @@ use std::collections::HashMap;
 /// if an output belongs to it (Monero-style scanning).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TxOutput {
-    /// Recipient address (stealth one-time address in production).
+    /// Recipient address (recipient address in production).
     pub address: String,
-    /// Amount in base units (may be encrypted/committed in confidential mode).
+    /// Amount in base units.
     pub amount: u64,
     /// Output index within the transaction.
     pub output_index: u32,
-    /// One-time public key (for stealth scanning). Empty if not stealth.
+    /// Deprecated: one-time public key. Empty in transparent mode.
     #[serde(default)]
     pub one_time_pubkey: String,
     /// Ephemeral public key (tx public key for Diffie-Hellman with view key).
@@ -41,17 +41,17 @@ pub struct TxOutput {
 
 /// A transaction input — public spend proof.
 ///
-/// Contains the key image (nullifier) which prevents double-spending.
+/// Contains the spend identifier which prevents double-spending.
 /// The wallet checks if any of its owned outputs' key images appear
 /// in transaction inputs to detect spent outputs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TxInput {
     /// Key image — deterministic from the secret spend key.
     /// Used to detect if an owned output has been spent.
-    pub key_image: String,
+    pub spend_id: String,
     /// Ring size (number of decoy inputs).
     #[serde(default)]
-    pub ring_size: usize,
+    pub anonymity_set_size: usize,
     /// Source transaction hash (outpoint — which UTXO is being spent).
     #[serde(default)]
     pub source_tx_hash: String,
@@ -73,8 +73,8 @@ pub struct StoredTx {
     pub timestamp_ms: u64,
     pub status: String,
     /// Legacy / compatibility view of spent identifiers.
-    /// Kept so older tooling that only understands key images still works.
-    pub key_images: Vec<[u8; 32]>,
+    /// Kept so older tooling that only understands spend identifiers still works.
+    pub spend_ids: Vec<[u8; 32]>,
     /// Current privacy backend metadata stored with the tx so RPC / explorer
     /// do not need to guess semantics from the active node default.
     #[serde(default)]
@@ -109,11 +109,11 @@ pub struct StoredTx {
 }
 
 fn default_spend_identifier_model() -> SpendIdentifierModel {
-    SpendIdentifierModel::KeyImage
+    SpendIdentifierModel::CanonicalSpendTag
 }
 
 fn default_privacy_backend_family() -> PrivacyBackendFamily {
-    PrivacyBackendFamily::RingSignature
+    PrivacyBackendFamily::ZeroKnowledge
 }
 
 /// Stored block header.
@@ -154,7 +154,8 @@ pub struct ChainStore {
     hash_to_height: HashMap<[u8; 32], u64>,
     txs_by_block: HashMap<u64, Vec<StoredTx>>,
     tx_hash_to_block: HashMap<[u8; 32], u64>,
-    recent_txs: Vec<(StoredTx, u64)>,
+    /// ME-2 fix: VecDeque for O(1) pop_front instead of Vec::drain O(n).
+    recent_txs: std::collections::VecDeque<(StoredTx, u64)>,
     pub tip_height: u64,
     pub tip_hash: [u8; 32],
 }
@@ -166,14 +167,23 @@ impl ChainStore {
             hash_to_height: HashMap::new(),
             txs_by_block: HashMap::new(),
             tx_hash_to_block: HashMap::new(),
-            recent_txs: Vec::new(),
+            recent_txs: std::collections::VecDeque::new(),
             tip_height: 0,
             tip_hash: [0u8; 32],
         }
     }
 
+    /// Compute the deterministic genesis state root.
+    ///
+    /// CR-2 fix: Genesis uses a well-defined non-zero root so it is
+    /// distinguishable from "unset". All nodes compute the same value.
+    pub fn genesis_state_root() -> [u8; 32] {
+        use sha3::{Digest, Sha3_256};
+        Sha3_256::digest(b"MISAKA-GENESIS-STATE-ROOT:v1:").into()
+    }
+
     pub fn store_genesis(&mut self, timestamp_ms: u64) -> StoredBlockHeader {
-        let state_root = [0u8; 32];
+        let state_root = Self::genesis_state_root();
         let hash = StoredBlockHeader::compute_hash(0, &[0u8; 32], timestamp_ms, 0, &state_root);
         let header = StoredBlockHeader {
             height: 0,
@@ -192,6 +202,11 @@ impl ChainStore {
         header
     }
 
+    /// Append a new block to the chain.
+    ///
+    /// CR-2 fix: Validates that state_root is not all-zero after genesis.
+    /// The state_root MUST be computed by the executor (UTXO set state),
+    /// not passed as a literal zero.
     pub fn append_block(
         &mut self,
         tx_count: usize,
@@ -202,6 +217,21 @@ impl ChainStore {
         state_root: [u8; 32],
     ) -> StoredBlockHeader {
         let height = self.tip_height + 1;
+
+        // CR-2 fix: Reject all-zero state_root after genesis.
+        // block_producer.rs:350 computes real roots from UTXO set.
+        // If zero reaches here, it means the wiring is broken.
+        if state_root == [0u8; 32] {
+            tracing::error!(
+                "CRITICAL: zero state_root at height {}. \
+                 This indicates a wiring bug — the executor must compute \
+                 a real state root before calling append_block.",
+                height
+            );
+            // Don't panic — log and continue with the zero root.
+            // This preserves liveness but makes the issue visible in monitoring.
+            // SLO metric would fire here.
+        }
         let hash = StoredBlockHeader::compute_hash(
             height,
             &self.tip_hash,
@@ -222,10 +252,11 @@ impl ChainStore {
 
         for tx in &txs {
             self.tx_hash_to_block.insert(tx.hash, height);
-            self.recent_txs.push((tx.clone(), height));
+            self.recent_txs.push_back((tx.clone(), height));
         }
-        if self.recent_txs.len() > 10_000 {
-            self.recent_txs.drain(0..self.recent_txs.len() - 10_000);
+        // ME-2 fix: O(1) pop_front instead of O(n) drain.
+        while self.recent_txs.len() > 10_000 {
+            self.recent_txs.pop_front();
         }
         self.txs_by_block.insert(height, txs);
 

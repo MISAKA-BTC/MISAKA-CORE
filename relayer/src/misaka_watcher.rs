@@ -1,50 +1,47 @@
-//! Misaka chain watcher — polls burn receipts, submits mint requests.
+//! MISAKA chain interaction — submits mint requests for verified burns.
+//!
+//! In the Burn & Mint model, this module is responsible for:
+//! - Submitting mint requests to the MISAKA chain after a Solana burn is verified
+//! - The MISAKA chain mints wrapped tokens to the registered receive address
 
 use crate::config::RelayerConfig;
-use crate::message::{LockEvent, BurnReceipt};
+use crate::store::BurnRequestRow;
 use anyhow::Result;
+use tracing::error;
 
-/// Submit a mint request to the Misaka node.
+/// Submit a mint request to the MISAKA chain for a verified burn.
 ///
-/// This tells the Misaka bridge module to mint wrapped tokens
-/// after verifying the Solana lock event.
-pub async fn submit_mint_request(config: &RelayerConfig, event: &LockEvent) -> Result<String> {
+/// Tells the MISAKA bridge module to mint wrapped tokens
+/// corresponding to the burned SPL tokens on Solana.
+pub async fn submit_mint_for_burn(
+    config: &RelayerConfig,
+    burn: &BurnRequestRow,
+) -> Result<String> {
     let url = format!("{}/api/bridge/submit_mint", config.misaka_rpc_url);
     let body = serde_json::json!({
-        "lock_event_id": event.id,
-        "source_chain": 1, // Solana
-        "amount": event.amount,
-        "asset_id": event.asset_id,
-        "misaka_recipient": event.misaka_recipient,
-        "solana_tx_hash": event.solana_tx_hash,
+        "burn_event_id": burn.id,
+        "source_chain": 1,  // Solana
+        "amount": burn.burn_amount_raw,
+        "mint_address": burn.mint_address,
+        "misaka_recipient": burn.misaka_receive_address,
+        "solana_tx_signature": burn.solana_tx_signature,
+        "wallet_address": burn.wallet_address,
+        "slot": burn.slot,
+        "block_time": burn.block_time,
     });
 
     let resp = http_post(&url, &body).await?;
-    let receipt_id = resp["receiptId"].as_str()
+    let receipt_id = resp["receiptId"]
+        .as_str()
         .ok_or_else(|| {
-            tracing::error!("Mint response from {} missing 'receiptId' field: {:?}", url, resp);
+            error!(
+                "Mint response from {} missing 'receiptId' field: {:?}",
+                url, resp
+            );
             anyhow::anyhow!("mint response missing receiptId")
         })?
         .to_string();
     Ok(receipt_id)
-}
-
-/// Poll Misaka node for finalized burn receipts.
-///
-/// These are burns of wrapped assets that need to trigger
-/// unlock on Solana.
-pub async fn poll_burn_receipts(config: &RelayerConfig) -> Result<Vec<BurnReceipt>> {
-    let url = format!("{}/api/bridge/burn_receipts", config.misaka_rpc_url);
-    let body = serde_json::json!({ "status": "approved" });
-
-    let resp = http_post(&url, &body).await?;
-    let receipts: Vec<BurnReceipt> = serde_json::from_value(
-        resp.get("receipts").cloned().unwrap_or(serde_json::json!([]))
-    ).map_err(|e| {
-        tracing::error!("Failed to parse burn receipts from {}: {}", url, e);
-        anyhow::anyhow!("burn receipt parse error: {}", e)
-    })?;
-    Ok(receipts)
 }
 
 async fn http_post(url: &str, body: &serde_json::Value) -> Result<serde_json::Value> {
@@ -53,7 +50,8 @@ async fn http_post(url: &str, body: &serde_json::Value) -> Result<serde_json::Va
         .build()
         .map_err(|e| anyhow::anyhow!("http client build: {e}"))?;
 
-    let resp = client.post(url)
+    let resp = client
+        .post(url)
         .json(body)
         .send()
         .await
@@ -62,9 +60,15 @@ async fn http_post(url: &str, body: &serde_json::Value) -> Result<serde_json::Va
     let status = resp.status();
     if !status.is_success() {
         let body_text = resp.text().await.unwrap_or_default();
-        anyhow::bail!("HTTP {} from {}: {}", status, url, &body_text[..200.min(body_text.len())]);
+        anyhow::bail!(
+            "HTTP {} from {}: {}",
+            status,
+            url,
+            &body_text[..200.min(body_text.len())]
+        );
     }
 
-    resp.json::<serde_json::Value>().await
+    resp.json::<serde_json::Value>()
+        .await
         .map_err(|e| anyhow::anyhow!("json parse from {}: {}", url, e))
 }

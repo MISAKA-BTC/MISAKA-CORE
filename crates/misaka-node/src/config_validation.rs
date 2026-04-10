@@ -3,8 +3,7 @@
 //! Runs at node boot. If ANY check fails, the node REFUSES to start.
 //! This prevents operator mistakes from exposing a broken testnet node.
 
-use crate::config::{NodeMode, P2pConfig};
-use std::net::IpAddr;
+use crate::config::NodeMode;
 
 /// All config validation errors. Node refuses to start if any are present.
 #[derive(Debug, thiserror::Error)]
@@ -23,7 +22,7 @@ pub enum ConfigError {
     PortCollision,
     #[error("validator set must not be empty")]
     EmptyValidatorSet,
-    #[error("block_time must be >= 5 seconds (got {0})")]
+    #[error("block_time must be >= 1 second (got {0})")]
     BlockTimeTooLow(u64),
     #[error("max_peers must be >= 1 (got {0})")]
     MaxPeersTooLow(usize),
@@ -31,9 +30,7 @@ pub enum ConfigError {
     NoSeedNodes,
     #[error("bridge is enabled but verifier is not production-safe: {0}")]
     UnsafeBridgeVerifier(String),
-    #[error("chipmunk ring scheme is enabled but --enable-chipmunk was not explicitly set")]
-    ChipmunkNotExplicit,
-    #[error("faucet amount must be > 0 and <= 1_000_000 (got {0})")]
+    #[error("faucet amount must be > 0 and <= 1_000_000_000_000 / 1000 MISAKA (got {0})")]
     InvalidFaucetAmount(u64),
     #[error("data_dir is not writable: {0}")]
     DataDirNotWritable(String),
@@ -53,16 +50,20 @@ pub struct TestnetConfig {
     pub max_outbound_peers: usize,
     pub node_mode: NodeMode,
     pub advertise_addr: Option<String>,
+    /// Phase 2b (M7): Seed nodes with PK pinning.
+    /// Legacy Vec<String> retained for backward compat during migration.
     pub seed_nodes: Vec<String>,
+    /// Phase 2b (M7): Parsed seed entries with validated PKs.
+    /// Populated from CLI --seeds + --seed-pubkeys or from TOML [[seed_nodes]].
+    pub parsed_seeds: Vec<misaka_types::seed_entry::SeedEntry>,
     pub data_dir: String,
     pub faucet_enabled: bool,
     pub faucet_amount: u64,
     pub faucet_cooldown_secs: u64,
     pub bridge_enabled: bool,
-    pub chipmunk_enabled: bool,
     pub safe_mode_enabled: bool,
     pub safe_mode_threshold: u64,
-    pub max_ring_size: usize,
+    pub max_anonymity_set: usize,
     pub min_ring_size: usize,
     pub default_ring_scheme: u8,
     pub log_level: String,
@@ -71,6 +72,8 @@ pub struct TestnetConfig {
     pub max_tx_size: usize,
     pub min_fee: u64,
     pub max_block_txs: usize,
+    /// Weak subjectivity checkpoint string (e.g. "0:abcdef...")
+    pub ws_checkpoint: Option<String>,
 }
 
 impl Default for TestnetConfig {
@@ -80,21 +83,21 @@ impl Default for TestnetConfig {
             chain_name: "MISAKA Testnet".into(),
             p2p_port: 6690,
             rpc_port: 3001,
-            block_time_secs: 60,
+            block_time_secs: 2, // Fast lane default
             max_inbound_peers: 32,
             max_outbound_peers: 8,
             node_mode: NodeMode::Public,
             advertise_addr: None,
             seed_nodes: vec![],
+            parsed_seeds: vec![],
             data_dir: "./misaka-data".into(),
             faucet_enabled: true,
             faucet_amount: 100_000,
             faucet_cooldown_secs: 300, // 5 minutes
             bridge_enabled: false,     // DISABLED by default for testnet
-            chipmunk_enabled: false,   // DISABLED by default for testnet
             safe_mode_enabled: true,
             safe_mode_threshold: 10,
-            max_ring_size: 16, // LRS-v1 max
+            max_anonymity_set: 16, // LRS-v1 max
             min_ring_size: 4,
             default_ring_scheme: 0x03, // LogRing-v1 (system default)
             log_level: "info".into(),
@@ -103,6 +106,7 @@ impl Default for TestnetConfig {
             max_tx_size: 131_072, // 128 KiB
             min_fee: 1,
             max_block_txs: 1000,
+            ws_checkpoint: None,
         }
     }
 }
@@ -133,7 +137,7 @@ impl TestnetConfig {
         }
 
         // Block time
-        if self.block_time_secs < 5 {
+        if self.block_time_secs < 1 {
             errors.push(ConfigError::BlockTimeTooLow(self.block_time_secs));
         }
 
@@ -155,40 +159,52 @@ impl TestnetConfig {
             // No advertise addr in public mode → warning only, not fatal
         }
 
-        // Faucet
-        if self.faucet_enabled && (self.faucet_amount == 0 || self.faucet_amount > 1_000_000) {
+        // Faucet — max drip: 1000 MISAKA (9 decimals)
+        if self.faucet_enabled
+            && (self.faucet_amount == 0 || self.faucet_amount > 1_000_000_000_000)
+        {
             errors.push(ConfigError::InvalidFaucetAmount(self.faucet_amount));
-        }
-
-        // Chipmunk must be explicitly enabled
-        #[cfg(feature = "chipmunk")]
-        {
-            if self.chipmunk_enabled {
-                // OK — explicitly enabled
-            }
-        }
-        #[cfg(not(feature = "chipmunk"))]
-        {
-            if self.chipmunk_enabled {
-                errors.push(ConfigError::ChipmunkNotExplicit);
-            }
         }
 
         // Ring scheme validation
         match self.default_ring_scheme {
-            0x03 => {}                          // LogRing — always allowed (system default)
-            0x01 => {}                          // LRS — always allowed (legacy)
-            0x02 if self.chipmunk_enabled => {} // Chipmunk — only with explicit opt-in
-            0x02 => {
-                errors.push(ConfigError::Custom(
-                    "default_ring_scheme 0x02 (Chipmunk) requires chipmunk to be enabled".into(),
-                ));
-            }
+            0x03 => {} // LogRing — system default
+            0x01 => {} // LRS — legacy
             other => {
                 errors.push(ConfigError::Custom(format!(
                     "unknown default_ring_scheme: 0x{:02x}",
                     other
                 )));
+            }
+        }
+
+        // ── M7: Validate parsed seed entries ──
+        for (i, seed) in self.parsed_seeds.iter().enumerate() {
+            if let Err(e) = seed.validate() {
+                errors.push(ConfigError::Custom(format!(
+                    "seed_nodes[{}]: {}", i, e
+                )));
+            }
+        }
+
+        // ── M-1: Weak subjectivity checkpoint — mainnet mandatory ──
+        if self.chain_id == 1 {
+            match &self.ws_checkpoint {
+                None => {
+                    errors.push(ConfigError::Custom(
+                        "FATAL: weak_subjectivity checkpoint is required on mainnet (chain_id=1). \
+                         Set ws_checkpoint to a valid genesis checkpoint string."
+                            .to_string(),
+                    ));
+                }
+                Some(cp) if cp.starts_with("0:00000000000000000000000000000000") => {
+                    errors.push(ConfigError::Custom(
+                        "FATAL: weak_subjectivity checkpoint is all-zero on mainnet. \
+                         Set a real genesis checkpoint hash."
+                            .to_string(),
+                    ));
+                }
+                Some(_) => {} // valid
             }
         }
 
@@ -202,9 +218,8 @@ impl TestnetConfig {
     /// Check if a ring scheme tag is allowed in this config.
     pub fn is_ring_scheme_allowed(&self, scheme: u8) -> bool {
         match scheme {
-            0x03 => true,                  // LogRing — always allowed (system default)
-            0x01 => true,                  // LRS-v1 — always allowed (legacy)
-            0x02 => self.chipmunk_enabled, // Chipmunk only if explicitly enabled
+            0x03 => true, // LogRing — system default
+            0x01 => true, // LRS-v1 — legacy
             _ => false,
         }
     }
@@ -237,24 +252,17 @@ mod tests {
     #[test]
     fn test_block_time_too_low() {
         let mut cfg = TestnetConfig::default();
-        cfg.block_time_secs = 1;
+        cfg.block_time_secs = 0;
         assert!(cfg.validate().is_err());
     }
 
     #[test]
-    fn test_chipmunk_not_allowed_default() {
+    fn test_ring_scheme_allowed() {
         let cfg = TestnetConfig::default();
         assert!(cfg.is_ring_scheme_allowed(0x03)); // LogRing OK (default)
         assert!(cfg.is_ring_scheme_allowed(0x01)); // LRS OK (legacy)
-        assert!(!cfg.is_ring_scheme_allowed(0x02)); // Chipmunk blocked
+        assert!(!cfg.is_ring_scheme_allowed(0x02)); // Removed (Chipmunk)
         assert!(!cfg.is_ring_scheme_allowed(0xFF)); // Unknown blocked
-    }
-
-    #[test]
-    fn test_chipmunk_allowed_when_enabled() {
-        let mut cfg = TestnetConfig::default();
-        cfg.chipmunk_enabled = true;
-        assert!(cfg.is_ring_scheme_allowed(0x02));
     }
 
     #[test]
@@ -274,7 +282,7 @@ mod tests {
         let mut cfg = TestnetConfig::default();
         cfg.faucet_amount = 0;
         assert!(cfg.validate().is_err());
-        cfg.faucet_amount = 2_000_000;
+        cfg.faucet_amount = 1_000_000_000_001;
         assert!(cfg.validate().is_err());
         cfg.faucet_amount = 100_000;
         cfg.validate().unwrap();

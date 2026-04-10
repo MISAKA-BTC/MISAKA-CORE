@@ -1,31 +1,26 @@
+# MISAKA Network — Seed Node
+# 他ノードのブートストラップ先として動作するシードノード設定。
+# port 6690 を外部から到達可能にしてください。
+
 [chain]
 chain_id = 2
+chain_name = "MISAKA Testnet"
 
 [node]
-name = "misaka-seed-01"
 mode = "seed"
-data_dir = "../data/seed"
+data_dir = "./misaka-data"
 log_level = "info"
 
 [p2p]
 port = 6690
 max_inbound_peers = 128
-max_outbound_peers = 32
-# advertise_addr = "YOUR_PUBLIC_IP:6690"
+max_outbound_peers = 16
 
 [rpc]
-port = 3011
+port = 3001
 
 [consensus]
-block_time_secs = 60
-validator = false
-validator_index = 0
-validators = 1
+fast_block_time_secs = 2
 
-[bootstrap]
-seed_nodes = []
-seed_file = "./seeds.txt"
-reconnect_interval_secs = 30
-
-[genesis]
-timestamp_ms = 1773446400000
+[faucet]
+enabled = false

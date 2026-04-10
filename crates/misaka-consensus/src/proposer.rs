@@ -45,7 +45,7 @@ mod tests {
         let mut ids = Vec::new();
         for i in 0..4u8 {
             let kp = generate_validator_keypair();
-            let mut vid = [0u8; 20];
+            let mut vid = [0u8; 32];
             vid[0] = i;
             vs.push(ValidatorIdentity {
                 validator_id: vid,

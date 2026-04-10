@@ -10,11 +10,21 @@
 //! All signatures are computed over:
 //! `SHA3-256("MISAKA-PQ-SIG:v2:" || message)`
 
+pub mod addresses;
 pub mod hash;
+pub mod hashes;
+pub mod keystore;
+pub mod signature;
 pub mod validator_sig;
 
 pub use hash::sha3_256;
+pub use keystore::{
+    decrypt_keystore, encrypt_keystore, is_plaintext_keyfile, load_keystore, save_keystore,
+    EncryptedKeystore, KeystoreError, KEYSTORE_VERSION,
+};
 pub use validator_sig::{
     generate_validator_keypair, validator_sign, validator_verify, ValidatorKeypair,
     ValidatorPqPublicKey, ValidatorPqSecretKey, ValidatorPqSignature,
 };
+// Audit fix: 6 stub modules deleted (commitment, kdf, key_manager, merkle,
+// randomness, schnorr_pq). All were empty scaffolding with zero crypto ops.

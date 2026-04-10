@@ -35,8 +35,8 @@
 //! - Liveness: requires >2/3 S online to produce new finalized checkpoints
 //! - This matches the standard BFT safety/liveness tradeoff
 
-use serde::{Serialize, Deserialize};
-use sha3::{Sha3_256, Digest};
+use serde::{Deserialize, Serialize};
+use sha3::{Digest, Sha3_256};
 use std::collections::HashMap;
 
 pub type Hash = [u8; 32];
@@ -65,7 +65,7 @@ pub struct FinalityCheckpoint {
     pub block_hash: Hash,
     /// Blue score at this checkpoint.
     pub blue_score: u64,
-    /// Cryptographic state root (UTXO + Nullifier commitment).
+    /// Cryptographic state root (UTXO + SpendTag commitment).
     pub state_root: Hash,
     /// Number of finalized transactions up to this point.
     pub cumulative_txs: u64,
@@ -148,16 +148,31 @@ pub struct FinalizedEpoch {
 impl FinalizedEpoch {
     /// Is the BFT threshold met?
     pub fn is_threshold_met(&self) -> bool {
-        // attested_stake / total_stake >= 2/3
-        // Rewritten to avoid floating point: attested * 3 >= total * 2
-        self.attested_stake.saturating_mul(FINALITY_THRESHOLD.1 as u128)
-            >= self.total_stake.saturating_mul(FINALITY_THRESHOLD.0 as u128)
+        // CRITICAL FIX: strict > 2/3 (not >=).
+        // BFT safety requires STRICTLY MORE than 2/3. With >=, exactly 2/3
+        // allows two conflicting checkpoints to both finalize (safety violation).
+        // Example: total=99, attested=66 → 66*3=198, 99*2=198 → 198>=198 was TRUE (BUG)
+        // Now: 198 > 198 is FALSE (correct — need 67+ to finalize)
+        self.attested_stake
+            .saturating_mul(FINALITY_THRESHOLD.1 as u128)
+            > self
+                .total_stake
+                .saturating_mul(FINALITY_THRESHOLD.0 as u128)
     }
 }
 
 // ═══════════════════════════════════════════════════════════════
 //  Economic Finality Manager
 // ═══════════════════════════════════════════════════════════════
+
+/// Check if attested stake exceeds the 2/3 BFT finality threshold.
+///
+/// Strict > 2/3 (not >=). BFT safety requires STRICTLY MORE than 2/3.
+/// With >=, exactly 2/3 allows two conflicting checkpoints to both
+/// finalize (safety violation).
+fn check_finality_threshold(attested: u128, total: u128) -> bool {
+    attested.saturating_mul(3) > total.saturating_mul(2)
+}
 
 /// Manages the economic finality protocol.
 ///
@@ -209,6 +224,10 @@ pub enum FinalityError {
     ReorgBelowFinality { target: u64, finalized: u64 },
     #[error("epoch {epoch} already finalized")]
     AlreadyFinalized { epoch: u64 },
+    #[error("unknown validator: {}", hex::encode(&id[..4]))]
+    UnknownValidator { id: [u8; 32] },
+    #[error("invalid ML-DSA-65 signature from validator {}", hex::encode(&validator[..4]))]
+    InvalidSignature { validator: [u8; 32] },
 }
 
 impl EconomicFinalityManager {
@@ -228,18 +247,30 @@ impl EconomicFinalityManager {
     /// Start collecting attestations for a new epoch.
     pub fn begin_epoch(&mut self, checkpoint: FinalityCheckpoint) {
         let epoch = checkpoint.epoch;
-        self.pending.insert(epoch, EpochAttestations {
-            checkpoint,
-            attestations: Vec::new(),
-            seen_validators: HashMap::new(),
-            total_attested_stake: 0,
-        });
+        self.pending.insert(
+            epoch,
+            EpochAttestations {
+                checkpoint,
+                attestations: Vec::new(),
+                seen_validators: HashMap::new(),
+                total_attested_stake: 0,
+            },
+        );
     }
 
     /// Add a validator attestation. Returns `true` if finality is newly achieved.
+    /// Add an attestation with MANDATORY signature verification.
+    ///
+    /// CRITICAL-01 fix: Previously accepted attestations without verifying
+    /// the ML-DSA-65 signature, allowing forged finality. Now requires
+    /// a ValidatorSet to:
+    /// 1. Verify the validator is a known committee member
+    /// 2. Look up the validator's real stake (not self-reported)
+    /// 3. Verify the ML-DSA-65 signature over the checkpoint message
     pub fn add_attestation(
         &mut self,
         attestation: ValidatorAttestation,
+        validator_set: &crate::ValidatorSet,
     ) -> Result<bool, FinalityError> {
         let epoch = attestation.epoch;
 
@@ -248,11 +279,19 @@ impl EconomicFinalityManager {
             return Err(FinalityError::AlreadyFinalized { epoch });
         }
 
-        let pending = self.pending.get_mut(&epoch)
-            .ok_or(FinalityError::EpochMismatch { got: epoch, expected: 0 })?;
+        let pending = self
+            .pending
+            .get_mut(&epoch)
+            .ok_or(FinalityError::EpochMismatch {
+                got: epoch,
+                expected: 0,
+            })?;
 
         // Dedup check
-        if pending.seen_validators.contains_key(&attestation.validator_id) {
+        if pending
+            .seen_validators
+            .contains_key(&attestation.validator_id)
+        {
             return Err(FinalityError::DuplicateAttestation {
                 validator: attestation.validator_id,
             });
@@ -263,18 +302,101 @@ impl EconomicFinalityManager {
             return Err(FinalityError::CheckpointMismatch);
         }
 
-        // Record attestation
-        let stake = attestation.stake_weight;
-        pending.seen_validators.insert(attestation.validator_id, stake);
+        // CRITICAL-01: Verify validator is in the validator set
+        let validator = validator_set.get(&attestation.validator_id).ok_or(
+            FinalityError::UnknownValidator {
+                id: attestation.validator_id,
+            },
+        )?;
+
+        // CRITICAL-01: Use stake from ValidatorSet, NOT from attestation
+        let stake = validator.stake_weight;
+
+        // CRITICAL-01: Verify ML-DSA-65 signature (raw, no domain prefix).
+        // Phase 2c-B D5c: domain separation handled upstream.
+        let pk = misaka_pqc::pq_sign::MlDsaPublicKey::from_bytes(&validator.public_key.bytes)
+            .map_err(|_| FinalityError::InvalidSignature {
+                validator: attestation.validator_id,
+            })?;
+        let sig = misaka_pqc::pq_sign::MlDsaSignature::from_bytes(&attestation.signature).map_err(
+            |_| FinalityError::InvalidSignature {
+                validator: attestation.validator_id,
+            },
+        )?;
+        misaka_pqc::pq_sign::ml_dsa_verify_raw(
+            &pk,
+            &attestation.checkpoint_hash,
+            &sig,
+        )
+        .map_err(|_| FinalityError::InvalidSignature {
+            validator: attestation.validator_id,
+        })?;
+
+        // Record attestation (with verified stake)
+        pending
+            .seen_validators
+            .insert(attestation.validator_id, stake);
         pending.total_attested_stake = pending.total_attested_stake.saturating_add(stake);
         pending.attestations.push(attestation);
 
-        // Check if threshold is met
-        let threshold_met = pending.total_attested_stake
-            .saturating_mul(FINALITY_THRESHOLD.1 as u128)
-            >= self.total_stake.saturating_mul(FINALITY_THRESHOLD.0 as u128);
+        if check_finality_threshold(pending.total_attested_stake, self.total_stake) {
+            self.finalize_epoch(epoch);
+            return Ok(true);
+        }
 
-        if threshold_met {
+        Ok(false)
+    }
+
+    /// Test-only: add attestation with validator set check but skip ML-DSA-65
+    /// signature verification. Uses verified stake from ValidatorSet.
+    #[cfg(test)]
+    pub fn add_attestation_unchecked(
+        &mut self,
+        attestation: ValidatorAttestation,
+        validator_set: &crate::ValidatorSet,
+    ) -> Result<bool, FinalityError> {
+        let epoch = attestation.epoch;
+
+        if self.finalized.iter().any(|f| f.checkpoint.epoch == epoch) {
+            return Err(FinalityError::AlreadyFinalized { epoch });
+        }
+
+        let pending = self
+            .pending
+            .get_mut(&epoch)
+            .ok_or(FinalityError::EpochMismatch {
+                got: epoch,
+                expected: 0,
+            })?;
+
+        if pending
+            .seen_validators
+            .contains_key(&attestation.validator_id)
+        {
+            return Err(FinalityError::DuplicateAttestation {
+                validator: attestation.validator_id,
+            });
+        }
+
+        if attestation.checkpoint_hash != pending.checkpoint.signing_message() {
+            return Err(FinalityError::CheckpointMismatch);
+        }
+
+        // Verify validator is in the set (but skip sig verification for tests)
+        let validator = validator_set.get(&attestation.validator_id).ok_or(
+            FinalityError::UnknownValidator {
+                id: attestation.validator_id,
+            },
+        )?;
+        let stake = validator.stake_weight;
+
+        pending
+            .seen_validators
+            .insert(attestation.validator_id, stake);
+        pending.total_attested_stake = pending.total_attested_stake.saturating_add(stake);
+        pending.attestations.push(attestation);
+
+        if check_finality_threshold(pending.total_attested_stake, self.total_stake) {
             self.finalize_epoch(epoch);
             return Ok(true);
         }
@@ -326,7 +448,8 @@ impl EconomicFinalityManager {
 
     /// Last finalized blue_score.
     pub fn last_finalized_score(&self) -> u64 {
-        self.finalized.last()
+        self.finalized
+            .last()
             .map(|f| f.checkpoint.blue_score)
             .unwrap_or(0)
     }
@@ -344,6 +467,8 @@ impl EconomicFinalityManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ValidatorSet;
+    use misaka_types::validator::{ValidatorIdentity, ValidatorPublicKey};
 
     fn make_checkpoint(epoch: u64, score: u64) -> FinalityCheckpoint {
         FinalityCheckpoint {
@@ -355,12 +480,38 @@ mod tests {
         }
     }
 
-    fn make_attestation(validator_id: u8, epoch: u64, cp: &FinalityCheckpoint, stake: u128) -> ValidatorAttestation {
+    /// Build a test ValidatorSet with N validators whose validator_id = [id_byte; 32].
+    /// Each validator's public_key.bytes is a dummy (not real ML-DSA-65).
+    /// Tests bypass real signature verification by using the inner
+    /// `add_attestation_unchecked` helper.
+    fn make_test_validator_set(entries: &[(u8, u128)]) -> ValidatorSet {
+        let validators = entries
+            .iter()
+            .map(|(id_byte, stake)| {
+                ValidatorIdentity {
+                    validator_id: [*id_byte; 32],
+                    stake_weight: *stake,
+                    public_key: ValidatorPublicKey {
+                        bytes: vec![0u8; 1952],
+                    },
+                    is_active: true,
+                }
+            })
+            .collect();
+        ValidatorSet::new(validators)
+    }
+
+    fn make_attestation(
+        validator_id: u8,
+        epoch: u64,
+        cp: &FinalityCheckpoint,
+        stake: u128,
+    ) -> ValidatorAttestation {
         ValidatorAttestation {
             validator_id: [validator_id; 32],
             epoch,
             checkpoint_hash: cp.signing_message(),
-            signature: vec![0u8; 64], // Placeholder
+            signature: vec![0u8; 64], // Placeholder — tests use unchecked path
             stake_weight: stake,
         }
     }
@@ -387,20 +538,27 @@ mod tests {
 
     #[test]
     fn test_finality_with_attestations() {
+        let vs = make_test_validator_set(&[(1, 30), (2, 30), (3, 10)]);
         let mut fm = EconomicFinalityManager::new(100); // 100 total stake
         let cp = make_checkpoint(1, 100);
         fm.begin_epoch(cp.clone());
 
         // Validator A: 30 stake → not yet
-        let result = fm.add_attestation(make_attestation(1, 1, &cp, 30)).unwrap();
+        let result = fm
+            .add_attestation_unchecked(make_attestation(1, 1, &cp, 30), &vs)
+            .unwrap();
         assert!(!result, "30/100 < 2/3");
 
         // Validator B: 30 stake → still not
-        let result = fm.add_attestation(make_attestation(2, 1, &cp, 30)).unwrap();
+        let result = fm
+            .add_attestation_unchecked(make_attestation(2, 1, &cp, 30), &vs)
+            .unwrap();
         assert!(!result, "60/100 < 2/3");
 
         // Validator C: 10 stake → 70/100 ≥ 2/3 → FINALIZED
-        let result = fm.add_attestation(make_attestation(3, 1, &cp, 10)).unwrap();
+        let result = fm
+            .add_attestation_unchecked(make_attestation(3, 1, &cp, 10), &vs)
+            .unwrap();
         assert!(result, "70/100 >= 2/3 → finalized");
 
         assert_eq!(fm.finalized_count(), 1);
@@ -409,21 +567,28 @@ mod tests {
 
     #[test]
     fn test_duplicate_attestation_rejected() {
+        let vs = make_test_validator_set(&[(1, 50)]);
         let mut fm = EconomicFinalityManager::new(100);
         let cp = make_checkpoint(1, 100);
         fm.begin_epoch(cp.clone());
 
-        fm.add_attestation(make_attestation(1, 1, &cp, 50)).unwrap();
-        let err = fm.add_attestation(make_attestation(1, 1, &cp, 50));
-        assert!(matches!(err, Err(FinalityError::DuplicateAttestation { .. })));
+        fm.add_attestation_unchecked(make_attestation(1, 1, &cp, 50), &vs)
+            .unwrap();
+        let err = fm.add_attestation_unchecked(make_attestation(1, 1, &cp, 50), &vs);
+        assert!(matches!(
+            err,
+            Err(FinalityError::DuplicateAttestation { .. })
+        ));
     }
 
     #[test]
     fn test_reorg_below_finality_rejected() {
+        let vs = make_test_validator_set(&[(1, 70)]);
         let mut fm = EconomicFinalityManager::new(100);
         let cp = make_checkpoint(1, 100);
         fm.begin_epoch(cp.clone());
-        fm.add_attestation(make_attestation(1, 1, &cp, 70)).unwrap();
+        fm.add_attestation_unchecked(make_attestation(1, 1, &cp, 70), &vs)
+            .unwrap();
 
         // Try to reorg to score 50 (below finalized 100) → REJECTED
         let err = fm.can_reorg_to(50);
@@ -437,5 +602,17 @@ mod tests {
     fn test_signing_message_deterministic() {
         let cp = make_checkpoint(5, 500);
         assert_eq!(cp.signing_message(), cp.signing_message());
+    }
+
+    #[test]
+    fn test_unknown_validator_rejected() {
+        let vs = make_test_validator_set(&[(1, 50)]); // only validator 1
+        let mut fm = EconomicFinalityManager::new(100);
+        let cp = make_checkpoint(1, 100);
+        fm.begin_epoch(cp.clone());
+
+        // Validator 99 is NOT in the set
+        let err = fm.add_attestation_unchecked(make_attestation(99, 1, &cp, 50), &vs);
+        assert!(matches!(err, Err(FinalityError::UnknownValidator { .. })));
     }
 }

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-cd "$SCRIPT_DIR"
-exec "$SCRIPT_DIR/misaka-launcher" --profile public
+# macOS: ダブルクリックで起動
+# Finder から .command を開くと新しい Terminal ウインドウで実行されます
+cd "$(dirname "$0")"
+exec bash ./start-public-node.sh

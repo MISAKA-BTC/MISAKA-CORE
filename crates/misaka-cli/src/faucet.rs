@@ -2,16 +2,16 @@
 
 use crate::wallet_state::WalletState;
 use anyhow::Result;
-use misaka_pqc::ki_proof::canonical_strong_ki;
-use misaka_pqc::pq_ring::SpendingKeypair;
+use misaka_pqc::canonical_spend_id;
+use misaka_pqc::SpendingKeypair;
 
 /// Wallet key file (just enough fields to read).
 #[derive(serde::Deserialize)]
 struct WalletKeyFile {
     address: String,
-    key_image: String,
-    #[serde(default, alias = "canonical_key_image")]
-    tx_key_image: Option<String>,
+    spend_id: String,
+    #[serde(default, alias = "canonical_spend_id")]
+    tx_spend_id: Option<String>,
     #[serde(default)]
     name: String,
     #[serde(default)]
@@ -23,7 +23,7 @@ struct WalletKeyFile {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct WalletAddressBinding {
     child_index: u32,
-    key_image: String,
+    spend_id: String,
     spending_pubkey: String,
 }
 
@@ -105,7 +105,7 @@ fn register_faucet_utxo(key_path: &str, tx_hash: &str, amount: u64, address: &st
         0,
         amount,
         binding.child_index,
-        &binding.key_image,
+        &binding.spend_id,
         address,
     );
     state.save(key_path)?;
@@ -130,10 +130,10 @@ fn resolve_wallet_binding(
             .ok_or_else(|| anyhow::anyhow!("wallet key file missing spending_pubkey"))?;
         return Ok(Some(WalletAddressBinding {
             child_index: 0,
-            key_image: wallet
-                .tx_key_image
+            spend_id: wallet
+                .tx_spend_id
                 .clone()
-                .unwrap_or_else(|| wallet.key_image.clone()),
+                .unwrap_or_else(|| wallet.spend_id.clone()),
             spending_pubkey,
         }));
     }
@@ -145,14 +145,17 @@ fn resolve_wallet_binding(
     let master_sk_bytes = hex::decode(master_sk_hex)?;
     let upper = state.next_child_index.saturating_sub(1);
 
+    // Child ML-DSA keypairs are non-deterministic in the current model.
+    // Without a persisted binding registry, matching an arbitrary child
+    // address from the master secret is best-effort only and may fail.
     for idx in 1..=upper {
         let child = derive_child_spending(&master_sk_bytes, idx)?;
         if child.derive_address() == address {
-            let (_, tx_key_image) = canonical_strong_ki(&child.public_poly, &child.secret_poly);
+            let tx_spend_id = canonical_spend_id(&child.secret_poly);
             return Ok(Some(WalletAddressBinding {
                 child_index: idx,
-                key_image: hex::encode(tx_key_image),
-                spending_pubkey: hex::encode(child.public_poly.to_bytes()),
+                spend_id: hex::encode(tx_spend_id),
+                spending_pubkey: hex::encode(child.ml_dsa_pk()),
             }));
         }
     }
@@ -173,14 +176,14 @@ mod tests {
     fn sample_wallet_and_state() -> (WalletKeyFile, WalletState) {
         let kp = MlDsaKeypair::generate();
         let spending = SpendingKeypair::from_ml_dsa(kp.secret_key).unwrap();
-        let (_, tx_key_image) = canonical_strong_ki(&spending.public_poly, &spending.secret_poly);
+        let tx_spend_id = canonical_spend_id(&spending.secret_poly);
         let wallet = WalletKeyFile {
             address: spending.derive_address(),
-            key_image: hex::encode(spending.key_image),
-            tx_key_image: Some(hex::encode(tx_key_image)),
+            spend_id: hex::encode(spending.canonical_spend_id()),
+            tx_spend_id: Some(hex::encode(tx_spend_id)),
             name: "test".into(),
             spending_pubkey: Some(hex::encode(spending.public_poly.to_bytes())),
-            ml_dsa_sk: Some(hex::encode(spending.ml_dsa_sk.as_bytes())),
+            ml_dsa_sk: Some(spending.ml_dsa_sk.with_bytes(|b| hex::encode(b))),
         };
         let mut state = WalletState::new(&wallet.name, &wallet.address);
         state.next_child_index = 3;
@@ -194,25 +197,17 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(binding.child_index, 0);
-        assert_eq!(binding.key_image, wallet.tx_key_image.clone().unwrap());
+        assert_eq!(binding.spend_id, wallet.tx_spend_id.clone().unwrap());
         assert_eq!(binding.spending_pubkey, wallet.spending_pubkey.unwrap());
     }
 
     #[test]
-    fn test_resolve_wallet_binding_known_child() {
+    fn test_resolve_wallet_binding_child_requires_persisted_binding_registry() {
         let (wallet, state) = sample_wallet_and_state();
         let master_sk_bytes = hex::decode(wallet.ml_dsa_sk.clone().unwrap()).unwrap();
         let child = derive_child_spending(&master_sk_bytes, 2).unwrap();
-        let (_, tx_key_image) = canonical_strong_ki(&child.public_poly, &child.secret_poly);
-        let binding = resolve_wallet_binding(&wallet, &state, &child.derive_address())
-            .unwrap()
-            .unwrap();
-        assert_eq!(binding.child_index, 2);
-        assert_eq!(binding.key_image, hex::encode(tx_key_image));
-        assert_eq!(
-            binding.spending_pubkey,
-            hex::encode(child.public_poly.to_bytes())
-        );
+        let binding = resolve_wallet_binding(&wallet, &state, &child.derive_address()).unwrap();
+        assert!(binding.is_none());
     }
 
     #[test]

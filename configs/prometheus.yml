@@ -1,0 +1,19 @@
+# MISAKA Testnet — Prometheus Monitoring
+# Scrapes /metrics endpoint from MISAKA nodes.
+#
+# Usage: prometheus --config.file=configs/prometheus.yml
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: 'misaka-testnet'
+    static_configs:
+      - targets:
+          - '163.43.225.27:3001'
+        labels:
+          role: 'genesis'
+          node: 'sr0'
+    metrics_path: '/metrics'
+    scheme: 'http'

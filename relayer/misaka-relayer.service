@@ -10,13 +10,10 @@ Group=misaka
 ExecStart=/usr/local/bin/misaka-relayer
 Restart=always
 RestartSec=10
+EnvironmentFile=-/etc/misaka/relayer.env
 
-# Environment
-Environment=SOLANA_RPC_URL=https://api.devnet.solana.com
-Environment=MISAKA_RPC_URL=http://127.0.0.1:3001
-Environment=BRIDGE_PROGRAM_ID=MBRDGxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+# Local-only overrides; the rest of the runtime config comes from the env file.
 Environment=RELAYER_KEYPAIR=/etc/misaka/relayer.json
-Environment=POLL_INTERVAL=15
 Environment=PROCESSED_STORE=/var/lib/misaka/relayer-processed.json
 Environment=RUST_LOG=info
 

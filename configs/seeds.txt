@@ -1,3 +1,0 @@
-# One HOST:PORT per line.
-# Update this file when the published seed list changes.
-49.212.136.189:6690

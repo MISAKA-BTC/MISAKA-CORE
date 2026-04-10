@@ -1,95 +1,48 @@
-# MISAKA Public Node
+# MISAKA Testnet — Public Node
 
-This package is the end-user build for joining the MISAKA testnet as a public node.
+## 起動方法
 
-## Quick start
+| OS | ファイル | 方法 |
+|---|---|---|
+| Windows | `start-public-node.bat` | ダブルクリック |
+| macOS | `start-public-node.command` | ダブルクリック |
+| Linux | `start-public-node.sh` | ターミナルで実行 |
 
-### Windows
-
-Double-click `misaka-launcher.exe`.
-
-### macOS
-
-Double-click `start-public-node.command`.
-
-### Linux
-
-Run `./start-public-node.sh`.
-
-## If the published seed is down
-
-Use the packaged local bootstrap flow instead of waiting on the shared VPS.
-
-### Windows
-
-Double-click `start-self-hosted-testnet.bat`.
-
-### macOS
-
-Double-click `start-self-hosted-testnet.command`.
-
-### Linux
-
-Run `./start-self-hosted-testnet.sh`.
-
-That starts:
-
-- one local seed node on `6690`
-- one public node on `6691`
-- the public node pointed at `127.0.0.1:6690`
-
-The local seed log is written to `logs/self-host-seed.log`.
-
-## Port guide
-
-Run the packaged doctor command when you need to know whether port forwarding is actually required.
+### macOS quarantine 解除
 
 ```bash
-./misaka-launcher doctor --profile public
-./misaka-launcher doctor --profile seed
+xattr -dr com.apple.quarantine <展開したフォルダ名>
 ```
 
-On Windows:
+## Seed が落ちている時
 
-```bat
-misaka-launcher.exe doctor --profile public
-misaka-launcher.exe doctor --profile seed
+| OS | ファイル |
+|---|---|
+| Windows | `start-self-hosted-testnet.bat` |
+| macOS | `start-self-hosted-testnet.command` |
+| Linux | `start-self-hosted-testnet.sh` |
+
+## ネットワーク診断
+
+| OS | ファイル |
+|---|---|
+| Windows | `show-network-guide.bat` |
+| macOS | `show-network-guide.command` |
+| Linux | `show-network-guide.sh` |
+
+## seeds.txt の編集
+
+`config/seeds.txt` を編集して seed ノードの接続先を変更できます。
+起動中でも定期的に再読込されます。
+
+## 含まれるファイル
+
 ```
-
-`show-network-guide.*` runs the same check for the public profile.
-
-## What can be edited later
-
-- `config/seeds.txt`
-  Replace the published seed list here if the original bootstrap node goes down.
-- `config/public-node.toml`
-  Change ports, data directory, advertise address, or log level here.
-
-## Included profiles
-
-- `config/public-node.toml`
-- `config/seed-node.toml`
-- `config/validator-node.toml`
-
-Advanced users can launch a different profile manually:
-
-```bash
-./misaka-launcher --profile seed
-./misaka-launcher --profile validator
-./misaka-launcher self-host
+config/
+  public-node.toml      # public node 設定
+  seed-node.toml        # seed node 設定
+  validator-node.toml   # validator 設定
+  seeds.txt             # 接続先 seed 一覧
+  self-host-seeds.txt   # セルフホスト用
+  offline-seeds.txt     # オフライン確認用
 ```
-
-On Windows:
-
-```bat
-misaka-launcher.exe --profile seed
-misaka-launcher.exe --profile validator
-misaka-launcher.exe self-host
-```
-
-## Notes
-
-- The launcher starts `misaka-node` with `--config`.
-- Seed updates are reloaded from `config/seeds.txt` every 30 seconds.
-- The packaged default uses a fixed genesis timestamp so nodes agree on the same network bootstrap block.
-- Joining as a plain public node does not require router port forwarding. Port forwarding matters when you want other peers to discover your node directly.

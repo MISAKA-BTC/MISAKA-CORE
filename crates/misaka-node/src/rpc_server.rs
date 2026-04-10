@@ -2,6 +2,9 @@
 //!
 //! ## Security (Mainnet P0)
 //!
+//! - **API Key Auth**: Write endpoints (submit_tx) require
+//!   `Authorization: Bearer <key>` when `MISAKA_RPC_API_KEY` is set.
+//!   Read-only endpoints and /health remain public.
 //! - Rate limiting via tower::limit (global concurrency + per-endpoint)
 //! - Body size limit: 128KB default, 128KB hard limit on submit_tx
 //! - CORS: fail-closed (no permissive() under any circumstance)
@@ -18,12 +21,16 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tower::limit::ConcurrencyLimitLayer;
 use tower_http::cors::CorsLayer;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::block_producer::SharedState;
 use crate::p2p_network::P2pNetwork;
+use crate::rpc_auth::{require_api_key, ApiKeyState};
+use misaka_p2p::PeerModeLabel;
 use misaka_pqc::{default_privacy_backend, PrivacyBackendFamily, SpendIdentifierModel};
-use misaka_types::utxo::{TxType, UtxoTransaction};
+#[cfg(feature = "faucet")]
+use misaka_types::utxo::TxType;
+use misaka_types::utxo::UtxoTransaction;
 
 /// Combined state for RPC handlers.
 #[derive(Clone)]
@@ -32,14 +39,62 @@ pub struct RpcState {
     pub p2p: Arc<P2pNetwork>,
 }
 
+fn build_linear_cors_layer() -> anyhow::Result<CorsLayer> {
+    match std::env::var("MISAKA_CORS_ORIGINS") {
+        Ok(origins_str) => {
+            let origins: Vec<axum::http::HeaderValue> = origins_str
+                .split(',')
+                .filter(|o| !o.trim().is_empty())
+                .filter_map(|o| o.trim().parse().ok())
+                .collect();
+            if origins.is_empty() {
+                anyhow::bail!(
+                    "FATAL: MISAKA_CORS_ORIGINS is set but contains no valid origins: '{}'. \
+                     Fix the value or unset the variable for localhost-only default.",
+                    origins_str
+                );
+            }
+            info!("CORS: allowing {} configured origins", origins.len());
+            Ok(CorsLayer::new()
+                .allow_origin(origins)
+                .allow_methods([axum::http::Method::POST, axum::http::Method::GET])
+                .allow_headers([axum::http::header::CONTENT_TYPE]))
+        }
+        Err(_) => {
+            info!("CORS: no MISAKA_CORS_ORIGINS set, allowing localhost only");
+            #[allow(clippy::unwrap_used)] // static string parse
+            Ok(CorsLayer::new()
+                .allow_origin([
+                    "http://localhost:3000".parse().expect("static origin"),
+                    "http://localhost:3001".parse().expect("static origin"),
+                    "http://127.0.0.1:3000".parse().expect("static origin"),
+                    "http://127.0.0.1:3001".parse().expect("static origin"),
+                ])
+                .allow_methods([axum::http::Method::POST, axum::http::Method::GET])
+                .allow_headers([axum::http::header::CONTENT_TYPE]))
+        }
+    }
+}
+
 pub async fn run_rpc_server(
     state: SharedState,
     p2p: Arc<P2pNetwork>,
     addr: SocketAddr,
+    chain_id: u32,
 ) -> anyhow::Result<()> {
     let rpc_state = RpcState { node: state, p2p };
 
-    let mut app = Router::new()
+    // ── API Key configuration ──
+    // SEC-FIX: Use from_env_checked so mainnet (chain_id=1) REQUIRES an API key.
+    let auth_state = ApiKeyState::from_env_checked(chain_id)?;
+    if auth_state.is_enabled() {
+        info!("RPC: API key authentication ENABLED for write endpoints");
+    } else {
+        warn!("RPC: API key authentication DISABLED (set MISAKA_RPC_API_KEY to enable)");
+    }
+
+    // ── Read-only endpoints (public, no auth required) ──
+    let public_routes = Router::new()
         .route("/api/get_chain_info", post(get_chain_info))
         .route("/api/get_latest_blocks", post(get_latest_blocks))
         .route("/api/get_block_by_height", post(get_block_by_height))
@@ -51,66 +106,50 @@ pub async fn run_rpc_server(
         .route("/api/get_block_production", post(get_block_production))
         .route("/api/get_peers", post(get_peers))
         .route("/api/search", post(search))
-        .route("/api/submit_tx", post(submit_tx))
-        .route("/api/submit_ct_tx", post(submit_ct_tx))
         .route("/api/get_anonymity_set", post(get_anonymity_set))
         .route("/health", get(health));
 
-    // Faucet is feature-gated: not available in production builds
-    #[cfg(feature = "faucet")]
-    {
-        app = app.route("/api/faucet", post(faucet));
-    }
+    // ── Write endpoints (auth required when MISAKA_RPC_API_KEY is set) ──
+    // SEC-FIX [Audit #1]: route_layer is applied AFTER all routes are added,
+    // so that every write endpoint (including faucet) is covered by auth.
+    let write_routes = {
+        let routes = Router::new()
+            .route("/api/submit_tx", post(submit_tx));
 
-    // MAINNET: get_address_outputs is dev-only (privacy leak — exposes address→UTXO mapping)
-    #[cfg(feature = "dev-rpc")]
-    {
-        app = app.route("/api/get_address_outputs", post(get_address_outputs));
-    }
+        // Faucet is feature-gated: not available in production builds
+        #[cfg(feature = "faucet")]
+        let routes = routes.route("/api/faucet", post(faucet));
+
+        // Apply auth middleware to ALL write routes (must be last)
+        routes.route_layer(axum::middleware::from_fn_with_state(
+            auth_state,
+            require_api_key,
+        ))
+    };
+
+    let app = {
+        let app = public_routes.merge(write_routes);
+
+        // MAINNET: get_address_outputs is dev-only (privacy leak — exposes address→UTXO mapping)
+        #[cfg(feature = "dev-rpc")]
+        let app = app.route("/api/get_address_outputs", post(get_address_outputs));
+
+        app
+    };
 
     // CORS: Fail-closed. No permissive() under ANY circumstance.
     //
     // - MISAKA_CORS_ORIGINS set + valid → allow those origins only
     // - MISAKA_CORS_ORIGINS set + empty/invalid → FATAL: refuse to start
     // - MISAKA_CORS_ORIGINS unset → localhost only (dev default)
-    let cors = {
-        match std::env::var("MISAKA_CORS_ORIGINS") {
-            Ok(origins_str) => {
-                let origins: Vec<axum::http::HeaderValue> = origins_str
-                    .split(',')
-                    .filter(|o| !o.trim().is_empty())
-                    .filter_map(|o| o.trim().parse().ok())
-                    .collect();
-                if origins.is_empty() {
-                    // Env var was SET but parsed to zero valid origins → FATAL
-                    // This prevents fail-open on typos like "htpp://localhost:3000"
-                    anyhow::bail!(
-                        "FATAL: MISAKA_CORS_ORIGINS is set but contains no valid origins: '{}'. \
-                         Fix the value or unset the variable for localhost-only default.",
-                        origins_str
-                    );
-                }
-                info!("CORS: allowing {} configured origins", origins.len());
-                CorsLayer::new()
-                    .allow_origin(origins)
-                    .allow_methods([axum::http::Method::POST, axum::http::Method::GET])
-                    .allow_headers([axum::http::header::CONTENT_TYPE])
-            }
-            Err(_) => {
-                // No env var set: restrictive localhost-only default
-                info!("CORS: no MISAKA_CORS_ORIGINS set, allowing localhost only");
-                CorsLayer::new()
-                    .allow_origin([
-                        "http://localhost:3000".parse().expect("static origin"),
-                        "http://localhost:3001".parse().expect("static origin"),
-                        "http://127.0.0.1:3000".parse().expect("static origin"),
-                        "http://127.0.0.1:3001".parse().expect("static origin"),
-                    ])
-                    .allow_methods([axum::http::Method::POST, axum::http::Method::GET])
-                    .allow_headers([axum::http::header::CONTENT_TYPE])
-            }
-        }
-    };
+    let cors = build_linear_cors_layer()?;
+
+    // ── SEC-FIX-1: Per-IP rate limiting (before concurrency limit) ──
+    let node_limiter = crate::rpc_rate_limit::NodeRateLimiter::from_env();
+    info!(
+        "RPC: per-IP rate limit write={}/min read={}/min",
+        node_limiter.write_limit, node_limiter.read_limit
+    );
 
     let app = app
         .layer(cors)
@@ -118,11 +157,23 @@ pub async fn run_rpc_server(
         .layer(DefaultBodyLimit::max(131_072))
         // ── Global concurrency limit: max 64 in-flight requests ──
         .layer(ConcurrencyLimitLayer::new(64))
+        // ── SEC-FIX-1: Per-IP rate limiting runs BEFORE concurrency limit ──
+        // so abusive IPs are rejected before consuming concurrency slots.
+        .layer(axum::middleware::from_fn_with_state(
+            node_limiter,
+            crate::rpc_rate_limit::node_rate_limit,
+        ))
         .with_state(rpc_state);
 
     info!("RPC server listening on {}", addr);
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+    // SEC-FIX-1: Enable ConnectInfo<SocketAddr> so extract_ip() in
+    // rpc_rate_limit.rs can read the real client socket IP.
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
 
@@ -150,6 +201,7 @@ struct CountParam {
 struct QueryParam {
     query: String,
 }
+#[cfg(feature = "dev-rpc")]
 #[derive(Deserialize)]
 struct AddressParam {
     address: String,
@@ -158,6 +210,7 @@ struct AddressParam {
 struct IdParam {
     id: String,
 }
+#[cfg(feature = "faucet")]
 #[derive(Deserialize)]
 struct FaucetReq {
     address: String,
@@ -220,13 +273,14 @@ struct TxDetail {
     #[serde(rename = "ringInputCount")]
     ring_input_count: usize,
     #[serde(rename = "keyImages")]
-    key_images: Vec<String>,
+    spend_ids: Vec<String>,
     #[serde(rename = "spendIdentifierLabel")]
     spend_identifier_label: String,
     #[serde(rename = "spendIdentifiers")]
     spend_identifiers: Vec<String>,
-    #[serde(rename = "stealthOutputCount")]
-    stealth_output_count: usize,
+    // Phase 2c-B D4e: deprecated_output_count deleted
+    #[serde(rename = "outputCount")]
+    output_count: usize,
     #[serde(rename = "hasPayload")]
     has_payload: bool,
     confirmations: u64,
@@ -253,25 +307,30 @@ struct BlockInfo {
     transactions: Vec<TxInfo>,
 }
 
-/// Generate a view tag for fast wallet scanning (Monero-style).
-/// view_tag = first 2 bytes of SHA3-256(address || amount || tx_entropy)
-/// This is PUBLIC data — does not reveal ownership.
-/// Wallet checks: if view_tag matches → run full ownership detection.
-fn generate_view_tag(address: &str, amount: u64, entropy: &[u8]) -> String {
-    use sha3::{Digest, Sha3_256};
-    let mut h = Sha3_256::new();
-    h.update(b"MISAKA:viewtag:v1:");
-    h.update(address.as_bytes());
-    h.update(amount.to_le_bytes());
-    h.update(entropy);
-    let hash: [u8; 32] = h.finalize().into();
-    hex::encode(&hash[..2]) // 2-byte view tag = 4 hex chars
-}
-
 fn ms_to_iso(ms: u64) -> String {
     chrono::DateTime::from_timestamp_millis(ms as i64)
         .map(|d| d.to_rfc3339())
         .unwrap_or_default()
+}
+
+fn linear_consumer_surfaces_json() -> serde_json::Value {
+    serde_json::json!({
+        "validatorAttestation": {
+            "available": false,
+            "bridgeReadiness": "notAvailable",
+            "explorerConfirmationLevel": "blockFinalized"
+        },
+        "txStatusVocabulary": ["confirmed"]
+    })
+}
+
+fn linear_privacy_path_surface_json(runtime_path: &str) -> serde_json::Value {
+    serde_json::json!({
+        "runtimePath": runtime_path,
+        "targetPath": "zeroKnowledge",
+        "targetBackendFamily": "zeroKnowledge",
+        "note": "linear path remains transparent-default while target privacy path stays zeroKnowledge"
+    })
 }
 
 fn block_to_info(b: &crate::chain_store::StoredBlockHeader, txs: Vec<TxInfo>) -> BlockInfo {
@@ -334,10 +393,10 @@ fn stored_tx_to_info(tx: &crate::chain_store::StoredTx, block_h: u64) -> TxInfo 
                 .spend_identifiers
                 .get(idx)
                 .map(hex::encode)
-                .unwrap_or_else(|| i.key_image.clone());
+                .unwrap_or_else(|| i.spend_id.clone());
             serde_json::json!({
-                "keyImage": i.key_image,
-                "ringSize": i.ring_size,
+                "spendId": i.spend_id,
+                "ringSize": i.anonymity_set_size,
                 "txHash": i.source_tx_hash,
                 "outputIndex": i.source_output_index,
                 "spendIdentifier": spend_identifier,
@@ -369,19 +428,16 @@ async fn health() -> &'static str {
 async fn get_chain_info(State(rpc): State<RpcState>) -> Json<serde_json::Value> {
     let s = rpc.node.read().await;
     let privacy_backend = default_privacy_backend();
-    #[cfg(feature = "stark-stub")]
     let experimental_privacy_path = if s.experimental_zk_path {
         "zeroKnowledge"
     } else {
         "ringSignature"
     };
-    #[cfg(not(feature = "stark-stub"))]
-    let experimental_privacy_path = "ringSignature";
     // Count validators dynamically from connected peers
     let peers = rpc.p2p.get_peer_info_list().await;
     let peer_validators = peers
         .iter()
-        .filter(|p| p.mode == "public" || p.mode == "validator")
+        .filter(|p| PeerModeLabel::parse(&p.mode).counts_as_active_validator_surface())
         .count();
     let active_validators = if s.validator_count > 0 {
         1 + peer_validators
@@ -402,8 +458,10 @@ async fn get_chain_info(State(rpc): State<RpcState>) -> Json<serde_json::Value> 
         "chainHealth": "healthy",
         "genesisTimestamp": ms_to_iso(s.genesis_timestamp_ms),
         "experimentalPrivacyPath": experimental_privacy_path,
+        "privacyPathSurface": linear_privacy_path_surface_json(experimental_privacy_path),
+        "consumerSurfaces": linear_consumer_surfaces_json(),
         "privacyBackend": serde_json::to_value(privacy_backend).unwrap_or(serde_json::json!({
-            "schemeName": "LogRing-v1",
+            "schemeName": "UnifiedZKP-v1",
             "statusNote": "privacy backend descriptor serialization failed"
         })),
     }))
@@ -514,10 +572,10 @@ async fn get_tx_by_hash(
         block_hash: hex::encode(block.hash),
         size: tx.size,
         ring_input_count: tx.input_count,
-        key_images: tx.key_images.iter().map(|ki| hex::encode(ki)).collect(),
+        spend_ids: tx.spend_ids.iter().map(|ki| hex::encode(ki)).collect(),
         spend_identifier_label: tx.spend_identifier_label.clone(),
         spend_identifiers: tx.spend_identifiers.iter().map(hex::encode).collect(),
-        stealth_output_count: tx.output_count,
+        output_count: tx.output_count,
         has_payload: tx.has_payload,
         confirmations: s.height.saturating_sub(block_h),
         version: 1,
@@ -701,7 +759,7 @@ async fn search(State(rpc): State<RpcState>, Json(p): Json<QueryParam>) -> Json<
 /// 3. Pass through `UtxoMempool::admit()` which performs:
 ///    - Structural validation (version, input/output counts, sizes)
 ///    - Ring member UTXO existence check
-///    - Ring signature cryptographic verification (LRS/LogRing/Chipmunk)
+///    - Lattice ZKP proof cryptographic verification (LRS/LogRing/Chipmunk)
 ///    - Key image / link_tag proof verification
 ///    - Key image double-spend check (chain + mempool)
 ///    - Stealth extension sanity
@@ -733,17 +791,97 @@ async fn submit_tx(
         }
     };
 
+    // ── SEC-FIX: Reject system-only tx types at RPC ingress ──
+    // SystemEmission and Faucet transactions MUST NOT be user-submittable.
+    match tx.tx_type {
+        misaka_types::utxo::TxType::SystemEmission
+        | misaka_types::utxo::TxType::Faucet => {
+            return Json(serde_json::json!({
+                "txHash": null, "accepted": false,
+                "error": "SystemEmission/Faucet transactions cannot be user-submitted"
+            }));
+        }
+        _ => {}
+    }
+
     // ── 3. Deterministic TX hash (canonical encoding, no timestamp) ──
     let tx_hash = tx.tx_hash();
     let hash_hex = hex::encode(tx_hash);
 
-    // ── 4. Full verification via mempool.admit() ──
-    // This performs ALL cryptographic checks:
-    // - Ring signature verification (PQ lattice-based)
-    // - Key image proof verification
-    // - UTXO existence for ring members
-    // - Double-spend detection (chain + mempool)
-    // - Structural validation
+    // ── SEC-FIX: ML-DSA-65 pre-verification (anti-spam) ──
+    // Previously this path deferred all signature verification to commit time,
+    // allowing garbage-signed transactions to flood the mempool for free.
+    // narwhal_consensus.rs already has this check — unify behavior here.
+    // TODO(PERF): This requires UTXO set read lock to resolve spending_pubkey.
+    // For now, add a structural check: reject TransparentTransfer with empty proof.
+    if tx.tx_type == misaka_types::utxo::TxType::TransparentTransfer {
+        for (i, input) in tx.inputs.iter().enumerate() {
+            if input.proof.is_empty() {
+                return Json(serde_json::json!({
+                    "txHash": hash_hex, "accepted": false,
+                    "error": format!("input[{}]: missing ML-DSA-65 signature", i)
+                }));
+            }
+            // ML-DSA-65 signature length is 3309 bytes
+            if input.proof.len() != 3309 {
+                return Json(serde_json::json!({
+                    "txHash": hash_hex, "accepted": false,
+                    "error": format!("input[{}]: invalid signature length {} (expected 3309)", i, input.proof.len())
+                }));
+            }
+        }
+    }
+
+    // ── SEC-FIX C-11: ML-DSA-65 cryptographic pre-verification ──
+    // Previously deferred ALL signature verification to commit time, allowing
+    // garbage-signed TXs (valid 3309-byte random proofs) to fill the mempool.
+    // Now verify ML-DSA-65 signatures BEFORE mempool admission.
+    if tx.tx_type == misaka_types::utxo::TxType::TransparentTransfer && !tx.inputs.is_empty() {
+        let guard = rpc.node.read().await;
+        let utxo_set = &guard.utxo_set;
+
+        for (i, input) in tx.inputs.iter().enumerate() {
+            if let Some(outref) = input.utxo_refs.first() {
+                if let Some(pk_bytes) = utxo_set.get_spending_key(outref) {
+                    // Parse ML-DSA-65 public key and signature
+                    let pk = match misaka_pqc::pq_sign::MlDsaPublicKey::from_bytes(&pk_bytes) {
+                        Ok(pk) => pk,
+                        Err(_) => {
+                            drop(guard);
+                            return Json(serde_json::json!({
+                                "txHash": hash_hex, "accepted": false,
+                                "error": format!("input[{}]: invalid spending pubkey in UTXO set", i)
+                            }));
+                        }
+                    };
+                    let sig = match misaka_pqc::pq_sign::MlDsaSignature::from_bytes(&input.proof) {
+                        Ok(sig) => sig,
+                        Err(_) => {
+                            drop(guard);
+                            return Json(serde_json::json!({
+                                "txHash": hash_hex, "accepted": false,
+                                "error": format!("input[{}]: malformed ML-DSA-65 signature", i)
+                            }));
+                        }
+                    };
+                    // Verify using tx_hash as digest (v1 legacy path).
+                    // The Narwhal DAG path uses IntentMessage but this v1 RPC path
+                    // uses tx_hash for backward compatibility.
+                    let digest = tx.tx_hash();
+                    if misaka_pqc::pq_sign::ml_dsa_verify_raw(&pk, &digest, &sig).is_err() {
+                        drop(guard);
+                        return Json(serde_json::json!({
+                            "txHash": hash_hex, "accepted": false,
+                            "error": format!("input[{}]: ML-DSA-65 signature verification failed", i)
+                        }));
+                    }
+                }
+            }
+        }
+        drop(guard);
+    }
+
+    // ── 4. Mempool admission (structural + UTXO existence) ──
     let now_ms = chrono::Utc::now().timestamp_millis() as u64;
     let mut guard = rpc.node.write().await;
     // Reborrow to allow disjoint field access (mempool + utxo_set)
@@ -777,72 +915,7 @@ async fn submit_tx(
 //  Q-DAG-CT Endpoints
 // ═══════════════════════════════════════════════════════════════
 
-/// Submit a confidential transaction (Q-DAG-CT v4).
-///
-/// Accepts a v4 UtxoTransaction where `key_image` fields carry nullifiers.
-/// The mempool performs nullifier conflict detection; full ZKP verification
-/// is deferred to block validation (via qdag_verify).
-async fn submit_ct_tx(
-    State(rpc): State<RpcState>,
-    body: axum::body::Bytes,
-) -> Json<serde_json::Value> {
-    // Size limit — CT transactions are larger due to range proofs (~67KB per output)
-    if body.len() > 1_048_576 {
-        return Json(serde_json::json!({
-            "txHash": null, "accepted": false,
-            "error": format!("ct tx body too large: {} bytes (max 1MB)", body.len())
-        }));
-    }
-
-    // Deserialize as UtxoTransaction (v4 format)
-    let tx: UtxoTransaction = match serde_json::from_slice(&body) {
-        Ok(tx) => tx,
-        Err(e) => {
-            return Json(serde_json::json!({
-                "txHash": null, "accepted": false,
-                "error": format!("invalid CT transaction format: {}", e)
-            }));
-        }
-    };
-
-    if !tx.is_qdag() {
-        return Json(serde_json::json!({
-            "txHash": null, "accepted": false,
-            "error": format!("expected v4 (Q-DAG-CT) transaction, got version 0x{:02x}", tx.version)
-        }));
-    }
-
-    let tx_hash = tx.tx_hash();
-    let hash_hex = hex::encode(tx_hash);
-
-    let now_ms = chrono::Utc::now().timestamp_millis() as u64;
-    let mut guard = rpc.node.write().await;
-    let s = &mut *guard;
-
-    match s.mempool.admit(tx, &s.utxo_set, now_ms) {
-        Ok(admitted_hash) => {
-            info!(
-                "CT TX verified & admitted: {} | mempool={}",
-                &hash_hex[..16],
-                s.mempool.len()
-            );
-            Json(serde_json::json!({
-                "txHash": hex::encode(admitted_hash),
-                "accepted": true,
-                "error": null,
-                "txType": "confidential"
-            }))
-        }
-        Err(e) => {
-            tracing::warn!("CT TX rejected: {} | reason: {}", &hash_hex[..16], e);
-            Json(serde_json::json!({
-                "txHash": hash_hex,
-                "accepted": false,
-                "error": format!("{}", e)
-            }))
-        }
-    }
-}
+// REMOVED: submit_ct_tx endpoint — confidential transactions deprecated in v1.0.
 
 /// Anonymity set request parameters.
 #[derive(serde::Deserialize)]
@@ -852,7 +925,7 @@ struct AnonymitySetReq {
     tx_hash: String,
     output_index: u32,
     /// Desired ring size.
-    ring_size: Option<usize>,
+    anonymity_set_size: Option<usize>,
 }
 
 /// Get anonymity set for Q-DAG-CT membership proof construction.
@@ -871,14 +944,14 @@ async fn get_anonymity_set(
     State(rpc): State<RpcState>,
     Json(req): Json<AnonymitySetReq>,
 ) -> Json<serde_json::Value> {
-    let ring_size = req.ring_size.unwrap_or(16).max(4).min(1024);
+    let anonymity_set_size = req.anonymity_set_size.unwrap_or(16).max(4).min(1024);
     let guard = rpc.node.read().await;
 
     // Collect confirmed UTXO spending pubkeys as leaf candidates
     let all_keys = guard.utxo_set.all_spending_keys();
-    if all_keys.len() < ring_size {
+    if all_keys.len() < anonymity_set_size {
         return Json(serde_json::json!({
-            "error": format!("insufficient UTXOs for ring: need {}, have {}", ring_size, all_keys.len()),
+            "error": format!("insufficient UTXOs for ring: need {}, have {}", anonymity_set_size, all_keys.len()),
             "leaves": [],
             "signerIndex": 0
         }));
@@ -892,19 +965,28 @@ async fn get_anonymity_set(
     }
 
     // Build anonymity set: select random UTXOs + include the real one
-    use sha3::{Sha3_256, Digest as Sha3Digest};
-    let mut leaves: Vec<[u8; 32]> = Vec::with_capacity(ring_size);
+    use sha3::{Digest as Sha3Digest, Sha3_256};
 
     // Hash each spending pubkey to create leaf hashes
-    let mut all_leaf_hashes: Vec<([u8; 32], String)> = all_keys.iter().map(|(outref, pk_bytes)| {
-        let leaf: [u8; 32] = {
-            let mut h = Sha3_256::new();
-            h.update(b"MISAKA_ANON_LEAF:");
-            h.update(pk_bytes);
-            h.finalize().into()
-        };
-        (leaf, format!("{}:{}", hex::encode(&outref.tx_hash[..8]), outref.output_index))
-    }).collect();
+    let mut all_leaf_hashes: Vec<([u8; 32], String)> = all_keys
+        .iter()
+        .map(|(outref, pk_bytes)| {
+            let leaf: [u8; 32] = {
+                let mut h = Sha3_256::new();
+                h.update(b"MISAKA_ANON_LEAF:");
+                h.update(pk_bytes);
+                h.finalize().into()
+            };
+            (
+                leaf,
+                format!(
+                    "{}:{}",
+                    hex::encode(&outref.tx_hash[..8]),
+                    outref.output_index
+                ),
+            )
+        })
+        .collect();
 
     // Find signer leaf
     let signer_key = format!("{}:{}", hex::encode(&tx_hash_bytes[..8]), req.output_index);
@@ -916,24 +998,31 @@ async fn get_anonymity_set(
     all_leaf_hashes.shuffle(&mut rng);
 
     let mut signer_index = 0usize;
-    let mut selected = Vec::with_capacity(ring_size);
+    let mut selected = Vec::with_capacity(anonymity_set_size);
 
     // Ensure signer is included
-    if let Some(pos) = signer_pos {
+    if signer_pos.is_some() {
         // Find the signer in the shuffled list
         if let Some(shuffled_pos) = all_leaf_hashes.iter().position(|(_, k)| k == &signer_key) {
             let signer_leaf = all_leaf_hashes.remove(shuffled_pos);
             // Insert at random position
-            signer_index = rand::Rng::gen_range(&mut rng, 0..ring_size);
+            signer_index = rand::Rng::gen_range(&mut rng, 0..anonymity_set_size);
             selected.push((signer_index, signer_leaf.0));
         }
     }
 
     // Fill remaining slots
     let mut fill_idx = 0;
-    for (leaf, _) in all_leaf_hashes.iter().take(ring_size - selected.len()) {
-        while fill_idx == signer_index { fill_idx += 1; }
-        if fill_idx >= ring_size { break; }
+    for (leaf, _) in all_leaf_hashes
+        .iter()
+        .take(anonymity_set_size - selected.len())
+    {
+        while fill_idx == signer_index {
+            fill_idx += 1;
+        }
+        if fill_idx >= anonymity_set_size {
+            break;
+        }
         selected.push((fill_idx, *leaf));
         fill_idx += 1;
     }
@@ -971,19 +1060,24 @@ async fn faucet(
     let now_ms = chrono::Utc::now().timestamp_millis() as u64;
 
     let addr = req.address.trim();
-    if addr.len() < 10 || addr.len() > 100 {
-        return Json(serde_json::json!({
-            "success": false, "error": "invalid address length", "txHash": null
-        }));
-    }
-    if !addr.starts_with("msk1") {
-        return Json(serde_json::json!({
-            "success": false, "error": "address must start with msk1", "txHash": null
-        }));
-    }
 
     let mut guard = rpc.node.write().await;
     let s = &mut *guard;
+
+    if s.chain_id == 1 {
+        return Json(serde_json::json!({
+            "success": false,
+            "error": "faucet is disabled on mainnet (chain_id=1)",
+            "txHash": null
+        }));
+    }
+
+    // H-3 FIX: Unified address validation (chain_id bound)
+    if let Err(e) = misaka_types::address::validate_address(addr, s.chain_id) {
+        return Json(serde_json::json!({
+            "success": false, "error": format!("invalid address: {}", e), "txHash": null
+        }));
+    }
 
     let cooldown_ms = s.faucet_cooldown_ms;
     if let Some(&last) = s.faucet_drips.get(addr) {
@@ -1003,44 +1097,48 @@ async fn faucet(
     }
 
     let faucet_amount = s.faucet_amount;
+    // SEC-FIX CRITICAL: spending_pubkey is now REQUIRED for faucet outputs.
+    // Previously the address was computed as SHA3("MISAKA:faucet_addr:v1:" || addr || now_ms)
+    // which made the output permanently unspendable because P2PKH verification
+    // requires address == SHA3(spending_pubkey), and no key produces that hash.
     let spending_pubkey = match req.spending_pubkey.as_deref() {
         Some(hex_str) => match hex::decode(hex_str) {
-            Ok(bytes) => Some(bytes),
-            Err(_) => {
+            Ok(bytes) if !bytes.is_empty() => bytes,
+            _ => {
                 return Json(serde_json::json!({
                     "success": false, "error": "invalid spendingPubkey hex", "txHash": null
                 }));
             }
         },
-        None => None,
+        None => {
+            return Json(serde_json::json!({
+                "success": false,
+                "error": "spendingPubkey is required — without it, faucet outputs cannot be spent",
+                "txHash": null
+            }));
+        }
+    };
+
+    // SEC-FIX: Compute address as SHA3-256(spending_pubkey) for P2PKH compatibility.
+    // This ensures the output can actually be spent by the owner of the spending key.
+    let p2pkh_address: [u8; 32] = {
+        use sha3::{Digest, Sha3_256};
+        Sha3_256::digest(&spending_pubkey).into()
     };
 
     // Build coinbase TX — queued for next block via apply_block_atomic.
-    // NO direct utxo_set mutation. Same execution path as all outputs.
     let coinbase_tx = misaka_types::utxo::UtxoTransaction {
-        version: misaka_types::utxo::UTXO_TX_VERSION_V3,
-        ring_scheme: misaka_types::utxo::RING_SCHEME_LOGRING,
-        tx_type: TxType::Faucet,
-        inputs: vec![], // Faucet: no inputs
+        version: misaka_types::utxo::UTXO_TX_VERSION,
+        tx_type: TxType::SystemEmission,
+        inputs: vec![],
         outputs: vec![misaka_types::utxo::TxOutput {
             amount: faucet_amount,
-            one_time_address: {
-                use sha3::{Digest, Sha3_256};
-                let mut h = Sha3_256::new();
-                h.update(b"MISAKA:faucet_addr:v1:");
-                h.update(addr.as_bytes());
-                h.update(now_ms.to_le_bytes());
-                let hash: [u8; 32] = h.finalize().into();
-                let mut a = [0u8; 32];
-                a.copy_from_slice(&hash);
-                a
-            },
-            pq_stealth: None,
-            spending_pubkey,
+            address: p2pkh_address,
+            spending_pubkey: Some(spending_pubkey),
         }],
         fee: 0,
         extra: b"faucet".to_vec(),
-        zk_proof: None,
+        expiry: 0,
     };
 
     let tx_hash = coinbase_tx.tx_hash();
@@ -1066,9 +1164,37 @@ async fn faucet(
 
 #[cfg(test)]
 mod tests {
-    use super::stored_tx_to_info;
-    use crate::chain_store::{StoredTx, TxInput, TxOutput};
+    use super::{
+        build_linear_cors_layer, get_block_by_hash, get_tx_by_hash, get_validator_by_id, health,
+        linear_consumer_surfaces_json, linear_privacy_path_surface_json, search, stored_tx_to_info,
+        submit_tx, HashParam, IdParam, QueryParam,
+    };
+    #[cfg(feature = "faucet")]
+    use super::{faucet, FaucetReq};
+    use crate::{
+        block_producer::{NodeState, SharedState},
+        chain_store::{ChainStore, StoredTx, TxInput, TxOutput},
+        config::{NodeMode, P2pConfig},
+        p2p_network::P2pNetwork,
+        rpc_auth::{require_api_key, ApiKeyState},
+    };
+    use axum::{
+        body::Body,
+        extract::{DefaultBodyLimit, State},
+        http::{Request, StatusCode},
+        routing::{get, post},
+        Json, Router,
+    };
+    use misaka_mempool::UtxoMempool;
     use misaka_pqc::{PrivacyBackendFamily, SpendIdentifierModel};
+    use misaka_storage::utxo_set::UtxoSet;
+    use std::{collections::HashMap, sync::Arc};
+    use tokio::sync::RwLock;
+    use tower::util::ServiceExt;
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        crate::test_env::env_lock()
+    }
 
     fn sample_stored_tx() -> StoredTx {
         StoredTx {
@@ -1078,17 +1204,19 @@ mod tests {
             output_count: 1,
             timestamp_ms: 1_710_000_000_000,
             status: "confirmed".into(),
-            key_images: vec![[0x22; 32]],
-            privacy_scheme_tag: 3,
-            privacy_scheme_name: "LogRing-v1".into(),
-            privacy_backend_family: PrivacyBackendFamily::RingSignature,
-            privacy_anonymity_model: "Merkle-path ring membership + link tag".into(),
-            spend_identifier_model: SpendIdentifierModel::LinkTag,
-            spend_identifier_label: "linkTag".into(),
+            spend_ids: vec![[0x22; 32]],
+            privacy_scheme_tag: 0x10,
+            privacy_scheme_name: "UnifiedZKP-v1".into(),
+            privacy_backend_family: PrivacyBackendFamily::ZeroKnowledge,
+            privacy_anonymity_model:
+                "SIS Merkle + BDLOP committed path + algebraic identifier (pk non-recoverable)"
+                    .into(),
+            spend_identifier_model: SpendIdentifierModel::CanonicalSpendTag,
+            spend_identifier_label: "canonical_id".into(),
             spend_identifiers: vec![[0x33; 32]],
-            full_verifier_member_index_hidden: false,
-            zkp_migration_ready: false,
-            privacy_status_note: "Current default.".into(),
+            full_verifier_member_index_hidden: true,
+            zkp_migration_ready: true,
+            privacy_status_note: "Production ZK path.".into(),
             size: 128,
             has_payload: false,
             outputs: vec![TxOutput {
@@ -1100,11 +1228,51 @@ mod tests {
                 view_tag: "abcd".into(),
             }],
             inputs: vec![TxInput {
-                key_image: hex::encode([0x22; 32]),
-                ring_size: 16,
+                spend_id: hex::encode([0x22; 32]),
+                anonymity_set_size: 16,
                 source_tx_hash: "deadbeef".into(),
                 source_output_index: 0,
             }],
+        }
+    }
+
+    fn make_test_state() -> SharedState {
+        let mut chain = ChainStore::new();
+        chain.store_genesis(1_710_000_000_000);
+
+        Arc::new(RwLock::new(NodeState {
+            chain,
+            height: 0,
+            tx_count_total: 0,
+            validator_count: 0,
+            genesis_timestamp_ms: 1_710_000_000_000,
+            chain_id: 2,
+            chain_name: "MISAKA Testnet".into(),
+            version: "test".into(),
+            mempool: UtxoMempool::new(8),
+            utxo_set: UtxoSet::new(8),
+            coinbase_pending: Vec::new(),
+            faucet_drips: HashMap::new(),
+            faucet_amount: 0,
+            faucet_cooldown_ms: 0,
+            data_dir: std::env::temp_dir()
+                .join("misaka-node-rpc-tests")
+                .display()
+                .to_string(),
+            experimental_zk_path: false,
+            proposer_payout_address: None,
+            treasury_address: None,
+        }))
+    }
+
+    fn make_test_rpc_state() -> super::RpcState {
+        super::RpcState {
+            node: make_test_state(),
+            p2p: Arc::new(P2pNetwork::new(
+                2,
+                "rpc-test-node".into(),
+                P2pConfig::from_mode(NodeMode::Hidden),
+            )),
         }
     }
 
@@ -1113,11 +1281,14 @@ mod tests {
         let info = stored_tx_to_info(&sample_stored_tx(), 7);
         let json = serde_json::to_value(info).expect("serialize tx info");
 
-        assert_eq!(json["privacy"]["schemeTag"], 3);
-        assert_eq!(json["privacy"]["schemeName"], "LogRing-v1");
-        assert_eq!(json["privacy"]["backendFamily"], "ringSignature");
-        assert_eq!(json["privacy"]["spendIdentifierModel"], "linkTag");
-        assert_eq!(json["privacy"]["spendIdentifierLabel"], "linkTag");
+        assert_eq!(json["privacy"]["schemeTag"], 16);
+        assert_eq!(json["privacy"]["schemeName"], "UnifiedZKP-v1");
+        assert_eq!(json["privacy"]["backendFamily"], "zeroKnowledge");
+        assert_eq!(
+            json["privacy"]["spendIdentifierModel"],
+            "canonicalSpendTag"
+        );
+        assert_eq!(json["privacy"]["spendIdentifierLabel"], "canonical_id");
         assert_eq!(
             json["privacy"]["spendIdentifiers"][0],
             hex::encode([0x33; 32])
@@ -1127,6 +1298,301 @@ mod tests {
             json["inputs"][0]["spendIdentifier"],
             hex::encode([0x33; 32])
         );
-        assert_eq!(json["inputs"][0]["spendIdentifierLabel"], "linkTag");
+        assert_eq!(json["inputs"][0]["spendIdentifierLabel"], "canonical_id");
+    }
+
+    #[tokio::test]
+    async fn test_submit_tx_rejects_payload_over_global_body_limit() {
+        let app = Router::new()
+            .route(
+                "/api/submit_tx",
+                post(|_: axum::body::Bytes| async { StatusCode::OK }),
+            )
+            .layer(DefaultBodyLimit::max(131_072));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/submit_tx")
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(vec![b'{'; 131_073]))
+                    .expect("test request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    // REMOVED: test_submit_ct_tx — endpoint deleted in v1.0.
+
+    #[tokio::test]
+    async fn test_rpc_write_routes_require_api_key_and_health_stays_public() {
+        let auth_state = ApiKeyState {
+            required_key: Some("rpc-secret".into()),
+            write_ip_allowlist: vec![],
+            auth_required: false,
+        };
+        let public_routes = Router::new().route("/health", get(health));
+        let write_routes = {
+            let routes = Router::new()
+                .route("/api/submit_tx", post(submit_tx))
+                .route("/api/submit_ct_tx", post(submit_ct_tx));
+            #[cfg(feature = "faucet")]
+            let routes = routes.route("/api/faucet", post(faucet));
+            routes.route_layer(axum::middleware::from_fn_with_state(
+                auth_state,
+                require_api_key,
+            ))
+        };
+        let app = public_routes
+            .merge(write_routes)
+            .with_state(make_test_rpc_state());
+
+        let health_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/health")
+                    .body(Body::empty())
+                    .expect("health request"),
+            )
+            .await
+            .expect("health response");
+        assert_eq!(health_response.status(), StatusCode::OK);
+
+        let mut routes = vec!["/api/submit_tx", "/api/submit_ct_tx"];
+        #[cfg(feature = "faucet")]
+        routes.push("/api/faucet");
+
+        for route in routes {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(route)
+                        .header(axum::http::header::CONTENT_TYPE, "application/json")
+                        .body(Body::from("{}"))
+                        .expect("write request"),
+                )
+                .await
+                .expect("write response");
+            assert_eq!(
+                response.status(),
+                StatusCode::UNAUTHORIZED,
+                "{route} must stay behind API-key auth"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_run_rpc_server_rejects_invalid_cors_origin_config() {
+        let _guard = env_lock();
+        std::env::set_var("MISAKA_CORS_ORIGINS", " ,  , ");
+
+        let result: anyhow::Result<()> = super::run_rpc_server(
+            make_test_state(),
+            Arc::new(P2pNetwork::new(
+                2,
+                "rpc-test-node".into(),
+                P2pConfig::from_mode(NodeMode::Hidden),
+            )),
+            "127.0.0.1:0".parse().expect("socket addr"),
+            2,
+        )
+        .await;
+
+        assert!(result.is_err(), "invalid CORS config must fail closed");
+        let err = result.expect_err("invalid CORS config");
+        assert!(err.to_string().contains("contains no valid origins"));
+
+        std::env::remove_var("MISAKA_CORS_ORIGINS");
+    }
+
+    #[tokio::test]
+    async fn test_linear_cors_default_allows_localhost_only() {
+        let _guard = env_lock();
+        std::env::remove_var("MISAKA_CORS_ORIGINS");
+
+        let app = Router::new()
+            .route("/health", get(health))
+            .layer(build_linear_cors_layer().expect("default cors"))
+            .with_state(make_test_rpc_state());
+
+        let allowed = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("OPTIONS")
+                    .uri("/health")
+                    .header(axum::http::header::ORIGIN, "http://localhost:3000")
+                    .header(axum::http::header::ACCESS_CONTROL_REQUEST_METHOD, "GET")
+                    .body(Body::empty())
+                    .expect("allowed preflight"),
+            )
+            .await
+            .expect("allowed response");
+        assert_eq!(
+            allowed
+                .headers()
+                .get(axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN),
+            Some(&axum::http::HeaderValue::from_static(
+                "http://localhost:3000"
+            ))
+        );
+
+        let denied = app
+            .oneshot(
+                Request::builder()
+                    .method("OPTIONS")
+                    .uri("/health")
+                    .header(axum::http::header::ORIGIN, "https://evil.example")
+                    .header(axum::http::header::ACCESS_CONTROL_REQUEST_METHOD, "GET")
+                    .body(Body::empty())
+                    .expect("denied preflight"),
+            )
+            .await
+            .expect("denied response");
+        assert!(denied
+            .headers()
+            .get(axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN)
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn test_get_block_by_hash_rejects_malformed_hash() {
+        let err = get_block_by_hash(
+            State(make_test_rpc_state()),
+            Json(HashParam {
+                hash: "not-a-hex-hash".into(),
+            }),
+        )
+        .await
+        .expect_err("invalid hashes must fail closed");
+
+        assert_eq!(err, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_get_validator_by_id_rejects_malformed_id() {
+        let err = get_validator_by_id(
+            State(make_test_rpc_state()),
+            Json(IdParam {
+                id: "validator-not-a-number".into(),
+            }),
+        )
+        .await
+        .expect_err("malformed validator ids must fail closed");
+
+        assert_eq!(err, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_search_rejects_overlong_query() {
+        let json = search(
+            State(make_test_rpc_state()),
+            Json(QueryParam {
+                query: "a".repeat(257),
+            }),
+        )
+        .await
+        .0;
+
+        assert_eq!(json["type"], serde_json::Value::String("error".into()));
+        assert_eq!(
+            json["value"],
+            serde_json::Value::String("query too long (max 256 chars)".into())
+        );
+    }
+
+    #[test]
+    fn test_linear_consumer_surfaces_json_exposes_v4_vocabulary() {
+        let json = linear_consumer_surfaces_json();
+        assert_eq!(
+            json["validatorAttestation"]["available"],
+            serde_json::Value::Bool(false)
+        );
+        assert_eq!(
+            json["validatorAttestation"]["bridgeReadiness"],
+            serde_json::Value::String("notAvailable".into())
+        );
+        assert_eq!(json["txStatusVocabulary"], serde_json::json!(["confirmed"]));
+    }
+
+    #[test]
+    fn test_linear_privacy_path_surface_json_splits_runtime_and_target() {
+        let json = linear_privacy_path_surface_json("ringSignature");
+        assert_eq!(
+            json["runtimePath"],
+            serde_json::Value::String("ringSignature".into())
+        );
+        assert_eq!(
+            json["targetPath"],
+            serde_json::Value::String("zeroKnowledge".into())
+        );
+        assert_eq!(
+            json["targetBackendFamily"],
+            serde_json::Value::String("zeroKnowledge".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_tx_by_hash_rejects_invalid_hash_without_state_lookup() {
+        let rpc = make_test_rpc_state();
+        let response = get_tx_by_hash(
+            State(rpc),
+            Json(HashParam {
+                hash: "not-a-hex-hash".into(),
+            }),
+        )
+        .await;
+
+        assert!(matches!(response, Err(StatusCode::BAD_REQUEST)));
+    }
+
+    #[cfg(feature = "faucet")]
+    #[tokio::test]
+    async fn test_linear_faucet_rejects_invalid_address() {
+        let response = faucet(
+            State(make_test_rpc_state()),
+            Json(FaucetReq {
+                address: "not-a-valid-address".into(),
+                spending_pubkey: None,
+            }),
+        )
+        .await;
+
+        assert_eq!(response.0["success"], serde_json::Value::Bool(false));
+        assert!(response.0["error"]
+            .as_str()
+            .expect("error string")
+            .contains("invalid address"));
+    }
+
+    #[cfg(feature = "faucet")]
+    #[tokio::test]
+    async fn test_linear_faucet_is_disabled_on_mainnet() {
+        let rpc = make_test_rpc_state();
+        {
+            let mut guard = rpc.node.write().await;
+            guard.chain_id = 1;
+        }
+
+        let response = faucet(
+            State(rpc),
+            Json(FaucetReq {
+                address: "msk1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq0kc2m7".into(),
+                spending_pubkey: None,
+            }),
+        )
+        .await;
+
+        assert_eq!(response.0["success"], serde_json::Value::Bool(false));
+        assert_eq!(
+            response.0["error"],
+            serde_json::Value::String("faucet is disabled on mainnet (chain_id=1)".into())
+        );
     }
 }

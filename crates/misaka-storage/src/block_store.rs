@@ -2,7 +2,7 @@
 //!
 //! # Architecture: Crash-Resistant State Management
 //!
-//! All state mutations (UTXO creation, nullifier recording, height update)
+//! All state mutations (UTXO creation, spend recording, height update)
 //! are collected into a single `rocksdb::WriteBatch` and committed with one
 //! atomic `db.write(batch)` call. RocksDB's internal Write-Ahead Log (WAL)
 //! guarantees that either ALL mutations in the batch are persisted, or NONE
@@ -13,7 +13,7 @@
 //! | CF Name       | Key                  | Value               | Purpose                    |
 //! |---------------|----------------------|---------------------|----------------------------|
 //! | `utxos`       | tx_hash(32) ++ idx(4)| StoredUtxo (JSON)   | Unspent output set         |
-//! | `nullifiers`  | key_image(32)        | height(8 LE)        | Spent key images           |
+//! | `spent_tags`  | tag(32)        | height(8 LE)        | Spent identifiers           |
 //! | `spending_keys`| tx_hash(32) ++ idx(4)| Poly bytes (512)   | Ring member resolution     |
 //! | `block_meta`  | height(8 LE)         | BlockMeta (JSON)    | Block headers + delta info |
 //! | `state`       | "height"             | u64 LE              | Current chain tip          |
@@ -34,7 +34,7 @@ use misaka_types::utxo::{OutputRef, TxOutput};
 
 /// Column family names.
 const CF_UTXOS: &str = "utxos";
-const CF_NULLIFIERS: &str = "nullifiers";
+const CF_SPENT_TAGS: &str = "spent_tags";
 const CF_SPENDING_KEYS: &str = "spending_keys";
 const CF_BLOCK_META: &str = "block_meta";
 const CF_STATE: &str = "state";
@@ -64,8 +64,8 @@ pub enum BlockStoreError {
 #[derive(serde::Serialize, serde::Deserialize)]
 struct StoredUtxo {
     amount: u64,
-    one_time_address: [u8; 32],
-    pq_stealth_json: Option<String>,
+    address: [u8; 32],
+    pq_kem_json: Option<String>,
     /// Block height at which this UTXO was created (NOT a timestamp).
     created_in_height: u64,
 }
@@ -74,10 +74,10 @@ struct StoredUtxo {
 #[derive(serde::Serialize, serde::Deserialize)]
 struct BlockMeta {
     height: u64,
-    /// OutputRefs created in this block (for rollback).
+    /// OutputRefs created in this block (for SPC switch undo).
     created_outrefs: Vec<(/* tx_hash */ [u8; 32], /* idx */ u32)>,
-    /// Key images (nullifiers) added in this block (for rollback).
-    key_images_added: Vec<[u8; 32]>,
+    /// Key images (spent_tags) added in this block (for SPC switch undo).
+    spend_ids_added: Vec<[u8; 32]>,
     /// State root hash after this block was applied.
     state_root: [u8; 32],
 }
@@ -91,13 +91,13 @@ struct BlockMeta {
 /// `apply_block_atomic()` performs validation (read) then write in two phases.
 /// This is NOT serializable under concurrent writers — two callers could both
 /// pass validation then overwrite each other's writes. The node MUST ensure
-/// that only ONE task calls `apply_block_atomic()` or `rollback_block()` at
+/// that only ONE task calls `apply_block_atomic()` or `undo_block_at_height()` at
 /// any given time. In the current architecture, `block_producer` holds an
 /// exclusive `RwLock::write()` guard on `NodeState` during block application,
 /// which satisfies this invariant.
 ///
 /// If parallel block processing is added in the future, an application-level
-/// `Mutex` around `apply_block_atomic()` and `rollback_block()` is required.
+/// `Mutex` around `apply_block_atomic()` and `undo_block_at_height()` is required.
 pub struct RocksBlockStore {
     db: DB,
     /// If true, fsync WAL on every write (mainnet safety).
@@ -115,13 +115,48 @@ impl RocksBlockStore {
         let mut opts = Options::default();
         opts.create_if_missing(true);
         opts.create_missing_column_families(true);
-        // Optimize for point lookups (UTXO/nullifier checks)
+
+        // ── H1 FIX: RocksDB Hardening ──
+
+        // Enable paranoid checks — verifies checksums on every read.
+        // Detects silent data corruption from disk/filesystem/hardware.
+        opts.set_paranoid_checks(true);
+
+        // Limit WAL size to prevent unbounded growth on crash loops.
+        opts.set_max_total_wal_size(256 * 1024 * 1024); // 256 MB
+
+        // WAL recovery mode:
+        // - sync_writes=true (mainnet): use AbsoluteConsistency
+        //   → reject any WAL entry with checksum mismatch (strictest)
+        // - sync_writes=false (testnet): use PointInTimeRecovery
+        //   → recover as much as possible (tolerates partial last entry)
+        if sync_writes {
+            opts.set_wal_recovery_mode(rocksdb::DBRecoveryMode::AbsoluteConsistency);
+        } else {
+            opts.set_wal_recovery_mode(rocksdb::DBRecoveryMode::PointInTime);
+        }
+
+        // Background jobs for compaction/flush
+        opts.set_max_background_jobs(4);
+
+        // Periodic bytes sync for WAL and SST files
+        opts.set_bytes_per_sync(1024 * 1024); // 1 MB
+        opts.set_wal_bytes_per_sync(512 * 1024); // 512 KB
+
+        // Optimize for point lookups (UTXO/spend checks)
         opts.set_allow_concurrent_memtable_write(true);
         opts.set_enable_write_thread_adaptive_yield(true);
 
+        // ── Per-CF options: SpendTag CF gets bloom filter ──
+        let mut spent_tag_opts = Options::default();
+        spent_tag_opts.set_paranoid_checks(true);
+        // Bloom filter: ~10 bits/key, reduces disk reads for point lookups.
+        // SpendTags are 32-byte keys checked on every TX validation.
+        spent_tag_opts.optimize_for_point_lookup(64); // 64 MB block cache hint
+
         let cf_descriptors = vec![
             ColumnFamilyDescriptor::new(CF_UTXOS, Options::default()),
-            ColumnFamilyDescriptor::new(CF_NULLIFIERS, Options::default()),
+            ColumnFamilyDescriptor::new(CF_SPENT_TAGS, spent_tag_opts),
             ColumnFamilyDescriptor::new(CF_SPENDING_KEYS, Options::default()),
             ColumnFamilyDescriptor::new(CF_BLOCK_META, Options::default()),
             ColumnFamilyDescriptor::new(CF_STATE, Options::default()),
@@ -130,7 +165,7 @@ impl RocksBlockStore {
         let db = DB::open_cf_descriptors(&opts, path, cf_descriptors)?;
 
         info!(
-            "RocksDB opened at {} (sync_writes={})",
+            "RocksDB opened at {} (sync_writes={}, paranoid_checks=true, wal_limit=256MB)",
             path.display(),
             sync_writes
         );
@@ -198,13 +233,13 @@ impl RocksBlockStore {
         }
     }
 
-    /// Check if a key image (nullifier) has been spent.
-    pub fn has_nullifier(&self, key_image: &[u8; 32]) -> Result<bool, BlockStoreError> {
+    /// Check if a spend identifier has been spent.
+    pub fn has_spent_tag(&self, tag: &[u8; 32]) -> Result<bool, BlockStoreError> {
         let cf = self
             .db
-            .cf_handle(CF_NULLIFIERS)
-            .ok_or_else(|| BlockStoreError::NotFound("CF nullifiers".into()))?;
-        Ok(self.db.get_cf(&cf, key_image)?.is_some())
+            .cf_handle(CF_SPENT_TAGS)
+            .ok_or_else(|| BlockStoreError::NotFound("CF spent_tags".into()))?;
+        Ok(self.db.get_cf(&cf, tag)?.is_some())
     }
 
     /// Get a UTXO entry.
@@ -220,8 +255,7 @@ impl RocksBlockStore {
                     .map_err(|e| BlockStoreError::Serde(e.to_string()))?;
                 let output = TxOutput {
                     amount: stored.amount,
-                    one_time_address: stored.one_time_address,
-                    pq_stealth: None, // Stealth data is not needed for UTXO lookups
+                    address: stored.address,
                     spending_pubkey: None,
                 };
                 Ok(Some((output, stored.created_in_height)))
@@ -247,10 +281,10 @@ impl RocksBlockStore {
     /// # Atomicity Guarantee
     ///
     /// All of the following operations are batched into a single WriteBatch:
-    /// 1. Record all nullifiers (key images)
+    /// 1. Record all spent_tags (key images)
     /// 2. Create all new UTXOs
     /// 3. Register spending keys for new UTXOs
-    /// 4. Store block metadata (for rollback)
+    /// 4. Store block metadata (for SPC switch undo)
     /// 5. Update chain height
     /// 6. Update state root
     ///
@@ -260,13 +294,13 @@ impl RocksBlockStore {
     pub fn apply_block_atomic(
         &self,
         height: u64,
-        nullifiers: &[[u8; 32]],
+        spent_tags: &[[u8; 32]],
         new_outputs: &[(OutputRef, TxOutput, Option<Vec<u8>>)], // (outref, output, spending_key)
         state_root: [u8; 32],
     ) -> Result<(), BlockStoreError> {
         // ── Phase 1: Validate (read-only checks) ──
-        for ki in nullifiers {
-            if self.has_nullifier(ki)? {
+        for ki in spent_tags {
+            if self.has_spent_tag(ki)? {
                 return Err(BlockStoreError::KeyImageSpent(hex::encode(ki)));
             }
         }
@@ -289,8 +323,8 @@ impl RocksBlockStore {
             .ok_or_else(|| BlockStoreError::NotFound("CF utxos".into()))?;
         let cf_null = self
             .db
-            .cf_handle(CF_NULLIFIERS)
-            .ok_or_else(|| BlockStoreError::NotFound("CF nullifiers".into()))?;
+            .cf_handle(CF_SPENT_TAGS)
+            .ok_or_else(|| BlockStoreError::NotFound("CF spent_tags".into()))?;
         let cf_spk = self
             .db
             .cf_handle(CF_SPENDING_KEYS)
@@ -304,8 +338,8 @@ impl RocksBlockStore {
             .cf_handle(CF_STATE)
             .ok_or_else(|| BlockStoreError::NotFound("CF state".into()))?;
 
-        // 2a. Nullifiers
-        for ki in nullifiers {
+        // 2a. SpendTags
+        for ki in spent_tags {
             batch.put_cf(&cf_null, ki, &height.to_le_bytes());
         }
 
@@ -315,8 +349,8 @@ impl RocksBlockStore {
             let key = Self::outref_key(outref);
             let stored = StoredUtxo {
                 amount: output.amount,
-                one_time_address: output.one_time_address,
-                pq_stealth_json: None,
+                address: output.address,
+                pq_kem_json: None,
                 created_in_height: height,
             };
             let val =
@@ -330,11 +364,11 @@ impl RocksBlockStore {
             created_outrefs.push((outref.tx_hash, outref.output_index));
         }
 
-        // 2c. Block metadata (for rollback)
+        // 2c. Block metadata (for SPC switch undo)
         let meta = BlockMeta {
             height,
             created_outrefs,
-            key_images_added: nullifiers.to_vec(),
+            spend_ids_added: spent_tags.to_vec(),
             state_root,
         };
         let meta_val =
@@ -357,12 +391,15 @@ impl RocksBlockStore {
     /// Rollback the last applied block.
     ///
     /// Reads the BlockMeta at the given height, then atomically:
-    /// - Removes all nullifiers added by that block
+    /// Undo block state at a given height (for SPC switch only).
+    ///
+    /// This is NOT a protocol-level rollback. Used during shallow SPC switches.
+    /// - Removes all spent_tags added by that block
     /// - Removes all UTXOs created by that block
     /// - Removes spending keys for those UTXOs
     /// - Removes the block metadata
     /// - Decrements height and restores the previous state root
-    pub fn rollback_block(&self, height: u64) -> Result<(), BlockStoreError> {
+    pub fn undo_block_at_height(&self, height: u64) -> Result<(), BlockStoreError> {
         let cf_meta = self
             .db
             .cf_handle(CF_BLOCK_META)
@@ -384,8 +421,8 @@ impl RocksBlockStore {
             .ok_or_else(|| BlockStoreError::NotFound("CF utxos".into()))?;
         let cf_null = self
             .db
-            .cf_handle(CF_NULLIFIERS)
-            .ok_or_else(|| BlockStoreError::NotFound("CF nullifiers".into()))?;
+            .cf_handle(CF_SPENT_TAGS)
+            .ok_or_else(|| BlockStoreError::NotFound("CF spent_tags".into()))?;
         let cf_spk = self
             .db
             .cf_handle(CF_SPENDING_KEYS)
@@ -395,8 +432,8 @@ impl RocksBlockStore {
             .cf_handle(CF_STATE)
             .ok_or_else(|| BlockStoreError::NotFound("CF state".into()))?;
 
-        // Remove nullifiers
-        for ki in &meta.key_images_added {
+        // Remove spent_tags
+        for ki in &meta.spend_ids_added {
             batch.delete_cf(&cf_null, ki);
         }
 
@@ -442,7 +479,7 @@ impl RocksBlockStore {
     /// Checks:
     /// 1. Height in `state` CF matches the last `block_meta` entry
     /// 2. State root in `state` CF matches the last block's recorded root
-    /// 3. Basic nullifier count sanity
+    /// 3. Basic spent count sanity
     ///
     /// Returns `Ok(height)` if consistent, `Err` if corruption detected.
     pub fn verify_integrity(&self) -> Result<u64, BlockStoreError> {
@@ -523,8 +560,7 @@ mod tests {
     fn make_output(amount: u64) -> TxOutput {
         TxOutput {
             amount,
-            one_time_address: [0xAA; 32],
-            pq_stealth: None,
+            address: [0xCC; 32],
             spending_pubkey: None,
         }
     }
@@ -558,7 +594,7 @@ mod tests {
 
         assert_eq!(store.get_height().unwrap(), 1);
         assert_eq!(store.get_state_root().unwrap(), root);
-        assert!(store.has_nullifier(&ki).unwrap());
+        assert!(store.has_spent_tag(&ki).unwrap());
         let (read_output, created_in_height) = store.get_utxo(&outref).unwrap().unwrap();
         assert_eq!(read_output.amount, 5000);
         assert_eq!(created_in_height, 1);
@@ -566,7 +602,7 @@ mod tests {
     }
 
     #[test]
-    fn test_double_nullifier_rejected() {
+    fn test_double_spend_tag_rejected() {
         let dir = TempDir::new().unwrap();
         let store = RocksBlockStore::open(dir.path(), false).unwrap();
 
@@ -593,12 +629,12 @@ mod tests {
             .unwrap();
 
         assert_eq!(store.get_height().unwrap(), 1);
-        assert!(store.has_nullifier(&ki).unwrap());
+        assert!(store.has_spent_tag(&ki).unwrap());
 
-        store.rollback_block(1).unwrap();
+        store.undo_block_at_height(1).unwrap();
 
         assert_eq!(store.get_height().unwrap(), 0);
-        assert!(!store.has_nullifier(&ki).unwrap());
+        assert!(!store.has_spent_tag(&ki).unwrap());
         assert!(store.get_utxo(&outref).unwrap().is_none());
     }
 

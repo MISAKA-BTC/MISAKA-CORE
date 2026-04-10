@@ -1,0 +1,4 @@
+# MISAKA Testnet Seed Nodes
+# Format: HOST:P2P_PORT
+# Updated: 2026-04-03
+163.43.225.27:6690

@@ -1,2 +1,2 @@
-# Loopback bootstrap used by `misaka-launcher self-host`.
+# セルフホスト用 — ローカルの seed node に接続
 127.0.0.1:6690

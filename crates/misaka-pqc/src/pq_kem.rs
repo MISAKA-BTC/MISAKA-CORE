@@ -1,6 +1,6 @@
-//! ML-KEM-768 (FIPS 203 / Kyber768) — PQ Key Encapsulation Mechanism.
+//! ML-KEM-768 (FIPS 203) — PQ Key Encapsulation Mechanism.
 //!
-//! Used for stealth address shared-secret derivation:
+//! Used for PQ-KEM address shared-secret derivation:
 //! sender encapsulates against recipient's KEM public key → shared secret
 //! → derive one-time output key + encrypt amount.
 //!
@@ -13,7 +13,7 @@
 //! | Ciphertext    | 1,088 |
 //! | Shared secret |    32 |
 
-use pqcrypto_kyber::kyber768;
+use pqcrypto_mlkem::mlkem768;
 use pqcrypto_traits::kem::{
     Ciphertext as PqCt, PublicKey as PqKemPk, SecretKey as PqKemSk, SharedSecret as PqSs,
 };
@@ -40,11 +40,9 @@ pub trait PqKemBackend {
     /// Generate a fresh KEM keypair.
     fn keygen() -> Result<(Self::SecretKey, Self::PublicKey), CryptoError>;
 
-    /// Deterministic encapsulation (seed-based for reproducible tests).
-    ///
-    /// The seed is mixed with the public key via SHA3-256 to produce
-    /// a deterministic randomness source. Production callers should
-    /// supply cryptographically random seeds.
+    /// SEC-FIX NM-12: This method is NOT actually deterministic with the
+    /// current pqcrypto-mlkem backend. The seed parameter is ignored.
+    /// Use `encapsulate()` instead. Retained for API compatibility only.
     fn encapsulate_deterministic(
         pk: &Self::PublicKey,
         seed32: &[u8; 32],
@@ -73,6 +71,11 @@ impl MlKemPublicKey {
         if bytes.len() != ML_KEM_PK_LEN {
             return Err(CryptoError::MlKemInvalidPkLen(bytes.len()));
         }
+        // SEC-FIX: Reject all-zero public key (sentinel value).
+        // MlDsaPublicKey already does this; MlKemPublicKey was missing the check.
+        if bytes.iter().all(|&b| b == 0) {
+            return Err(CryptoError::MlKemEncapsulateFailed);
+        }
         Ok(Self(bytes.to_vec()))
     }
 
@@ -80,8 +83,8 @@ impl MlKemPublicKey {
         &self.0
     }
 
-    fn to_pqcrypto(&self) -> Result<kyber768::PublicKey, CryptoError> {
-        kyber768::PublicKey::from_bytes(&self.0).map_err(|_| CryptoError::MlKemEncapsulateFailed)
+    fn to_pqcrypto(&self) -> Result<mlkem768::PublicKey, CryptoError> {
+        mlkem768::PublicKey::from_bytes(&self.0).map_err(|_| CryptoError::MlKemEncapsulateFailed)
     }
 }
 
@@ -106,8 +109,8 @@ impl MlKemSecretKey {
         &self.0
     }
 
-    fn to_pqcrypto(&self) -> Result<kyber768::SecretKey, CryptoError> {
-        kyber768::SecretKey::from_bytes(&self.0).map_err(|_| CryptoError::MlKemDecapsulateFailed)
+    fn to_pqcrypto(&self) -> Result<mlkem768::SecretKey, CryptoError> {
+        mlkem768::SecretKey::from_bytes(&self.0).map_err(|_| CryptoError::MlKemDecapsulateFailed)
     }
 }
 
@@ -118,11 +121,9 @@ impl Drop for MlKemSecretKey {
     }
 }
 
-impl Clone for MlKemSecretKey {
-    fn clone(&self) -> Self {
-        Self(self.0.clone())
-    }
-}
+// SEC-FIX: Clone removed from MlKemSecretKey.
+// Cloning secret key material creates copies that bypass Drop+zeroize protection.
+// Use Arc<MlKemSecretKey> for sharing. (MlDsaSecretKey already correctly omits Clone.)
 
 impl std::fmt::Debug for MlKemSecretKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -135,10 +136,13 @@ impl std::fmt::Debug for MlKemSecretKey {
 pub struct MlKemCiphertext(pub Vec<u8>);
 
 impl MlKemCiphertext {
+    /// SEC-FIX TM-14: Validate that bytes can be parsed by pqcrypto before storing.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, CryptoError> {
         if bytes.len() != ML_KEM_CT_LEN {
             return Err(CryptoError::MlKemInvalidCtLen(bytes.len()));
         }
+        mlkem768::Ciphertext::from_bytes(bytes)
+            .map_err(|_| CryptoError::MlKemDecapsulateFailed)?;
         Ok(Self(bytes.to_vec()))
     }
 
@@ -146,8 +150,8 @@ impl MlKemCiphertext {
         &self.0
     }
 
-    fn to_pqcrypto(&self) -> Result<kyber768::Ciphertext, CryptoError> {
-        kyber768::Ciphertext::from_bytes(&self.0).map_err(|_| CryptoError::MlKemDecapsulateFailed)
+    fn to_pqcrypto(&self) -> Result<mlkem768::Ciphertext, CryptoError> {
+        mlkem768::Ciphertext::from_bytes(&self.0).map_err(|_| CryptoError::MlKemDecapsulateFailed)
     }
 }
 
@@ -158,8 +162,15 @@ impl std::fmt::Debug for MlKemCiphertext {
 }
 
 /// ML-KEM-768 shared secret (32 bytes). Zeroized on drop.
-#[derive(Clone, PartialEq, Eq)]
-pub struct MlKemSharedSecret(pub [u8; 32]);
+///
+/// # Security (SEC-AUDIT-V5 MED-003)
+///
+/// PartialEq/Eq intentionally NOT derived — standard `==` on secret
+/// material leaks information via timing. Use `ct_eq_32` if comparison
+/// is ever needed.  The inner field is `pub(crate)` to prevent external
+/// code from constructing or pattern-matching the value.
+#[derive(Clone)]
+pub struct MlKemSharedSecret(pub(crate) [u8; 32]);
 
 impl MlKemSharedSecret {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, CryptoError> {
@@ -210,21 +221,22 @@ impl PqKemBackend for MlKem768Backend {
     type SharedSecret = MlKemSharedSecret;
 
     fn keygen() -> Result<(Self::SecretKey, Self::PublicKey), CryptoError> {
-        let (pk, sk) = kyber768::keypair();
+        let (pk, sk) = mlkem768::keypair();
         Ok((
             MlKemSecretKey(sk.as_bytes().to_vec()),
             MlKemPublicKey(pk.as_bytes().to_vec()),
         ))
     }
 
+    /// SEC-FIX NM-12: NOT deterministic — seed is IGNORED by pqcrypto-mlkem.
+    /// Use `encapsulate()` instead. This delegates to randomized encapsulation.
+    #[allow(deprecated)]
     fn encapsulate_deterministic(
         pk: &Self::PublicKey,
         _seed32: &[u8; 32],
     ) -> Result<(Self::Ciphertext, Self::SharedSecret), CryptoError> {
-        // Note: pqcrypto-kyber does not expose seeded encapsulation.
-        // We use standard encapsulation here. For deterministic testing,
-        // callers should compare shared secrets via decapsulation.
-        // In production, this is always randomized anyway.
+        #[cfg(debug_assertions)]
+        eprintln!("[SEC-WARN] encapsulate_deterministic: seed ignored — pqcrypto-mlkem uses system RNG");
         Self::encapsulate(pk)
     }
 
@@ -232,7 +244,7 @@ impl PqKemBackend for MlKem768Backend {
         pk: &Self::PublicKey,
     ) -> Result<(Self::Ciphertext, Self::SharedSecret), CryptoError> {
         let pq_pk = pk.to_pqcrypto()?;
-        let (ss, ct) = kyber768::encapsulate(&pq_pk);
+        let (ss, ct) = mlkem768::encapsulate(&pq_pk);
         let mut ss_arr = [0u8; 32];
         ss_arr.copy_from_slice(ss.as_bytes());
         Ok((
@@ -247,7 +259,7 @@ impl PqKemBackend for MlKem768Backend {
     ) -> Result<Self::SharedSecret, CryptoError> {
         let pq_ct = ct.to_pqcrypto()?;
         let pq_sk = sk.to_pqcrypto()?;
-        let ss = kyber768::decapsulate(&pq_ct, &pq_sk);
+        let ss = mlkem768::decapsulate(&pq_ct, &pq_sk);
         let mut ss_arr = [0u8; 32];
         ss_arr.copy_from_slice(ss.as_bytes());
         Ok(MlKemSharedSecret(ss_arr))
@@ -304,7 +316,7 @@ mod tests {
         let kp = ml_kem_keygen().unwrap();
         let (ct, ss_sender) = ml_kem_encapsulate(&kp.public_key).unwrap();
         let ss_recipient = ml_kem_decapsulate(&kp.secret_key, &ct).unwrap();
-        assert_eq!(ss_sender, ss_recipient);
+        assert_eq!(ss_sender.as_bytes(), ss_recipient.as_bytes());
     }
 
     #[test]
@@ -313,24 +325,24 @@ mod tests {
         let kp2 = ml_kem_keygen().unwrap();
         let (ct, ss_sender) = ml_kem_encapsulate(&kp1.public_key).unwrap();
         let ss_wrong = ml_kem_decapsulate(&kp2.secret_key, &ct).unwrap();
-        // Kyber768 decapsulation with wrong key produces a pseudorandom output
+        // ML-KEM-768 decapsulation with wrong key produces a pseudorandom output
         // (implicit rejection), not an error. But it won't match.
-        assert_ne!(ss_sender, ss_wrong);
+        assert_ne!(ss_sender.as_bytes(), ss_wrong.as_bytes());
     }
 
     #[test]
     fn test_kdf_derive_deterministic() {
         let ss = MlKemSharedSecret([0x42; 32]);
-        let k1 = kdf_derive(&ss, b"MISAKA:stealth-key", 0);
-        let k2 = kdf_derive(&ss, b"MISAKA:stealth-key", 0);
+        let k1 = kdf_derive(&ss, b"MISAKA:pq-kem-key", 0);
+        let k2 = kdf_derive(&ss, b"MISAKA:pq-kem-key", 0);
         assert_eq!(k1, k2);
     }
 
     #[test]
     fn test_kdf_derive_different_index() {
         let ss = MlKemSharedSecret([0x42; 32]);
-        let k0 = kdf_derive(&ss, b"MISAKA:stealth-key", 0);
-        let k1 = kdf_derive(&ss, b"MISAKA:stealth-key", 1);
+        let k0 = kdf_derive(&ss, b"MISAKA:pq-kem-key", 0);
+        let k1 = kdf_derive(&ss, b"MISAKA:pq-kem-key", 1);
         assert_ne!(k0, k1);
     }
 
@@ -338,21 +350,23 @@ mod tests {
     fn test_kdf_derive_different_domain() {
         let ss = MlKemSharedSecret([0x42; 32]);
         let k_a = kdf_derive(&ss, b"MISAKA:amount-mask", 0);
-        let k_b = kdf_derive(&ss, b"MISAKA:stealth-key", 0);
+        let k_b = kdf_derive(&ss, b"MISAKA:pq-kem-key", 0);
         assert_ne!(k_a, k_b);
     }
 
     #[test]
     fn test_pk_length_validation() {
         assert!(MlKemPublicKey::from_bytes(&[0; 1183]).is_err());
-        assert!(MlKemPublicKey::from_bytes(&[0; 1184]).is_ok());
+        assert!(MlKemPublicKey::from_bytes(&[1; 1184]).is_ok());
         assert!(MlKemPublicKey::from_bytes(&[0; 1185]).is_err());
+        // All-zero key must be rejected
+        assert!(MlKemPublicKey::from_bytes(&[0; 1184]).is_err());
     }
 
     #[test]
     fn test_ct_length_validation() {
         assert!(MlKemCiphertext::from_bytes(&[0; 1087]).is_err());
-        assert!(MlKemCiphertext::from_bytes(&[0; 1088]).is_ok());
+        assert!(MlKemCiphertext::from_bytes(&[1; 1088]).is_ok());
         assert!(MlKemCiphertext::from_bytes(&[0; 1089]).is_err());
     }
 }

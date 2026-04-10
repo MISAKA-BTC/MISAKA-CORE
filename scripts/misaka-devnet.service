@@ -1,0 +1,39 @@
+[Unit]
+Description=MISAKA SR6 Devnet Validator <INDEX> (Narwhal/Bullshark)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/MISAKA-CORE
+ExecStart=/home/ubuntu/MISAKA-CORE/target/release/misaka-node \
+    --config /home/ubuntu/MISAKA-CORE/configs/devnet-sr6-genesis.toml \
+    --genesis-path /home/ubuntu/misaka-data/genesis_committee.toml \
+    --data-dir /home/ubuntu/misaka-data \
+    --rpc-port 3000 \
+    --p2p-port 6690 \
+    --validators 3 \
+    --validator-index <INDEX> \
+    --chain-id 3
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65535
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=misaka-devnet-<INDEX>
+
+# Environment
+Environment=RUST_LOG=info
+Environment=MISAKA_SHIELDED_ENABLED=true
+Environment=MISAKA_SHIELDED_TESTNET=true
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/home/ubuntu/misaka-data
+
+[Install]
+WantedBy=multi-user.target
