@@ -2020,12 +2020,43 @@ async fn start_narwhal_node(cli: Cli) -> anyhow::Result<()> {
                             .await;
                     }
                     NarwhalRelayMessage::CommitVote(vote) => {
+                        // v0.5.12 audit Mid 5 fix: feed CommitVote into
+                        // the consensus runtime so per-round vote
+                        // equivocation is detected and the offending
+                        // author is banned via the shared
+                        // SlotEquivocationLedger. Previously this was
+                        // telemetry-only (`debug!` → /dev/null), leaving
+                        // CommitVote-based detection disconnected from
+                        // enforcement.
                         debug!(
                             "narwhal_commit_vote from={} round={} author={}",
                             authority_index,
                             vote.vote.round,
                             vote.vote.author
                         );
+                        let (vote_reply_tx, vote_reply_rx) =
+                            tokio::sync::oneshot::channel();
+                        if relay_msg_tx
+                            .try_send(ConsensusMessage::RecordCommitVote {
+                                author: vote.vote.author,
+                                round: vote.vote.round,
+                                digest: vote.vote.digest.0,
+                                reply: vote_reply_tx,
+                            })
+                            .is_err()
+                        {
+                            warn!(
+                                "commit_vote_drop: runtime busy, vote \
+                                 from={} round={} author={} not recorded",
+                                authority_index, vote.vote.round, vote.vote.author
+                            );
+                        } else if let Ok(true) = vote_reply_rx.await {
+                            warn!(
+                                "commit_vote_equivocation_banned: relay_peer={} \
+                                 equivocating_author={} round={}",
+                                authority_index, vote.vote.author, vote.vote.round
+                            );
+                        }
                     }
                 },
             }

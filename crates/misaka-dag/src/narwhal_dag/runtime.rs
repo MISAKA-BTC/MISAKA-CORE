@@ -49,6 +49,20 @@ pub enum ConsensusMessage {
     GetStatus(oneshot::Sender<ConsensusStatus>),
     /// Graceful shutdown.
     Shutdown,
+    /// v0.5.12 audit Mid 5 fix: record a CommitVote received over the
+    /// Narwhal relay. The runtime feeds this into the equivocation
+    /// ledger: if the same author casts a commit vote for two
+    /// different block digests in the same round, the author is
+    /// banned and BlockVerifier/BaseCommitter will exclude their
+    /// stake from quorum via the ledger's banned_set.
+    RecordCommitVote {
+        author: AuthorityIndex,
+        round: Round,
+        digest: [u8; 32],
+        /// Set to `true` by the runtime iff this vote constituted a
+        /// freshly-detected equivocation against a prior vote.
+        reply: oneshot::Sender<bool>,
+    },
 }
 
 /// Consensus status snapshot.
@@ -126,6 +140,12 @@ pub struct ConsensusRuntime {
     commit_tx: mpsc::Sender<LinearizedOutput>,
     /// Channel to broadcast proposed blocks (bounded for backpressure).
     block_broadcast_tx: mpsc::Sender<VerifiedBlock>,
+    /// v0.5.12 audit Mid 5 fix: per-round CommitVote tracker used to
+    /// detect vote equivocation. Maps (round, author) → first observed
+    /// digest. If a second CommitVote arrives with a different digest
+    /// from the same (round, author), the author is banned via the
+    /// equivocation ledger.
+    commit_vote_tracker: std::collections::HashMap<(Round, AuthorityIndex), [u8; 32]>,
 }
 
 struct ProcessedIncomingBlock {
@@ -189,6 +209,7 @@ impl ConsensusRuntime {
             metrics,
             commit_tx,
             block_broadcast_tx,
+            commit_vote_tracker: std::collections::HashMap::new(),
         }
     }
 
@@ -330,6 +351,40 @@ impl ConsensusRuntime {
                         Some(ConsensusMessage::GetStatus(reply)) => {
                             let status = self.get_status();
                             let _ = reply.send(status);
+                        }
+                        Some(ConsensusMessage::RecordCommitVote { author, round, digest, reply }) => {
+                            // v0.5.12 audit Mid 5 fix: track commit votes
+                            // and detect per-round equivocation.
+                            let key = (round, author);
+                            let is_equivocation = match self.commit_vote_tracker.get(&key) {
+                                Some(existing) if *existing != digest => {
+                                    // Same author, same round, different
+                                    // digest → equivocation. Ban the author
+                                    // via the SlotEquivocationLedger so
+                                    // BlockVerifier/BaseCommitter exclude
+                                    // their stake from quorum.
+                                    let freshly_banned = self
+                                        .core
+                                        .ledger_mut()
+                                        .ban_for_vote_equivocation(author, round);
+                                    tracing::warn!(
+                                        "commit_vote_equivocation: author={} round={} \
+                                         digest_a={} digest_b={} banned={}",
+                                        author,
+                                        round,
+                                        hex::encode(existing),
+                                        hex::encode(digest),
+                                        freshly_banned
+                                    );
+                                    freshly_banned
+                                }
+                                Some(_) => false, // same digest, no-op
+                                None => {
+                                    self.commit_vote_tracker.insert(key, digest);
+                                    false
+                                }
+                            };
+                            let _ = reply.send(is_equivocation);
                         }
                         Some(ConsensusMessage::Shutdown) | None => {
                             info!("Consensus runtime shutting down");

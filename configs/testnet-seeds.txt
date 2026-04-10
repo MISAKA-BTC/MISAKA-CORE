@@ -1,4 +1,12 @@
 # MISAKA Testnet Seed Nodes
-# Format: HOST:P2P_PORT
+#
+# Format: HOST:NARWHAL_RELAY_PORT
+#
+# Narwhal relay listens on 16110 by convention (NOT the legacy P2P port 6690).
+# Every entry here MUST have a matching public key in
+# configs/testnet-seed-pubkeys.txt on the same line number — the
+# Narwhal relay handshake PK-pins all outbound seed connections and
+# refuses to dial without a pinned pubkey.
+#
 # Updated: 2026-04-10
-133.167.126.51:6690
+133.167.126.51:16110

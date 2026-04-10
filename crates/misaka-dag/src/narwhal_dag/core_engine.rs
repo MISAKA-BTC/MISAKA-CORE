@@ -251,6 +251,12 @@ impl CoreEngine {
         self.metrics = Some(metrics);
     }
 
+    /// v0.5.12 audit Mid 5 fix: expose the equivocation ledger for
+    /// runtime-initiated ban operations (e.g. from CommitVote handling).
+    pub fn ledger_mut(&mut self) -> &mut SlotEquivocationLedger {
+        &mut self.ledger
+    }
+
     // ── Block Proposal (unified) ──
 
     /// Propose a new block via `ProposeContext`.

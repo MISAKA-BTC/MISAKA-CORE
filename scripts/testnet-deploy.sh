@@ -5,7 +5,9 @@ CHAIN_ID=2
 NODE_NAME="misaka-testnet-sr0"
 DATA_DIR="/opt/misaka/data"
 RPC_PORT=3001
-P2P_PORT=6690
+# v0.5.9: Narwhal relay listens on 16110 by convention, NOT the legacy
+# 6690 port. Operators running a genesis node should advertise this.
+P2P_PORT=16110
 FAUCET_AMOUNT=1000000000
 FAUCET_COOLDOWN_MS=300000
 CHECKPOINT_INTERVAL=50
@@ -127,6 +129,16 @@ User=$(whoami)
 WorkingDirectory=$PROJECT_ROOT
 Environment=RUST_LOG=$LOG_LEVEL
 Environment=MISAKA_VALIDATOR_PASSPHRASE_FILE=$PASSPHRASE_FILE
+# v0.5.9: testnet default is fail-closed RPC auth. Operators running
+# a public testnet node without external API-key provisioning must
+# explicitly set open mode here OR provision an API key via
+# MISAKA_RPC_API_KEY. Keep this line for the public testnet; remove
+# it and set MISAKA_RPC_API_KEY before running on mainnet.
+Environment=MISAKA_RPC_AUTH_MODE=open
+# v0.5.9: accept observer clients so stock public-node downloads can
+# sync from this genesis node. Omit this if you are running a private
+# validator that should only accept peers in the genesis committee.
+Environment=MISAKA_ACCEPT_OBSERVERS=1
 ExecStart=$BINARY \\
     --validator \\
     --name $NODE_NAME \\
