@@ -49,7 +49,31 @@ pub struct NarwhalRelayTransportConfig {
     pub secret_key: Arc<ValidatorPqSecretKey>,
     pub peers: Vec<RelayPeer>,
     pub guard_config: misaka_p2p::GuardConfig,
+    /// SEC-FIX v0.5.7: accept inbound connections from peers whose pubkey
+    /// is NOT in the configured `peers` list. The connecting node is
+    /// registered as a transient *observer*: it receives broadcasts but
+    /// is never targeted by `ToAuthority` routing, and its messages
+    /// arrive tagged with the synthetic `OBSERVER_SENTINEL_AUTHORITY`
+    /// so consensus rejects any block it tries to propose. Operators
+    /// enable this with `MISAKA_ACCEPT_OBSERVERS=1`.
+    pub accept_observers: bool,
+    /// SEC-FIX v0.5.7: this node is itself running as an observer (its
+    /// validator.key fingerprint is not in the genesis committee). When
+    /// true:
+    ///   * the outbound-dial filter is bypassed so this node dials every
+    ///     committee member instead of only those with `authority_index >
+    ///     self.authority_index` (which would be empty for an observer
+    ///     using a synthetic high authority_index);
+    ///   * the listener still binds (so it can be debugged with curl /
+    ///     local tools) but inbound peers are not expected.
+    pub observer_self: bool,
 }
+
+/// Sentinel authority index used to tag inbound observer connections so
+/// downstream consensus components can recognise (and ignore) them. It is
+/// chosen to be far above any plausible committee size while still fitting
+/// in `u32`, so accidental collisions with real authorities are impossible.
+pub const OBSERVER_SENTINEL_AUTHORITY: u32 = u32::MAX - 1;
 
 #[derive(Clone, Debug)]
 pub enum OutboundNarwhalRelayEvent {
@@ -304,14 +328,36 @@ async fn read_raw_frame(reader: &mut tokio::io::ReadHalf<TcpStream>) -> Result<V
     Ok(frame)
 }
 
+/// Per-observer monotonic identifier. Observers are clients who are not
+/// in the consensus committee but have been allowed to connect (when the
+/// operator runs with `MISAKA_ACCEPT_OBSERVERS=1`). Each observer gets a
+/// fresh `ObserverId` so multiple concurrent observers do not collide in
+/// the registry the way they would if all keyed by `authority_index`.
+type ObserverId = u64;
+
+/// Tracks how a particular inbound peer was registered, so the post-session
+/// cleanup uses the right key.
+enum RegistryHandle {
+    Validator,
+    Observer(ObserverId),
+}
+
+static OBSERVER_ID_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn next_observer_id() -> ObserverId {
+    OBSERVER_ID_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 struct PeerRegistry {
     peers: HashMap<u32, mpsc::Sender<MisakaMessage>>,
+    observers: HashMap<ObserverId, mpsc::Sender<MisakaMessage>>,
 }
 
 impl PeerRegistry {
     fn new() -> Self {
         Self {
             peers: HashMap::new(),
+            observers: HashMap::new(),
         }
     }
 
@@ -323,6 +369,14 @@ impl PeerRegistry {
         self.peers.remove(&authority_index);
     }
 
+    fn insert_observer(&mut self, id: ObserverId, tx: mpsc::Sender<MisakaMessage>) {
+        self.observers.insert(id, tx);
+    }
+
+    fn remove_observer(&mut self, id: ObserverId) {
+        self.observers.remove(&id);
+    }
+
     async fn send(&self, authority_index: u32, msg: MisakaMessage) {
         if let Some(tx) = self.peers.get(&authority_index) {
             let _ = tx.send(msg).await;
@@ -330,7 +384,15 @@ impl PeerRegistry {
     }
 
     async fn broadcast(&self, msg: MisakaMessage) {
+        // SEC-FIX v0.5.7: broadcast goes to BOTH committee peers and
+        // observers. Observers receive the chain state read-only — they
+        // cannot influence consensus because they are not in the
+        // committee, so they have no stake and their `ToAuthority`
+        // messages are never routed back through `send()`.
         for tx in self.peers.values() {
+            let _ = tx.send(msg.clone()).await;
+        }
+        for tx in self.observers.values() {
             let _ = tx.send(msg.clone()).await;
         }
     }
@@ -607,10 +669,20 @@ pub fn spawn_narwhal_block_relay_transport(
             }
         });
 
+        // SEC-FIX v0.5.7: dial filter has two modes.
+        //   - committee member: keep the original `peer.authority_index >
+        //     self.authority_index` ordering rule, which prevents both
+        //     sides of a pair from dialing each other simultaneously and
+        //     wasting connection slots.
+        //   - observer (`observer_self == true`): dial every committee
+        //     peer regardless of authority_index ordering, because the
+        //     observer's synthetic high authority_index would otherwise
+        //     filter out every real peer (`real_idx > sentinel_idx` is
+        //     always false).
         for peer in config
             .peers
             .iter()
-            .filter(|peer| peer.authority_index > config.authority_index)
+            .filter(|peer| config.observer_self || peer.authority_index > config.authority_index)
             .cloned()
         {
             let registry = registry.clone();
@@ -717,27 +789,73 @@ pub fn spawn_narwhal_block_relay_transport(
                         }
                         slot_guard.promoted = true;
 
-                        let peer = match peer_by_pk.get(&hs.peer_pk.to_bytes()) {
-                            Some(peer) => peer.clone(),
+                        // SEC-FIX v0.5.7: handle observer connections.
+                        //
+                        // Two-tier acceptance:
+                        //   1. Pubkey is in the committee → register as
+                        //      a normal validator peer (keyed by
+                        //      authority_index).
+                        //   2. Pubkey is unknown AND `accept_observers`
+                        //      is true → register as a transient
+                        //      observer (keyed by a fresh ObserverId).
+                        //      Observer connections receive broadcasts
+                        //      but are tagged with the synthetic
+                        //      OBSERVER_SENTINEL_AUTHORITY so consensus
+                        //      will reject any block they try to send.
+                        //   3. Pubkey is unknown and observers are
+                        //      disabled → reject (existing behaviour).
+                        let peer_id = derive_peer_id(&hs.peer_pk, config.chain_id);
+                        let (peer_tx, peer_rx) = mpsc::channel(PEER_OUTBOUND_CAPACITY);
+
+                        let known_peer = peer_by_pk.get(&hs.peer_pk.to_bytes()).cloned();
+                        let (peer_for_session, registry_handle) = match known_peer {
+                            Some(peer) => {
+                                registry.write().await.insert(peer.authority_index, peer_tx);
+                                let _ = inbound_tx
+                                    .send(InboundNarwhalRelayEvent::PeerConnected {
+                                        authority_index: peer.authority_index,
+                                        peer_id,
+                                        address,
+                                    })
+                                    .await;
+                                (peer, RegistryHandle::Validator)
+                            }
+                            None if config.accept_observers => {
+                                let observer_id = next_observer_id();
+                                registry.write().await.insert_observer(observer_id, peer_tx);
+                                info!(
+                                    "Accepted observer {} from {} (observer_id={})",
+                                    peer_id.short_hex(),
+                                    address,
+                                    observer_id,
+                                );
+                                let synthetic_peer = RelayPeer {
+                                    authority_index: OBSERVER_SENTINEL_AUTHORITY,
+                                    address,
+                                    public_key: hs.peer_pk.clone(),
+                                };
+                                let _ = inbound_tx
+                                    .send(InboundNarwhalRelayEvent::PeerConnected {
+                                        authority_index: OBSERVER_SENTINEL_AUTHORITY,
+                                        peer_id,
+                                        address,
+                                    })
+                                    .await;
+                                (synthetic_peer, RegistryHandle::Observer(observer_id))
+                            }
                             None => {
-                                warn!("Rejecting unknown relay peer {}", address);
+                                warn!(
+                                    "Rejecting unknown relay peer {} \
+                                     (set MISAKA_ACCEPT_OBSERVERS=1 to allow)",
+                                    address
+                                );
                                 return;
                             }
                         };
 
-                        let peer_id = derive_peer_id(&hs.peer_pk, config.chain_id);
-                        let (peer_tx, peer_rx) = mpsc::channel(PEER_OUTBOUND_CAPACITY);
-                        registry.write().await.insert(peer.authority_index, peer_tx);
-                        let _ = inbound_tx
-                            .send(InboundNarwhalRelayEvent::PeerConnected {
-                                authority_index: peer.authority_index,
-                                peer_id,
-                                address,
-                            })
-                            .await;
                         run_peer_session(
                             stream,
-                            peer.clone(),
+                            peer_for_session.clone(),
                             peer_id,
                             address,
                             keys,
@@ -745,7 +863,17 @@ pub fn spawn_narwhal_block_relay_transport(
                             peer_rx,
                         )
                         .await;
-                        registry.write().await.remove(peer.authority_index);
+                        match registry_handle {
+                            RegistryHandle::Validator => {
+                                registry
+                                    .write()
+                                    .await
+                                    .remove(peer_for_session.authority_index);
+                            }
+                            RegistryHandle::Observer(id) => {
+                                registry.write().await.remove_observer(id);
+                            }
+                        }
                     });
                 }
                 Err(err) => {

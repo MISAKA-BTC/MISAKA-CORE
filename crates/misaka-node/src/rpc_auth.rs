@@ -78,19 +78,29 @@ impl ApiKeyState {
             return Err(AuthConfigError::OpenModeForbiddenOnMainnet);
         }
 
-        // SEC-FIX: Chain-ID-aware auth defaults.
-        // Previously `auth_mode != "open"` meant any unset env var (default "")
-        // triggered auth_required=true, even on testnet where no API key is set.
-        // This caused testnet nodes to fail at startup unless operators explicitly
-        // set MISAKA_RPC_AUTH_MODE=open.
+        // SEC-FIX v0.5.7: write surface defaults to fail-closed on every
+        // chain. Previously testnet was opt-in: write routes were
+        // accepted with no auth unless `MISAKA_RPC_AUTH_MODE=required` was
+        // explicitly set. Combined with the (also v0.5.7) move of
+        // `submit_tx` / `bridge/submit_mint` onto the shared
+        // `require_api_key` middleware, this means a default-config
+        // testnet operator who does NOT set `MISAKA_RPC_API_KEY` and does
+        // NOT set `MISAKA_RPC_AUTH_MODE=open` now gets a hard startup
+        // failure rather than a silently wide-open faucet/submit_tx.
         //
-        // New behavior:
-        // - mainnet (chain_id=1): auth always required (open is already forbidden above)
-        // - testnet/devnet: auth only required when explicitly set to "required"/"production"
+        // Decision matrix:
+        //   chain_id == 1                              → required
+        //   chain_id != 1 && auth_mode == "open"       → optional
+        //   chain_id != 1 && auth_mode == ""           → required (NEW)
+        //   chain_id != 1 && anything_else             → required
+        //
+        // The bundled launcher still exports `MISAKA_RPC_AUTH_MODE=open`
+        // so the demo / self-host UX is preserved. Production operators
+        // who remove that line get the fail-closed default.
         let auth_required = if chain_id == 1 {
             true // mainnet always requires auth
         } else {
-            auth_mode == "required" || auth_mode == "production"
+            auth_mode != "open"
         };
 
         // Fail-closed: production without API key is a fatal error
@@ -257,15 +267,38 @@ mod tests {
     }
 
     #[test]
-    fn test_dev_without_key_succeeds() {
+    fn test_dev_open_mode_without_key_succeeds() {
+        // SEC-FIX v0.5.7: testnet now defaults to fail-closed. To run a
+        // testnet node without an API key (the bundled launcher path),
+        // operators must explicitly opt in via `MISAKA_RPC_AUTH_MODE=open`.
+        // This test checks that explicit-open mode still works as a no-auth
+        // dev path.
         let _guard = env_lock();
         std::env::remove_var("MISAKA_RPC_API_KEY");
-        std::env::remove_var("MISAKA_RPC_AUTH_MODE");
+        std::env::set_var("MISAKA_RPC_AUTH_MODE", "open");
         let result = ApiKeyState::from_env_checked(2); // testnet
-        assert!(result.is_ok());
+        assert!(
+            result.is_ok(),
+            "explicit open mode on testnet should succeed"
+        );
         let state = result.unwrap();
         assert!(!state.is_enabled());
         assert!(!state.auth_required);
+        std::env::remove_var("MISAKA_RPC_AUTH_MODE");
+    }
+
+    #[test]
+    fn test_dev_without_key_or_mode_now_fails_closed() {
+        // SEC-FIX v0.5.7: previously this returned Ok with auth_required=false,
+        // making testnet write surfaces wide open by default. Now it errors.
+        let _guard = env_lock();
+        std::env::remove_var("MISAKA_RPC_API_KEY");
+        std::env::remove_var("MISAKA_RPC_AUTH_MODE");
+        let result = ApiKeyState::from_env_checked(2);
+        assert!(
+            matches!(result, Err(AuthConfigError::ApiKeyRequiredInProduction)),
+            "testnet without API key and without AUTH_MODE=open must fail-closed"
+        );
     }
 
     #[test]

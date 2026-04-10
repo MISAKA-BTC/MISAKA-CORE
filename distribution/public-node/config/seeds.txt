@@ -1,4 +1,12 @@
 # MISAKA Testnet Seed Nodes
-# Format: HOST:P2P_PORT
-# node 再起動なしで定期的に再読込されます
-133.167.126.51:6690
+#
+# Format: HOST:NARWHAL_RELAY_PORT
+# (Narwhal relay port, typically 16110 — NOT the legacy P2P 6690 port)
+#
+# Narwhal relay はハンドシェイクで相手の ML-DSA-65 公開鍵を pin します。
+# このファイルに seed を書いたら、必ず config/seed-pubkeys.txt にも
+# 同じ順序で対応する公開鍵を記述してください。両方揃わないと launcher
+# は seed 接続を skip して solo mode で起動します。
+#
+# node 再起動時に読み込まれます。
+133.167.126.51:16110

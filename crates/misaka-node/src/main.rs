@@ -1022,10 +1022,37 @@ async fn start_narwhal_node(cli: Cli) -> anyhow::Result<()> {
     let manifest = crate::genesis_committee::GenesisCommitteeManifest::load(&genesis_path)?;
     manifest.validate()?;
 
-    if !manifest.contains(authority_index, identity.public_key()) {
-        anyhow::bail!(
-            "Validator authority_index={} fingerprint={} not found in genesis manifest. \
-             Ensure your validator.key matches an entry in genesis_committee.toml.",
+    // ── SEC-FIX v0.5.7: observer mode auto-detection ──
+    //
+    // If our validator.key fingerprint is in the genesis committee, run as
+    // a normal validator. Otherwise, run in OBSERVER mode:
+    //
+    //  * skip the propose loop (we have no stake → cannot lead)
+    //  * synthesise an authority_index above any committee member so the
+    //    Narwhal relay outbound dialer treats every committee peer as
+    //    "higher index" — wait, the dial filter actually requires
+    //    `peer.authority_index > self.authority_index`, so a high
+    //    sentinel index would *exclude* every real peer. Instead we set
+    //    `observer_self = true` on the relay config, which bypasses the
+    //    ordering filter entirely (see narwhal_block_relay_transport.rs).
+    //  * the operator must run with `MISAKA_ACCEPT_OBSERVERS=1` for the
+    //    handshake to succeed; otherwise we get repeated
+    //    `Rejecting unknown relay peer` warnings on the operator side
+    //    and `outbound handshake failed` on our side, and the node
+    //    falls back to local self-progress.
+    let is_observer = !manifest.contains(authority_index, identity.public_key());
+    if is_observer {
+        tracing::warn!(
+            "🔭 OBSERVER MODE: validator.key fingerprint={} is not in the \
+             genesis committee. This node will receive and verify blocks \
+             from the operator's authority but will NOT propose. Operator \
+             must enable observer acceptance (MISAKA_ACCEPT_OBSERVERS=1) \
+             for the handshake to succeed.",
+            hex::encode(identity.fingerprint()),
+        );
+    } else {
+        tracing::info!(
+            "✅ VALIDATOR MODE: authority_index={} fingerprint={}",
             authority_index,
             hex::encode(identity.fingerprint()),
         );
@@ -1113,7 +1140,24 @@ async fn start_narwhal_node(cli: Cli) -> anyhow::Result<()> {
         .parse::<SocketAddr>()
         .map(|addr| addr.port())
         .unwrap_or(cli.p2p_port);
-    let relay_listen_addr = SocketAddr::from(([0, 0, 0, 0], relay_listen_port));
+    // SEC-FIX v0.5.7: hidden mode used to advertise to nobody but the
+    // Narwhal relay still bound 0.0.0.0:<relay_port>, leaking an inbound
+    // listener that contradicted the operator's "hidden" choice. The
+    // bind IP is now derived from `cli.mode`:
+    //   - public / seed → 0.0.0.0  (accept inbound)
+    //   - hidden        → 127.0.0.1 (loopback only — outbound dial works
+    //                     through the kernel's normal routing, but no
+    //                     external host can connect inbound)
+    let node_mode_for_bind = crate::config::NodeMode::from_str_loose(&cli.mode);
+    let relay_bind_octets = match node_mode_for_bind {
+        crate::config::NodeMode::Hidden => [127, 0, 0, 1],
+        crate::config::NodeMode::Public | crate::config::NodeMode::Seed => [0, 0, 0, 0],
+    };
+    let relay_listen_addr = SocketAddr::from((relay_bind_octets, relay_listen_port));
+    info!(
+        "Narwhal relay bind: {} (mode={:?})",
+        relay_listen_addr, node_mode_for_bind
+    );
     let mut relay_peers: Vec<crate::narwhal_block_relay_transport::RelayPeer> = manifest
         .validators
         .iter()
@@ -1239,6 +1283,21 @@ async fn start_narwhal_node(cli: Cli) -> anyhow::Result<()> {
     let block_cache: Arc<RwLock<BTreeMap<BlockRef, NarwhalBlock>>> =
         Arc::new(RwLock::new(BTreeMap::new()));
     let connected_peers: Arc<RwLock<BTreeSet<u32>>> = Arc::new(RwLock::new(BTreeSet::new()));
+    // SEC-FIX v0.5.7: opt-in observer acceptance.
+    //
+    // Validators set `MISAKA_ACCEPT_OBSERVERS=1` (typically only on the
+    // public-facing operator node) to allow read-only observers to connect.
+    // Observers do not contribute to consensus — see
+    // narwhal_block_relay_transport.rs::OBSERVER_SENTINEL_AUTHORITY.
+    let accept_observers = std::env::var("MISAKA_ACCEPT_OBSERVERS")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if accept_observers {
+        info!(
+            "Narwhal relay: MISAKA_ACCEPT_OBSERVERS=1 — accepting connections \
+             from observers (read-only peers not in genesis_committee)"
+        );
+    }
     let relay_transport_handle =
         crate::narwhal_block_relay_transport::spawn_narwhal_block_relay_transport(
             crate::narwhal_block_relay_transport::NarwhalRelayTransportConfig {
@@ -1249,6 +1308,8 @@ async fn start_narwhal_node(cli: Cli) -> anyhow::Result<()> {
                 secret_key: relay_secret_key,
                 peers: relay_peers,
                 guard_config: misaka_p2p::GuardConfig::default(),
+                accept_observers,
+                observer_self: is_observer,
             },
             relay_in_tx,
             relay_out_rx,
@@ -1275,15 +1336,26 @@ async fn start_narwhal_node(cli: Cli) -> anyhow::Result<()> {
     let shared_state_root = std::sync::Arc::new(tokio::sync::RwLock::new([0u8; 32]));
     let propose_state_root = shared_state_root.clone();
 
-    let propose_loop_handle = crate::narwhal_consensus::spawn_propose_loop(
-        msg_tx.clone(),
-        mempool_propose_rx,
-        crate::narwhal_consensus::ProposeLoopConfig {
-            max_block_txs: cli.dag_max_txs,
-            ..crate::narwhal_consensus::ProposeLoopConfig::default()
-        },
-        propose_state_root,
-    );
+    // SEC-FIX v0.5.7: do not spawn the propose loop in observer mode.
+    // Observers receive blocks from committee members but never propose
+    // (they have no stake and no committee membership). Without this
+    // gate, the propose loop would still run and emit blocks signed by
+    // an unknown identity, which committee verifiers would reject and
+    // log as `unknown peer pubkey` noise.
+    let propose_loop_handle = if is_observer {
+        info!("Observer mode: skipping propose loop (read-only node)");
+        None
+    } else {
+        Some(crate::narwhal_consensus::spawn_propose_loop(
+            msg_tx.clone(),
+            mempool_propose_rx,
+            crate::narwhal_consensus::ProposeLoopConfig {
+                max_block_txs: cli.dag_max_txs,
+                ..crate::narwhal_consensus::ProposeLoopConfig::default()
+            },
+            propose_state_root,
+        ))
+    };
 
     // Start RPC server (minimal — submit_tx + status)
     let rpc_port = cli.rpc_port;
@@ -1366,44 +1438,37 @@ async fn start_narwhal_node(cli: Cli) -> anyhow::Result<()> {
                 async move { axum::Json(narwhal_mempool.mempool_info().await) }
             }
         }))
-        .route("/api/submit_tx", axum::routing::post({
-            let narwhal_mempool = narwhal_mempool.clone();
-            let auth = auth_state.clone();
-            move |headers: axum::http::HeaderMap, body: axum::body::Bytes| {
+        // SEC-FIX v0.5.7: write endpoint now goes through the SHARED
+        // `rpc_auth::require_api_key` middleware (Bearer + IP allowlist
+        // + fail-closed on missing ConnectInfo). The previous inline
+        // bearer check skipped IP allowlist entirely and made
+        // `MISAKA_RPC_WRITE_ALLOWLIST` a no-op for write routes.
+        .route(
+            "/api/submit_tx",
+            axum::routing::post({
                 let narwhal_mempool = narwhal_mempool.clone();
-                let auth = auth.clone();
-                async move {
-                    // SEC-FIX [Audit H3]: Inline auth check for write endpoint.
-                    if let Some(ref expected_key) = auth.required_key {
-                        let auth_header = headers.get("authorization")
-                            .and_then(|v| v.to_str().ok())
-                            .unwrap_or("");
-                        let token = auth_header.strip_prefix("Bearer ").unwrap_or("");
-                        // Constant-time comparison via SHA3 hash
-                        use sha3::{Digest, Sha3_256};
-                        let token_hash = Sha3_256::digest(token.as_bytes());
-                        let expected_hash = Sha3_256::digest(expected_key.as_bytes());
-                        let mut acc = 0u8;
-                        for i in 0..32 {
-                            acc |= token_hash[i] ^ expected_hash[i];
-                        }
-                        if acc != 0 {
+                move |body: axum::body::Bytes| {
+                    let narwhal_mempool = narwhal_mempool.clone();
+                    async move {
+                        // SECURITY: size limit (128 KiB) to prevent memory DoS
+                        if body.len() > 131_072 {
                             return axum::Json(serde_json::json!({
-                                "error": "unauthorized", "accepted": false
+                                "error": format!(
+                                    "tx body too large: {} bytes (max 131072)",
+                                    body.len()
+                                ),
+                                "accepted": false
                             }));
                         }
+                        axum::Json(narwhal_mempool.submit_tx(&body).await)
                     }
-                    // SECURITY: size limit (128 KiB) to prevent memory DoS
-                    if body.len() > 131_072 {
-                        return axum::Json(serde_json::json!({
-                            "error": format!("tx body too large: {} bytes (max 131072)", body.len()),
-                            "accepted": false
-                        }));
-                    }
-                    axum::Json(narwhal_mempool.submit_tx(&body).await)
                 }
-            }
-        }))
+            })
+            .route_layer(axum::middleware::from_fn_with_state(
+                auth_state.clone(),
+                crate::rpc_auth::require_api_key,
+            )),
+        )
         // SECURITY: /api/faucet is ONLY available when compiled with
         // "faucet" or "testnet" feature. Never on mainnet release builds.
         // See compile_error! at main.rs:29 for release+faucet guard.
@@ -1563,29 +1628,13 @@ async fn start_narwhal_node(cli: Cli) -> anyhow::Result<()> {
         // ── Bridge mint endpoint (CRITICAL #14) ──
         // Receives mint requests from the bridge relayer, validates attestation
         // signatures, and queues the mint for execution.
-        .route("/api/bridge/submit_mint", axum::routing::post({
-            let auth = auth_state.clone();
-            move |headers: axum::http::HeaderMap, body: axum::body::Bytes| {
-                let auth = auth.clone();
-                async move {
-                    // Require API key for bridge operations (same pattern as submit_tx)
-                    if let Some(ref expected_key) = auth.required_key {
-                        let auth_header = headers.get("authorization")
-                            .and_then(|v| v.to_str().ok())
-                            .unwrap_or("");
-                        let token = auth_header.strip_prefix("Bearer ").unwrap_or("");
-                        use sha3::{Digest as _, Sha3_256};
-                        let token_hash = Sha3_256::digest(token.as_bytes());
-                        let expected_hash = Sha3_256::digest(expected_key.as_bytes());
-                        let mut acc = 0u8;
-                        for i in 0..32 { acc |= token_hash[i] ^ expected_hash[i]; }
-                        if acc != 0 {
-                            return axum::Json(serde_json::json!({
-                                "error": "unauthorized", "accepted": false
-                            }));
-                        }
-                    }
-
+        // SEC-FIX v0.5.7: bridge mint write endpoint also moves to the
+        // shared `rpc_auth::require_api_key` middleware (Bearer + IP
+        // allowlist). The previous inline check skipped IP enforcement.
+        .route(
+            "/api/bridge/submit_mint",
+            axum::routing::post({
+                move |body: axum::body::Bytes| async move {
                     // Parse the mint request
                     let request: serde_json::Value = match serde_json::from_slice(&body) {
                         Ok(v) => v,
@@ -1597,7 +1646,8 @@ async fn start_narwhal_node(cli: Cli) -> anyhow::Result<()> {
                         }
                     };
 
-                    let burn_event_id = request["burn_event_id"].as_str().unwrap_or("");
+                    let burn_event_id =
+                        request["burn_event_id"].as_str().unwrap_or("");
                     let amount = request["amount"].as_u64().unwrap_or(0);
 
                     if burn_event_id.is_empty() || amount == 0 {
@@ -1623,8 +1673,12 @@ async fn start_narwhal_node(cli: Cli) -> anyhow::Result<()> {
                         "status": "rejected"
                     }))
                 }
-            }
-        }))
+            })
+            .route_layer(axum::middleware::from_fn_with_state(
+                auth_state.clone(),
+                crate::rpc_auth::require_api_key,
+            )),
+        )
         .route("/api/bridge/mint_status/:tx_id", axum::routing::get({
             move |path: axum::extract::Path<String>| {
                 async move {

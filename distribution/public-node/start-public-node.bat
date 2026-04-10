@@ -20,7 +20,7 @@ set "BINARY=%SCRIPT_DIR%misaka-node.exe"
 set "CONFIG=%SCRIPT_DIR%config\public-node.toml"
 set "GENESIS=%SCRIPT_DIR%config\genesis_committee.toml"
 set "SEEDS_FILE=%SCRIPT_DIR%config\seeds.txt"
-set "BUNDLED_KEY=%SCRIPT_DIR%config\bundled-validator.key"
+set "SEED_PUBKEYS_FILE=%SCRIPT_DIR%config\seed-pubkeys.txt"
 set "DATA_DIR=%SCRIPT_DIR%misaka-data"
 
 REM --- Pre-flight checks -----------------------------------------
@@ -44,35 +44,69 @@ if not exist "%GENESIS%" (
 )
 
 REM --- First-run setup -------------------------------------------
+REM v0.5.7: bundled-validator.key has been REMOVED. Each install now
+REM generates a fresh ephemeral validator.key on first run and runs in
+REM OBSERVER mode (key is not in the genesis committee).
 if not exist "%DATA_DIR%" mkdir "%DATA_DIR%"
 if not exist "%DATA_DIR%\validator.key" (
-    if exist "%BUNDLED_KEY%" (
-        echo 初回起動: bundled validator key をコピー中...
-        copy /Y "%BUNDLED_KEY%" "%DATA_DIR%\validator.key" >nul
-        REM Restrict the validator key to the current user only.
-        REM Windows has no chmod, so use icacls to remove inherited ACLs and
-        REM grant Full Control to the current user. Keeps the private key
-        REM unreadable by other local users on shared machines.
-        icacls "%DATA_DIR%\validator.key" /inheritance:r /grant:r "%USERNAME%:F" >nul 2>&1
+    echo 初回起動: ephemeral observer key を生成します (validator.key)
+)
+
+REM --- Read seeds + pubkeys (both required or both skipped) ------
+REM Narwhal relay は ML-DSA-65 PK-pinning 必須。両方揃っているときだけ
+REM --seeds + --seed-pubkeys を渡します。揃わないときは seed を一切渡さず
+REM solo mode で起動します (FATAL で落ちないように)。
+set "SEEDS="
+set /a SEEDS_COUNT=0
+if exist "%SEEDS_FILE%" (
+    for /f "usebackq eol=# tokens=*" %%a in ("%SEEDS_FILE%") do (
+        set "TRIMMED=%%a"
+        if not "!TRIMMED!"=="" (
+            if defined SEEDS (
+                set "SEEDS=!SEEDS!,%%a"
+            ) else (
+                set "SEEDS=%%a"
+            )
+            set /a SEEDS_COUNT+=1
+        )
     )
 )
 
-REM --- Read seeds ------------------------------------------------
-set "SEEDS="
-if exist "%SEEDS_FILE%" (
-    for /f "usebackq eol=# tokens=*" %%a in ("%SEEDS_FILE%") do (
-        if defined SEEDS (
-            set "SEEDS=!SEEDS!,%%a"
-        ) else (
-            set "SEEDS=%%a"
+set "SEED_PUBKEYS="
+set /a PUBKEYS_COUNT=0
+if exist "%SEED_PUBKEYS_FILE%" (
+    for /f "usebackq eol=# tokens=*" %%a in ("%SEED_PUBKEYS_FILE%") do (
+        set "TRIMMED=%%a"
+        if not "!TRIMMED!"=="" (
+            if defined SEED_PUBKEYS (
+                set "SEED_PUBKEYS=!SEED_PUBKEYS!,%%a"
+            ) else (
+                set "SEED_PUBKEYS=%%a"
+            )
+            set /a PUBKEYS_COUNT+=1
         )
+    )
+)
+
+set "USE_SEEDS=0"
+if !SEEDS_COUNT! GTR 0 (
+    if !SEEDS_COUNT! EQU !PUBKEYS_COUNT! (
+        set "USE_SEEDS=1"
+    ) else (
+        echo [WARN] seeds.txt (!SEEDS_COUNT! entries) と seed-pubkeys.txt (!PUBKEYS_COUNT! entries) が揃いません。
+        echo [WARN] Narwhal relay は PK-pinning 必須のため、seed 接続を skip して solo mode で起動します。
+        echo        config\seed-pubkeys.txt に同じ数の ML-DSA-65 公開鍵を追加すると接続を試みます。
     )
 )
 
 echo 起動パラメータ
 echo   Config : %CONFIG%
 echo   Genesis: %GENESIS%
-echo   Seeds  : !SEEDS!
+if "!USE_SEEDS!"=="1" (
+    echo   Seeds  : !SEEDS! (with !PUBKEYS_COUNT! pinned pubkey^(s^))
+) else (
+    echo   Seeds  : (none — solo self-host mode^)
+)
 echo   Data   : %DATA_DIR%
 echo   RPC    : http://localhost:3001
 echo   P2P    : 6691
@@ -83,8 +117,8 @@ echo.
 
 set MISAKA_RPC_AUTH_MODE=open
 
-if defined SEEDS (
-    "%BINARY%" --config "%CONFIG%" --data-dir "%DATA_DIR%" --genesis-path "%GENESIS%" --seeds "!SEEDS!" --chain-id 2
+if "!USE_SEEDS!"=="1" (
+    "%BINARY%" --config "%CONFIG%" --data-dir "%DATA_DIR%" --genesis-path "%GENESIS%" --seeds "!SEEDS!" --seed-pubkeys "!SEED_PUBKEYS!" --chain-id 2
 ) else (
     "%BINARY%" --config "%CONFIG%" --data-dir "%DATA_DIR%" --genesis-path "%GENESIS%" --chain-id 2
 )

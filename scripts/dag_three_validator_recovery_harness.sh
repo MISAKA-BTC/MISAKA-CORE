@@ -130,7 +130,7 @@ docker_build_node() {
       DEBIAN_FRONTEND=noninteractive apt-get install -y -qq clang libclang-dev build-essential cmake pkg-config >/dev/null && \
       export CARGO_TARGET_DIR='${TARGET_DIR}'; \
       export BINDGEN_EXTRA_CLANG_ARGS=\"-isystem \$(gcc -print-file-name=include)\"; \
-      cargo build -p misaka-node --features qdag_ct --quiet"
+      cargo build -p misaka-node --features dag,testnet --quiet"
 }
 
 resolve_binary() {
@@ -141,7 +141,7 @@ resolve_binary() {
 
   if [[ "${MISAKA_SKIP_BUILD:-0}" != "1" ]]; then
     if has_native_c_toolchain; then
-      CARGO_TARGET_DIR="$TARGET_DIR" cargo build -p misaka-node --features qdag_ct --quiet
+      CARGO_TARGET_DIR="$TARGET_DIR" cargo build -p misaka-node --features dag,testnet --quiet
     else
       docker_build_node
     fi
