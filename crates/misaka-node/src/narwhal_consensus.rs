@@ -266,6 +266,10 @@ impl Default for ProposeLoopConfig {
 /// - Proposed blocks are sent to `block_broadcast_tx` for P2P dissemination
 ///
 /// Without this, transactions only flow 1-at-a-time through RPC ProposeBlock.
+///
+/// v0.5.9: accepts an optional `SafeMode` handle; when the flag is
+/// tripped the propose loop stops producing new proposals and drains
+/// the mempool channel only to avoid back-pressuring the RPC layer.
 #[cfg(feature = "dag")]
 pub fn spawn_propose_loop(
     msg_tx: tokio::sync::mpsc::Sender<misaka_dag::narwhal_dag::runtime::ConsensusMessage>,
@@ -273,6 +277,8 @@ pub fn spawn_propose_loop(
     config: ProposeLoopConfig,
     // Shared state_root updated by the commit/executor loop.
     shared_state_root: std::sync::Arc<tokio::sync::RwLock<[u8; 32]>>,
+    // v0.5.9: safe-mode halt flag. None in tests and legacy callers.
+    safe_mode: Option<std::sync::Arc<crate::safe_mode::SafeMode>>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut pending_txs: VecDeque<Vec<u8>> = VecDeque::with_capacity(config.max_block_txs);
@@ -306,6 +312,16 @@ pub fn spawn_propose_loop(
                     }
                 }
                 _ = status_tick.tick() => {}
+            }
+
+            // v0.5.9: skip proposing when safe-mode is engaged. Keep
+            // draining the channel so the RPC layer isn't blocked; txs
+            // admitted during safe-mode are silently discarded.
+            if let Some(sm) = safe_mode.as_ref() {
+                if sm.is_halted() {
+                    pending_txs.clear();
+                    continue;
+                }
             }
 
             let (status_tx, status_rx) = tokio::sync::oneshot::channel();

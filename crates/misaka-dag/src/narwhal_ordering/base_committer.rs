@@ -339,13 +339,18 @@ impl BaseCommitter {
         leader_ref: &BlockRef,
         dag_state: &DagState,
         support_threshold: u32,
+        ledger: &SlotEquivocationLedger,
     ) -> bool {
         let voting_round = leader_ref.round + 1;
         let voting_blocks = dag_state.get_blocks_at_round(voting_round);
 
+        // v0.5.9 WP8 follow-up: only count support from non-banned voters.
+        // Equivocating validators' support is not counted toward the
+        // leader_support threshold.
         let count = voting_blocks
             .iter()
             .filter(|b| b.ancestors().contains(leader_ref))
+            .filter(|b| !ledger.is_banned(b.author()))
             .count();
 
         count >= support_threshold as usize
