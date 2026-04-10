@@ -39,15 +39,12 @@ def ensure_exec(path: Path) -> None:
 PLATFORM_SCRIPTS = {
     "linux": [
         "start-public-node.sh",
-        "start-seed-node.sh",
         "start-self-hosted-testnet.sh",
         "show-network-guide.sh",
     ],
     "macos": [
         "start-public-node.sh",
         "start-public-node.command",
-        "start-seed-node.sh",
-        "start-seed-node.command",
         "start-self-hosted-testnet.sh",
         "start-self-hosted-testnet.command",
         "show-network-guide.sh",
@@ -55,7 +52,6 @@ PLATFORM_SCRIPTS = {
     ],
     "windows": [
         "start-public-node.bat",
-        "start-seed-node.bat",
         "start-self-hosted-testnet.bat",
         "show-network-guide.bat",
     ],
@@ -76,11 +72,6 @@ def main() -> None:
     config_dst = staging_root / "config"
     config_src = skeleton_root / "config"
     shutil.copytree(config_src, config_dst)
-
-    # Copy README
-    readme_src = skeleton_root / "README.md"
-    if readme_src.exists():
-        shutil.copy2(readme_src, staging_root / "README.md")
 
     # Copy platform scripts
     for script in PLATFORM_SCRIPTS.get(args.platform, []):
