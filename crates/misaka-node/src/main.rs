@@ -891,6 +891,32 @@ async fn main() -> anyhow::Result<()> {
 //  v3: Mysticeti-equivalent Node (GhostDAG-free)
 // ════════════════════════════════════════════════════════════════
 
+/// Resolve `genesis_committee.toml`: CLI → cwd → next to binary → `config/` next to binary.
+#[cfg(all(feature = "dag", not(feature = "ghostdag-compat")))]
+fn resolve_genesis_committee_path(cli_path: Option<&str>) -> std::path::PathBuf {
+    use std::path::{Path, PathBuf};
+    if let Some(p) = cli_path {
+        return PathBuf::from(p);
+    }
+    let cwd_default = Path::new("genesis_committee.toml");
+    if cwd_default.exists() {
+        return cwd_default.to_path_buf();
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let next_to_exe = dir.join("genesis_committee.toml");
+            if next_to_exe.exists() {
+                return next_to_exe;
+            }
+            let in_config = dir.join("config").join("genesis_committee.toml");
+            if in_config.exists() {
+                return in_config;
+            }
+        }
+    }
+    cwd_default.to_path_buf()
+}
+
 #[cfg(all(feature = "dag", not(feature = "ghostdag-compat")))]
 async fn start_narwhal_node(cli: Cli) -> anyhow::Result<()> {
     use std::collections::{BTreeMap, BTreeSet};
@@ -924,11 +950,9 @@ async fn start_narwhal_node(cli: Cli) -> anyhow::Result<()> {
     );
 
     // ── CRIT #1 fix: Load genesis committee from manifest (not placeholders) ──
-    let manifest = crate::genesis_committee::GenesisCommitteeManifest::load(
-        &cli.genesis_path.as_deref()
-            .map(std::path::Path::new)
-            .unwrap_or_else(|| std::path::Path::new("genesis_committee.toml")),
-    )?;
+    let genesis_path = resolve_genesis_committee_path(cli.genesis_path.as_deref());
+    tracing::info!(path = %genesis_path.display(), "Loading genesis committee manifest");
+    let manifest = crate::genesis_committee::GenesisCommitteeManifest::load(&genesis_path)?;
     manifest.validate()?;
 
     if !manifest.contains(authority_index, identity.public_key()) {
