@@ -47,8 +47,7 @@ impl SafeMode {
         // swap() returns the PREVIOUS value — only write metadata on
         // the first trip.
         if !self.halted.swap(true, Ordering::SeqCst) {
-            self.halted_at_commit
-                .store(commit_index, Ordering::SeqCst);
+            self.halted_at_commit.store(commit_index, Ordering::SeqCst);
             *self.reason.write() = Some(reason.into());
             tracing::error!(
                 "🛑 SAFE MODE ENGAGED at commit {} — all further consensus \

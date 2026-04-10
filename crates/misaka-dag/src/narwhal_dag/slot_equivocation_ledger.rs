@@ -307,11 +307,7 @@ impl SlotEquivocationLedger {
     ///
     /// Returns `true` if this is a fresh ban (the authority was not
     /// already banned), `false` otherwise.
-    pub fn ban_for_vote_equivocation(
-        &mut self,
-        authority: AuthorityIndex,
-        round: Round,
-    ) -> bool {
+    pub fn ban_for_vote_equivocation(&mut self, authority: AuthorityIndex, round: Round) -> bool {
         if self.banned_set.insert(authority) {
             self.banned.entry(authority).or_insert(round);
             tracing::warn!(

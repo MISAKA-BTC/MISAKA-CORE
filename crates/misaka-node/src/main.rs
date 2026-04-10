@@ -801,26 +801,55 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Parse advertise address
-    let advertise_addr: Option<SocketAddr> =
-        cli.advertise_addr
-            .as_deref()
-            .and_then(|s| match s.parse::<SocketAddr>() {
-                Ok(addr) => {
-                    if config::is_valid_advertise_addr(&addr) {
-                        Some(addr)
-                    } else {
-                        warn!(
-                            "Invalid --advertise-addr '{}': must not be 0.0.0.0/loopback",
-                            s
-                        );
-                        None
-                    }
+    //
+    // v0.5.13 audit P0: in public/seed mode a missing or invalid
+    // advertise address silently fell back to `None`, which meant the
+    // node thought it was joined to the network but was not dialable
+    // by its peers. Public operators would see solo-mode behaviour
+    // without any loud signal. Now:
+    //   - If the operator passed a value and it is bad, we fail fast.
+    //   - If the operator passed nothing in public/seed mode, we log
+    //     a prominent warning so the situation is visible in
+    //     journalctl. Hidden mode continues to leave it empty by
+    //     design.
+    let advertise_addr: Option<SocketAddr> = match cli.advertise_addr.as_deref() {
+        Some(s) => match s.parse::<SocketAddr>() {
+            Ok(addr) => {
+                if config::is_valid_advertise_addr(&addr) {
+                    Some(addr)
+                } else {
+                    error!(
+                        "FATAL: --advertise-addr '{}' is 0.0.0.0 or loopback — peers cannot dial \
+                         this address. Pass the real public IP:port or unset --advertise-addr.",
+                        s
+                    );
+                    std::process::exit(1);
                 }
-                Err(e) => {
-                    warn!("Failed to parse --advertise-addr '{}': {}", s, e);
-                    None
-                }
-            });
+            }
+            Err(e) => {
+                error!(
+                    "FATAL: --advertise-addr '{}' does not parse as SocketAddr: {}. Fix or \
+                     remove the flag.",
+                    s, e
+                );
+                std::process::exit(1);
+            }
+        },
+        None => {
+            if matches!(
+                node_mode,
+                crate::config::NodeMode::Public | crate::config::NodeMode::Seed
+            ) {
+                warn!(
+                    "⚠ public/seed mode without --advertise-addr: peers will not know how to \
+                     dial back. Pass --advertise-addr <public-ip>:<relay-port> (typically \
+                     :16110) or the node will only receive inbound traffic, not outbound \
+                     returns."
+                );
+            }
+            None
+        }
+    };
 
     // Determine role
     let role = NodeRole::determine(
@@ -2276,18 +2305,58 @@ fn load_or_create_local_dag_validator(
     let plaintext_path = local_validator_key_path(data_dir, validator_index);
     let encrypted_path = data_dir.join(format!("dag_validator_{validator_index}.enc.json"));
 
-    // Read passphrase from env var. For testnet, allow empty passphrase
-    // (encrypts with empty string — still better than plaintext).
-    // For mainnet (chain_id=1), require a non-empty passphrase.
+    // Read passphrase from env var or file. For testnet, allow empty
+    // passphrase (encrypts with empty string — still better than
+    // plaintext). For mainnet (chain_id=1), require a non-empty
+    // passphrase.
+    //
+    // v0.5.13 audit P0-1: the deploy script writes the passphrase to a
+    // chmod 600 file at `/opt/misaka/.passphrase` and sets
+    // `MISAKA_VALIDATOR_PASSPHRASE_FILE` in the systemd unit, but
+    // previously the runtime only read `MISAKA_VALIDATOR_PASSPHRASE`
+    // (env var). On restart the env var was empty and the node
+    // couldn't decrypt its own keystore. Now we check both: env var
+    // first (convenience for local dev), file fallback (production
+    // systemd contract). The file path is read from
+    // `MISAKA_VALIDATOR_PASSPHRASE_FILE`; its trailing whitespace is
+    // stripped so a trailing newline from `echo > file` doesn't
+    // become part of the key material.
     fn read_passphrase(chain_id: u32) -> anyhow::Result<Vec<u8>> {
-        let passphrase = std::env::var("MISAKA_VALIDATOR_PASSPHRASE")
-            .unwrap_or_default()
-            .into_bytes();
+        let from_env = std::env::var("MISAKA_VALIDATOR_PASSPHRASE")
+            .ok()
+            .filter(|s| !s.is_empty());
+        let passphrase = if let Some(env_value) = from_env {
+            env_value.into_bytes()
+        } else if let Ok(file_path) = std::env::var("MISAKA_VALIDATOR_PASSPHRASE_FILE") {
+            if file_path.is_empty() {
+                Vec::new()
+            } else {
+                let raw = std::fs::read(&file_path).map_err(|e| {
+                    anyhow::anyhow!(
+                        "FATAL: failed to read MISAKA_VALIDATOR_PASSPHRASE_FILE='{}': {}",
+                        file_path,
+                        e
+                    )
+                })?;
+                // Strip trailing newline/whitespace so shells like
+                // `echo "$PASS" > file` do not inject it into the
+                // passphrase bytes.
+                let end = raw
+                    .iter()
+                    .rposition(|b| !matches!(*b, b'\n' | b'\r' | b' ' | b'\t'))
+                    .map(|p| p + 1)
+                    .unwrap_or(0);
+                raw[..end].to_vec()
+            }
+        } else {
+            Vec::new()
+        };
         // SEC-FIX: mainnet MUST have a non-empty passphrase
         if chain_id == 1 && passphrase.is_empty() {
             anyhow::bail!(
-                "FATAL: MISAKA_VALIDATOR_PASSPHRASE must be set and non-empty on mainnet (chain_id=1). \
-                 An empty passphrase means the keystore can be decrypted trivially."
+                "FATAL: MISAKA_VALIDATOR_PASSPHRASE or MISAKA_VALIDATOR_PASSPHRASE_FILE \
+                 must be set and non-empty on mainnet (chain_id=1). An empty passphrase \
+                 means the keystore can be decrypted trivially."
             );
         }
         Ok(passphrase)
