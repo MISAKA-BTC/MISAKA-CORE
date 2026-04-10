@@ -1,4 +1,4 @@
 # MISAKA Testnet Seed Nodes
 # Format: HOST:P2P_PORT
 # node 再起動なしで定期的に再読込されます
-163.43.225.27:6690
+133.167.126.51:6690
