@@ -217,12 +217,24 @@ impl BlockVerifier {
             return Ok(());
         }
 
-        // Need at least quorum ancestors for round > 1
-        let quorum = self.committee.quorum_threshold() as usize;
-        if block.ancestors.len() < quorum {
+        // v0.5.8 HOTFIX: `quorum_threshold()` returns STAKE units, not a
+        // count of ancestors. The previous code compared `ancestors.len()`
+        // (a count) against `quorum_threshold()` as if it were a count,
+        // which happened to work for committees where every validator had
+        // `stake == 1` but broke every other case. For a single-validator
+        // committee with `stake = 10000`, quorum = 6667 stake units and
+        // the check `1 ancestor < 6667` always failed — blocks never
+        // verified, so observers saw `peer_sig_verify_failed` followed by
+        // `insufficient ancestors: have 1, need 6667` and never progressed
+        // past round 0.
+        //
+        // The correct gate is "at least one ancestor for rounds > 1" plus
+        // the stake-weighted distinct-author check further down. BFT
+        // safety is preserved by the stake check, not the count.
+        if block.ancestors.is_empty() {
             return Err(BlockVerifyError::InsufficientAncestors {
-                have: block.ancestors.len(),
-                need: quorum,
+                have: 0,
+                need: 1,
             });
         }
 
@@ -248,14 +260,15 @@ impl BlockVerifier {
         // a Byzantine validator can forge quorum using multiple equivocated
         // blocks from one author. Stake-weighted to handle heterogeneous sets.
         // See docs/architecture.md §10 Phase 1 deliverables.
+        let quorum = self.committee.quorum_threshold();
         let distinct_stake: u64 = distinct_authors
             .iter()
             .filter_map(|a| self.committee.authority(*a).map(|auth| auth.stake))
             .sum();
-        if distinct_stake < self.committee.quorum_threshold() {
+        if distinct_stake < quorum {
             return Err(BlockVerifyError::InsufficientDistinctAncestorAuthors {
                 have: distinct_authors.len(),
-                need: quorum,
+                need: quorum as usize,
             });
         }
 
@@ -482,6 +495,71 @@ mod tests {
             v.verify(&block),
             Err(BlockVerifyError::DuplicateAncestor(_))
         ));
+    }
+
+    /// v0.5.8 REGRESSION: on a single-validator committee with `stake > 1`,
+    /// `check_ancestors` used to compare `ancestors.len()` (a count) against
+    /// `quorum_threshold()` (stake units). For stake=10000, quorum=6667, and
+    /// `1 < 6667` always failed — every observer saw "insufficient ancestors:
+    /// have 1, need 6667" on every block it received from the operator,
+    /// causing sync to stall at round 0 forever.
+    #[test]
+    fn single_validator_stake_gt_one_accepts_single_ancestor() {
+        use crate::narwhal_types::committee::{Authority, Committee};
+        use crate::narwhal_types::block::{BlockSigner, MlDsa65TestSigner};
+
+        // Committee of one, with operator-style stake = 10000.
+        let signer = std::sync::Arc::new(MlDsa65TestSigner::generate());
+        let pk = signer.public_key();
+        let committee = Committee::new(
+            0,
+            vec![Authority {
+                hostname: "operator".to_string(),
+                stake: 10_000,
+                public_key: pk.clone(),
+            }],
+        );
+        // Sanity: the stake-weighted quorum is 6667 (>> 1), so the
+        // pre-fix len-based check would have rejected any single-ancestor
+        // block on this committee.
+        assert_eq!(committee.quorum_threshold(), 6667);
+
+        let chain_ctx = misaka_types::chain_context::ChainContext::new(99, [0u8; 32]);
+        let app_id = misaka_types::intent::AppId::new(99, [0u8; 32]);
+        let verifier = BlockVerifier::new(
+            committee,
+            0,
+            std::sync::Arc::new(MlDsa65Verifier),
+            chain_ctx,
+        );
+
+        // Round-2 block referencing the single validator's round-1 ancestor.
+        let ancestor = BlockRef::new(1, 0, BlockDigest([0x11; 32]));
+        let mut block = Block {
+            epoch: 0,
+            round: 2,
+            author: 0,
+            timestamp_ms: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64,
+            ancestors: vec![ancestor],
+            transactions: vec![vec![1, 2, 3]],
+            commit_votes: vec![],
+            tx_reject_votes: vec![],
+            state_root: [0u8; 32],
+            signature: vec![],
+        };
+        // Sign with the real ML-DSA-65 key and the matching AppId.
+        let digest = block.signing_digest_v2(app_id);
+        block.signature = BlockSigner::sign(signer.as_ref(), &digest.0);
+
+        // Before the fix: Err(InsufficientAncestors { have: 1, need: 6667 }).
+        // After the fix: block verifies because the single ancestor has
+        // stake 10000 >= quorum 6667.
+        verifier
+            .verify(&block)
+            .expect("single-validator block with one ancestor must verify");
     }
 
     #[test]
