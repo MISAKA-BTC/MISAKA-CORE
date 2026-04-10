@@ -61,7 +61,7 @@ PLATFORM_SCRIPTS = {
 def main() -> None:
     args = parse_args()
     version = read_version(args.workspace_root)
-    package_name = f"misaka-public-node-v{version}-{args.platform}-{args.arch}"
+    package_name = f"misaka-public-node-{args.platform}-{args.arch}"
     staging_root = args.output_dir / package_name
     skeleton_root = args.workspace_root / "distribution" / "public-node"
 
