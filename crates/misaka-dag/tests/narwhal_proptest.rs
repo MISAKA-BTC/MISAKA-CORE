@@ -356,6 +356,7 @@ proptest! {
                 blocks: vec![],
                 timestamp_ms: 0,
                 overflow_carryover: vec![],
+                leader_state_root: None,
             });
         }
 

@@ -129,7 +129,9 @@ mod tests {
     fn test_mainnet_rejects_zero_checkpoint() {
         let mut c = NodeConfig::default();
         c.chain_id = 1;
-        c.ws_checkpoint = Some("0:00000000000000000000000000000000".into());
+        // Validation rejects exactly `0:` followed by 64 zero hex chars
+        // (matching the canonical zeroed checkpoint hash form).
+        c.ws_checkpoint = Some(format!("0:{}", "0".repeat(64)));
         assert!(c.validate().is_err());
     }
 

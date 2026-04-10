@@ -16,7 +16,7 @@ use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, info, warn};
 
 use super::block_manager::{AncestorFetchRequest, BlockAcceptResult, BlockManager};
-use super::core_engine::{CoreEngine, ProposeContext};
+use super::core_engine::{CoreEngine, ProcessResult, ProposeContext};
 use super::dag_state::{DagState, DagStateConfig};
 use super::leader_schedule::{LeaderSchedule, ThresholdClock, TimeoutBackoff};
 use super::metrics::ConsensusMetrics;
@@ -270,7 +270,7 @@ impl ConsensusRuntime {
                             let _ = reply.send(processed.outcome);
                         }
                         Some(ConsensusMessage::ProposeBlock { context, reply }) => {
-                            let block = self.handle_propose(context);
+                            let (block, post_propose) = self.handle_propose(context);
                             ConsensusMetrics::inc(&self.metrics.blocks_proposed);
                             // Broadcast to peers
                             match self.block_broadcast_tx.try_send(block.clone()) {
@@ -281,6 +281,41 @@ impl ConsensusRuntime {
                                 Err(mpsc::error::TrySendError::Closed(_)) => {
                                     warn!("Block broadcast channel closed");
                                 }
+                            }
+                            // Drain any commits produced by the post-propose
+                            // commit cycle. This is how a single-validator
+                            // node makes progress: there is no P2P loopback,
+                            // so `process_block` is never called on our own
+                            // blocks — we must drive the commit cycle here.
+                            commits_since_checkpoint += post_propose.outputs.len() as u64;
+                            for _ in &post_propose.outputs {
+                                ConsensusMetrics::inc(
+                                    &self.metrics.transactions_committed,
+                                );
+                            }
+                            for output in post_propose.outputs {
+                                match self.commit_tx.try_send(output) {
+                                    Ok(()) => {}
+                                    Err(mpsc::error::TrySendError::Full(_)) => {
+                                        warn!("Commit channel full — backpressure");
+                                    }
+                                    Err(mpsc::error::TrySendError::Closed(_)) => {
+                                        warn!("Commit channel closed");
+                                    }
+                                }
+                            }
+                            ConsensusMetrics::set(
+                                &self.metrics.dag_size_blocks,
+                                self.dag_state.num_blocks() as u64,
+                            );
+                            ConsensusMetrics::set(
+                                &self.metrics.highest_accepted_round,
+                                self.dag_state.highest_accepted_round() as u64,
+                            );
+                            if commits_since_checkpoint >= self.config.checkpoint_interval {
+                                self.flush_to_store();
+                                ConsensusMetrics::inc(&self.metrics.store_checkpoints);
+                                commits_since_checkpoint = 0;
                             }
                             let _ = reply.send(block);
                         }
@@ -358,10 +393,37 @@ impl ConsensusRuntime {
     }
 
     /// Handle a proposal request.
-    fn handle_propose(&mut self, context: ProposeContext) -> VerifiedBlock {
+    ///
+    /// Returns the proposed block and the result of the post-propose commit
+    /// cycle. `propose_block` already self-accepts the block into `dag_state`
+    /// and updates the threshold clock, so we only need to drive the commit
+    /// pipeline (steps 4–6 of `process_block`) here. Running the full
+    /// `process_block` would hit the `BlockAcceptResult::Duplicate` early
+    /// return because the block is already in `dag_state`.
+    fn handle_propose(
+        &mut self,
+        context: ProposeContext,
+    ) -> (VerifiedBlock, ProcessResult) {
         let block = self.core.propose_block(&mut self.dag_state, context);
         self.threshold_clock.set_round(self.core.current_round());
-        block
+        let mut post_propose = ProcessResult::default();
+        self.core
+            .run_commit_cycle(&mut self.dag_state, &mut post_propose);
+        self.threshold_clock.set_round(self.core.current_round());
+        // Persist any DagState writes produced by the commit cycle.
+        if let Some(store) = &self.store {
+            let batch = self.dag_state.take_write_batch();
+            if !batch.is_empty() {
+                match store.write_batch(&batch) {
+                    Ok(()) => ConsensusMetrics::inc(&self.metrics.wal_writes),
+                    Err(e) => {
+                        ConsensusMetrics::inc(&self.metrics.wal_write_errors);
+                        error!("Failed to persist write batch after propose: {}", e);
+                    }
+                }
+            }
+        }
+        (block, post_propose)
     }
 
     /// Flush pending writes to store.

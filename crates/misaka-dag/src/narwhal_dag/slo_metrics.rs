@@ -331,7 +331,11 @@ mod tests {
     #[test]
     fn test_histogram_observes() {
         register_slo_metrics();
+        // FINALITY_LATENCY is a global metric; other parallel tests may have
+        // observed values into it, so we can only assert that the count is
+        // strictly monotonic across an observation call.
+        let before = FINALITY_LATENCY.get_sample_count();
         FINALITY_LATENCY.observe(1.5);
-        assert_eq!(FINALITY_LATENCY.get_sample_count(), 1);
+        assert_eq!(FINALITY_LATENCY.get_sample_count(), before + 1);
     }
 }

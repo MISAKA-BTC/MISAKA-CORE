@@ -1,0 +1,113 @@
+{
+  "dashboard": {
+    "title": "MISAKA Consensus Deep Dive",
+    "uid": "misaka-consensus-deep-v1",
+    "timezone": "utc",
+    "refresh": "10s",
+    "panels": [
+      {
+        "title": "Commit Pipeline",
+        "type": "row",
+        "gridPos": { "x": 0, "y": 0, "w": 24, "h": 1 }
+      },
+      {
+        "title": "Commits (direct vs indirect)",
+        "type": "timeseries",
+        "gridPos": { "x": 0, "y": 1, "w": 8, "h": 8 },
+        "targets": [
+          { "expr": "rate(misaka_consensus_leader_commits_total[1m])", "legendFormat": "commits/s" },
+          { "expr": "rate(misaka_consensus_leader_skips_total[1m])", "legendFormat": "skips/s" }
+        ]
+      },
+      {
+        "title": "Finality Latency Distribution",
+        "type": "heatmap",
+        "gridPos": { "x": 8, "y": 1, "w": 8, "h": 8 },
+        "targets": [{ "expr": "rate(misaka_consensus_finality_latency_seconds_bucket[5m])" }]
+      },
+      {
+        "title": "Round Progression",
+        "type": "timeseries",
+        "gridPos": { "x": 16, "y": 1, "w": 8, "h": 8 },
+        "targets": [{ "expr": "misaka_consensus_current_round" }]
+      },
+      {
+        "title": "Fast Path (Certifier)",
+        "type": "row",
+        "gridPos": { "x": 0, "y": 9, "w": 24, "h": 1 }
+      },
+      {
+        "title": "Certified TXs/sec",
+        "type": "timeseries",
+        "gridPos": { "x": 0, "y": 10, "w": 8, "h": 8 },
+        "targets": [{ "expr": "rate(misaka_certifier_certified_txs_total[1m])" }]
+      },
+      {
+        "title": "Certifier Pending Blocks",
+        "type": "timeseries",
+        "gridPos": { "x": 8, "y": 10, "w": 8, "h": 8 },
+        "targets": [{ "expr": "misaka_certifier_pending_blocks" }]
+      },
+      {
+        "title": "Rejected TXs in Finalizer",
+        "type": "timeseries",
+        "gridPos": { "x": 16, "y": 10, "w": 8, "h": 8 },
+        "targets": [{ "expr": "rate(misaka_finalizer_rejected_txs_total[1m])" }]
+      },
+      {
+        "title": "Leader Health",
+        "type": "row",
+        "gridPos": { "x": 0, "y": 18, "w": 24, "h": 1 }
+      },
+      {
+        "title": "Leader Timeout Backoff (ms)",
+        "type": "timeseries",
+        "gridPos": { "x": 0, "y": 19, "w": 8, "h": 8 },
+        "targets": [{ "expr": "misaka_consensus_leader_timeout_ms" }],
+        "fieldConfig": { "defaults": { "thresholds": { "steps": [{ "value": 0, "color": "green" }, { "value": 2000, "color": "orange" }, { "value": 8000, "color": "red" }] } } }
+      },
+      {
+        "title": "Leader Timeouts/min",
+        "type": "timeseries",
+        "gridPos": { "x": 8, "y": 19, "w": 8, "h": 8 },
+        "targets": [{ "expr": "rate(misaka_consensus_leader_timeouts_total[1m]) * 60" }]
+      },
+      {
+        "title": "Propagation Delay",
+        "type": "timeseries",
+        "gridPos": { "x": 16, "y": 19, "w": 8, "h": 8 },
+        "targets": [{ "expr": "misaka_prober_propagation_delay_rounds" }]
+      },
+      {
+        "title": "Network Sync",
+        "type": "row",
+        "gridPos": { "x": 0, "y": 27, "w": 24, "h": 1 }
+      },
+      {
+        "title": "Sync Request Rate",
+        "type": "timeseries",
+        "gridPos": { "x": 0, "y": 28, "w": 8, "h": 8 },
+        "targets": [
+          { "expr": "rate(misaka_sync_requests_sent_total[1m])", "legendFormat": "requests" },
+          { "expr": "rate(misaka_sync_timeouts_total[1m])", "legendFormat": "timeouts" }
+        ]
+      },
+      {
+        "title": "Block Accept vs Reject Rate",
+        "type": "timeseries",
+        "gridPos": { "x": 8, "y": 28, "w": 8, "h": 8 },
+        "targets": [
+          { "expr": "rate(misaka_dag_blocks_accepted_total[1m])", "legendFormat": "accepted" },
+          { "expr": "rate(misaka_dag_blocks_rejected_total[1m])", "legendFormat": "rejected" }
+        ]
+      },
+      {
+        "title": "Storage Write Latency p99",
+        "type": "timeseries",
+        "gridPos": { "x": 16, "y": 28, "w": 8, "h": 8 },
+        "targets": [{ "expr": "histogram_quantile(0.99, rate(misaka_storage_write_batch_seconds_bucket[5m]))" }],
+        "fieldConfig": { "defaults": { "unit": "s" } }
+      }
+    ]
+  }
+}

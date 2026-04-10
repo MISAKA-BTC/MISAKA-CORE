@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# macOS: ダブルクリックで起動
-# Finder から .command を開くと新しい Terminal ウインドウで実行されます
+# macOS: Finder でダブルクリックすると新しい Terminal で実行されます。
+# 内部では start-public-node.sh を呼び出しているだけです。
 cd "$(dirname "$0")"
 exec bash ./start-public-node.sh

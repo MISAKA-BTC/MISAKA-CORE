@@ -88,6 +88,13 @@ impl TestClusterBuilder {
 
     /// Build and start the test cluster.
     pub async fn build(self) -> TestCluster {
+        // TestCluster is an in-process test harness that intentionally runs
+        // validators without a persistent WAL store. The runtime panics in
+        // non-test builds (where `cfg(test)` is not set because misaka-dag is
+        // a dependency, not the crate under test) unless this escape hatch
+        // is set. Safe here — this code only runs in test binaries.
+        std::env::set_var("MISAKA_ALLOW_NO_WAL", "1");
+
         let _guard = tracing_subscriber::fmt()
             .with_env_filter("info")
             .with_test_writer()

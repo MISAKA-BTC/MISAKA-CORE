@@ -594,6 +594,16 @@ mod tests {
             .expect("test: request")
     }
 
+    /// Build a valid-format legacy `msk1` address for tests.
+    ///
+    /// SEC-FIX: the faucet route now calls `validate_format`, which
+    /// requires the prefix to be followed by exactly 64 hex chars.
+    /// Old tests used short strings like `"msk1validaddress"` which
+    /// now correctly return 400 Bad Request.
+    fn test_address(seed: u8) -> String {
+        format!("msk1{}", format!("{:02x}", seed).repeat(32))
+    }
+
     fn socket_addr(ip: &str, port: u16) -> SocketAddr {
         format!("{}:{}", ip, port)
             .parse::<SocketAddr>()
@@ -626,7 +636,7 @@ mod tests {
         let first = app
             .clone()
             .oneshot({
-                let mut req = faucet_request("msk1validaddress");
+                let mut req = faucet_request(&test_address(0x11));
                 req.extensions_mut().insert(axum::extract::ConnectInfo(ip));
                 req
             })
@@ -636,7 +646,7 @@ mod tests {
 
         let second = app
             .oneshot({
-                let mut req = faucet_request("msk1anotheraddress");
+                let mut req = faucet_request(&test_address(0x22));
                 req.extensions_mut().insert(axum::extract::ConnectInfo(ip));
                 req
             })
@@ -656,7 +666,8 @@ mod tests {
     #[tokio::test]
     async fn test_faucet_enforces_per_address_cooldown() {
         let app = router().with_state(test_state().await);
-        let address = "msk1sameaddress";
+        let address_owned = test_address(0x33);
+        let address = address_owned.as_str();
 
         let first = app
             .clone()
@@ -708,7 +719,7 @@ mod tests {
 
         let resp = app
             .oneshot({
-                let mut req = faucet_request("msk1queuefull");
+                let mut req = faucet_request(&test_address(0x44));
                 req.extensions_mut()
                     .insert(axum::extract::ConnectInfo(socket_addr("127.0.0.1", 3003)));
                 req
@@ -742,7 +753,7 @@ mod tests {
 
         let resp = app
             .oneshot({
-                let mut req = faucet_request("msk1workerdown");
+                let mut req = faucet_request(&test_address(0x55));
                 req.extensions_mut()
                     .insert(axum::extract::ConnectInfo(socket_addr("127.0.0.1", 3004)));
                 req
@@ -783,7 +794,7 @@ mod tests {
         let app = router().with_state(AppState { proxy, faucet });
 
         let request = {
-            let mut req = faucet_request("msk1timeoutcase");
+            let mut req = faucet_request(&test_address(0x66));
             req.extensions_mut()
                 .insert(axum::extract::ConnectInfo(socket_addr("127.0.0.1", 3005)));
             req

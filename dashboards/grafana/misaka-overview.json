@@ -1,0 +1,159 @@
+{
+  "dashboard": {
+    "title": "MISAKA Overview — SLO Dashboard",
+    "uid": "misaka-overview-v1",
+    "timezone": "utc",
+    "refresh": "10s",
+    "panels": [
+      {
+        "title": "Liveness",
+        "type": "row",
+        "gridPos": { "x": 0, "y": 0, "w": 24, "h": 1 }
+      },
+      {
+        "title": "L1: Commit Rate (commits/sec)",
+        "type": "timeseries",
+        "gridPos": { "x": 0, "y": 1, "w": 6, "h": 8 },
+        "targets": [{ "expr": "rate(misaka_consensus_commits_total[1m])" }],
+        "fieldConfig": {
+          "defaults": {
+            "thresholds": {
+              "steps": [
+                { "value": 0, "color": "red" },
+                { "value": 0.1, "color": "orange" },
+                { "value": 0.5, "color": "green" }
+              ]
+            }
+          }
+        }
+      },
+      {
+        "title": "L2: Finality Latency p99",
+        "type": "timeseries",
+        "gridPos": { "x": 6, "y": 1, "w": 6, "h": 8 },
+        "targets": [{ "expr": "histogram_quantile(0.99, rate(misaka_consensus_finality_latency_seconds_bucket[5m]))" }],
+        "fieldConfig": {
+          "defaults": {
+            "thresholds": {
+              "steps": [
+                { "value": 0, "color": "green" },
+                { "value": 3, "color": "orange" },
+                { "value": 5, "color": "red" }
+              ]
+            },
+            "unit": "s"
+          }
+        }
+      },
+      {
+        "title": "L3: Leader Skip Rate (%)",
+        "type": "gauge",
+        "gridPos": { "x": 12, "y": 1, "w": 6, "h": 8 },
+        "targets": [{ "expr": "rate(misaka_consensus_leader_skips_total[5m]) / (rate(misaka_consensus_leader_commits_total[5m]) + rate(misaka_consensus_leader_skips_total[5m])) * 100" }],
+        "fieldConfig": {
+          "defaults": {
+            "thresholds": {
+              "steps": [
+                { "value": 0, "color": "green" },
+                { "value": 5, "color": "orange" },
+                { "value": 15, "color": "red" }
+              ]
+            },
+            "unit": "percent",
+            "max": 100
+          }
+        }
+      },
+      {
+        "title": "L4: Current Round",
+        "type": "stat",
+        "gridPos": { "x": 18, "y": 1, "w": 6, "h": 8 },
+        "targets": [{ "expr": "misaka_consensus_current_round" }]
+      },
+      {
+        "title": "Safety (ALERT on any non-zero)",
+        "type": "row",
+        "gridPos": { "x": 0, "y": 9, "w": 24, "h": 1 }
+      },
+      {
+        "title": "S1: Equivocations",
+        "type": "stat",
+        "gridPos": { "x": 0, "y": 10, "w": 6, "h": 6 },
+        "targets": [{ "expr": "misaka_dag_equivocations_detected_total" }],
+        "fieldConfig": { "defaults": { "thresholds": { "steps": [{ "value": 0, "color": "green" }, { "value": 1, "color": "red" }] } } }
+      },
+      {
+        "title": "S2: Sig Verify Failures",
+        "type": "stat",
+        "gridPos": { "x": 6, "y": 10, "w": 6, "h": 6 },
+        "targets": [{ "expr": "misaka_crypto_sig_verify_failures_total" }],
+        "fieldConfig": { "defaults": { "thresholds": { "steps": [{ "value": 0, "color": "green" }, { "value": 1, "color": "orange" }, { "value": 10, "color": "red" }] } } }
+      },
+      {
+        "title": "S3: BFS Aborted",
+        "type": "stat",
+        "gridPos": { "x": 12, "y": 10, "w": 6, "h": 6 },
+        "targets": [{ "expr": "misaka_committer_bfs_aborted_total" }],
+        "fieldConfig": { "defaults": { "thresholds": { "steps": [{ "value": 0, "color": "green" }, { "value": 1, "color": "red" }] } } }
+      },
+      {
+        "title": "S4: Rejected TXs",
+        "type": "stat",
+        "gridPos": { "x": 18, "y": 10, "w": 6, "h": 6 },
+        "targets": [{ "expr": "rate(misaka_finalizer_rejected_txs_total[5m])" }]
+      },
+      {
+        "title": "Network",
+        "type": "row",
+        "gridPos": { "x": 0, "y": 16, "w": 24, "h": 1 }
+      },
+      {
+        "title": "N2: Propagation Delay (rounds)",
+        "type": "timeseries",
+        "gridPos": { "x": 0, "y": 17, "w": 8, "h": 8 },
+        "targets": [{ "expr": "misaka_prober_propagation_delay_rounds" }],
+        "fieldConfig": { "defaults": { "thresholds": { "steps": [{ "value": 0, "color": "green" }, { "value": 2, "color": "orange" }, { "value": 5, "color": "red" }] } } }
+      },
+      {
+        "title": "N3: Sync Timeout Rate (%)",
+        "type": "timeseries",
+        "gridPos": { "x": 8, "y": 17, "w": 8, "h": 8 },
+        "targets": [{ "expr": "rate(misaka_sync_timeouts_total[5m]) / rate(misaka_sync_requests_sent_total[5m]) * 100" }]
+      },
+      {
+        "title": "N4: Block Accept/Reject",
+        "type": "timeseries",
+        "gridPos": { "x": 16, "y": 17, "w": 8, "h": 8 },
+        "targets": [
+          { "expr": "rate(misaka_dag_blocks_accepted_total[1m])", "legendFormat": "accepted" },
+          { "expr": "rate(misaka_dag_blocks_rejected_total[1m])", "legendFormat": "rejected" }
+        ]
+      },
+      {
+        "title": "Resources",
+        "type": "row",
+        "gridPos": { "x": 0, "y": 25, "w": 24, "h": 1 }
+      },
+      {
+        "title": "R2: DAG Blocks in Memory",
+        "type": "timeseries",
+        "gridPos": { "x": 0, "y": 26, "w": 8, "h": 8 },
+        "targets": [{ "expr": "misaka_dag_blocks_in_memory" }],
+        "fieldConfig": { "defaults": { "thresholds": { "steps": [{ "value": 0, "color": "green" }, { "value": 50000, "color": "orange" }, { "value": 100000, "color": "red" }] } } }
+      },
+      {
+        "title": "R3: Storage Write Latency p99",
+        "type": "timeseries",
+        "gridPos": { "x": 8, "y": 26, "w": 8, "h": 8 },
+        "targets": [{ "expr": "histogram_quantile(0.99, rate(misaka_storage_write_batch_seconds_bucket[5m]))" }],
+        "fieldConfig": { "defaults": { "unit": "s" } }
+      },
+      {
+        "title": "R4: Leader Timeout (ms)",
+        "type": "timeseries",
+        "gridPos": { "x": 16, "y": 26, "w": 8, "h": 8 },
+        "targets": [{ "expr": "misaka_consensus_leader_timeout_ms" }]
+      }
+    ]
+  }
+}

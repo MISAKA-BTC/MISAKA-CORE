@@ -525,7 +525,20 @@ impl CoreEngine {
             }
         }
 
-        // Step 4: Try to commit
+        // Steps 4-6: commit cycle (shared with self-proposed block path)
+        self.run_commit_cycle(dag_state, &mut result);
+
+        result
+    }
+
+    /// Run the commit cycle (try_commit → linearize → finalize → evict → gauges).
+    ///
+    /// Extracted from `process_block` so that the runtime can drive the same
+    /// pipeline on its own freshly proposed blocks. In multi-validator mode,
+    /// `process_block` handles both network-received blocks and (indirectly)
+    /// own blocks looped back via P2P. In single-validator mode there is no
+    /// P2P loopback, so the runtime calls this directly after `propose_block`.
+    pub fn run_commit_cycle(&mut self, dag_state: &mut DagState, result: &mut ProcessResult) {
         // Span Tree 2: Commit Pipeline — root span
         let _commit_span =
             tracing::info_span!("commit_cycle", round = self.threshold_clock.current_round(),)
@@ -595,8 +608,6 @@ impl CoreEngine {
                 dag_state.highest_accepted_round() as u64,
             );
         }
-
-        result
     }
 
     // ── Ancestor Selection ──

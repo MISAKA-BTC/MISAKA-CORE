@@ -595,6 +595,7 @@ mod tests {
             transactions: vec![vec![1, 2, 3]],
             commit_votes: vec![],
             tx_reject_votes: vec![],
+            state_root: [0u8; 32],
             signature: vec![],
         };
         vs.sign_block(0, &mut valid_block);
@@ -669,6 +670,7 @@ mod tests {
             transactions: vec![vec![0xAA]],
             commit_votes: vec![],
             tx_reject_votes: vec![],
+            state_root: [0u8; 32],
             signature: vec![],
         };
         h.validator_set.sign_block(0, &mut block_a);
@@ -683,6 +685,7 @@ mod tests {
             transactions: vec![vec![0xBB]],
             commit_votes: vec![],
             tx_reject_votes: vec![],
+            state_root: [0u8; 32],
             signature: vec![],
         };
         h.validator_set.sign_block(0, &mut block_b);
@@ -804,6 +807,7 @@ mod tests {
                 transactions: vec![vec![i as u8]],
                 commit_votes: vec![],
                 tx_reject_votes: vec![],
+                state_root: [0u8; 32],
                 signature: vec![],
             };
             vs.sign_block((i % n as u32) as usize, &mut block);
@@ -1117,6 +1121,7 @@ mod tests {
                 blocks: vec![*leader],
                 timestamp_ms: 1000 + idx as u64,
                 overflow_carryover: vec![],
+                leader_state_root: None,
             };
             subscriber.submit(output).unwrap();
         }
@@ -1197,6 +1202,7 @@ mod tests {
                 transactions: vec![vec![i as u8]],
                 commit_votes: vec![],
                 tx_reject_votes: vec![],
+                state_root: [0u8; 32],
                 signature: vec![],
             };
             vs.sign_block((i % n as u32) as usize, &mut block);
@@ -1390,6 +1396,7 @@ mod tests {
                     .collect(),
                 timestamp_ms: 1000 + idx as u64,
                 overflow_carryover: vec![],
+                leader_state_root: None,
             };
             observer.process(&output);
         }
@@ -1488,6 +1495,7 @@ mod tests {
             transactions: vec![vec![1, 2, 3]],
             commit_votes: vec![],
             tx_reject_votes: vec![],
+            state_root: [0u8; 32],
             signature: vec![],
         };
 

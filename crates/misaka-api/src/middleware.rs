@@ -766,11 +766,16 @@ mod tests {
         ));
 
         let ip = extract_ip(&req, false);
-        assert_eq!(ip, "127.0.0.1".parse::<IpAddr>().expect("loopback"));
+        assert_eq!(ip, Some("127.0.0.1".parse::<IpAddr>().expect("loopback")));
     }
 
     #[test]
     fn test_extract_ip_uses_first_x_forwarded_for_when_proxy_trusted() {
+        // SEC-FIX: X-Forwarded-For is only trusted when the connecting
+        // socket is inside a CIDR listed in MISAKA_TRUSTED_PROXY_CIDR.
+        // The test proxy is 127.0.0.1, so allow the loopback range.
+        std::env::set_var("MISAKA_TRUSTED_PROXY_CIDR", "127.0.0.0/8");
+
         let mut req = Request::builder()
             .uri("/api/v1/tx/submit")
             .header("x-forwarded-for", "203.0.113.10, 198.51.100.9")
@@ -783,6 +788,8 @@ mod tests {
         ));
 
         let ip = extract_ip(&req, true);
-        assert_eq!(ip, "203.0.113.10".parse::<IpAddr>().expect("forwarded"));
+        assert_eq!(ip, Some("203.0.113.10".parse::<IpAddr>().expect("forwarded")));
+
+        std::env::remove_var("MISAKA_TRUSTED_PROXY_CIDR");
     }
 }

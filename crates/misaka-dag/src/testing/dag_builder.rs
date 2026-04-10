@@ -147,6 +147,11 @@ pub struct DagBuilder {
     pub blocks: BTreeMap<BlockRef, VerifiedBlock>,
     /// Last block per authority (ancestors for the next round).
     pub last_refs: Vec<Option<BlockRef>>,
+    /// References of the primary block per (round, author) slot.
+    /// Equivocating blocks are inserted into `blocks` but NOT recorded here,
+    /// so `leader_block` and other queries can distinguish the canonical
+    /// slot occupant from its Byzantine siblings.
+    primary_refs: HashMap<(Round, AuthorityIndex), BlockRef>,
     /// Leader schedule (default: round-robin, wave=1).
     leader_schedule: LeaderSchedule,
     /// Override leaders per round.
@@ -186,6 +191,7 @@ impl DagBuilder {
             committee,
             blocks: BTreeMap::new(),
             last_refs: vec![None; n],
+            primary_refs: HashMap::new(),
             leader_schedule: ls,
             leader_overrides: HashMap::new(),
             next_ts: 1000,
@@ -212,6 +218,7 @@ impl DagBuilder {
             committee,
             blocks: BTreeMap::new(),
             last_refs: vec![None; n],
+            primary_refs: HashMap::new(),
             leader_schedule: ls,
             leader_overrides: HashMap::new(),
             next_ts: 1000,
@@ -236,6 +243,7 @@ impl DagBuilder {
             committee,
             blocks: BTreeMap::new(),
             last_refs: vec![None; n],
+            primary_refs: HashMap::new(),
             leader_schedule: ls,
             leader_overrides: HashMap::new(),
             next_ts: 1000,
@@ -322,6 +330,16 @@ impl DagBuilder {
     #[must_use]
     pub fn leader_block(&self, round: Round) -> Option<&VerifiedBlock> {
         let leader = self.leader_of(round);
+        // Prefer the primary block for this (round, leader) slot. Equivocating
+        // siblings share the slot but use different digests; voters in the
+        // next round only reference the primary (which is what ends up in
+        // `last_refs`), so returning an equivocating sibling here causes
+        // spurious Undecided decisions in `try_direct_decide`.
+        if let Some(primary_ref) = self.primary_refs.get(&(round, leader)) {
+            if let Some(block) = self.blocks.get(primary_ref) {
+                return Some(block);
+            }
+        }
         self.blocks
             .values()
             .find(|b| b.round() == round && b.author() == leader)
@@ -453,6 +471,7 @@ impl DagBuilder {
     fn insert_block(&mut self, block: VerifiedBlock) {
         let r = block.reference();
         self.last_refs[r.author as usize] = Some(r);
+        self.primary_refs.insert((r.round, r.author), r);
         self.blocks.insert(r, block);
     }
 

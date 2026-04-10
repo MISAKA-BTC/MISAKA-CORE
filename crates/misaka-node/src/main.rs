@@ -1912,7 +1912,7 @@ fn load_or_create_local_dag_validator(
         // Ensures length validation (4032 bytes) is always enforced.
         let secret_key = ValidatorPqSecretKey::from_bytes(&secret_bytes)
             .ok_or_else(|| anyhow::anyhow!(
-                invalid validator secret key length: {} (expected 4032),
+                "invalid validator secret key length: {} (expected 4032)",
                 secret_bytes.len()
             ))?;
         let keypair = misaka_crypto::validator_sig::ValidatorKeypair {
@@ -2000,7 +2000,7 @@ fn load_or_create_local_dag_validator(
         // Ensures length validation (4032 bytes) is always enforced.
         let secret_key = ValidatorPqSecretKey::from_bytes(&secret_bytes)
             .ok_or_else(|| anyhow::anyhow!(
-                invalid validator secret key length: {} (expected 4032),
+                "invalid validator secret key length: {} (expected 4032)",
                 secret_bytes.len()
             ))?;
         let keypair = misaka_crypto::validator_sig::ValidatorKeypair {

@@ -1,0 +1,30 @@
+target/
+**/*.rs.bk
+Cargo.lock.bak
+.DS_Store
+**/.DS_Store
+*.log
+test-results/
+tempdir/
+/tmp/
+*.blob
+*.wal
+node_modules/
+.idea/
+.vscode/
+
+# platform-specific cargo config (not committed)
+.cargo/config.toml
+.claude/
+
+# Local validator state / runtime data
+data/
+*.key
+!configs/**/*.key.example
+!**/*bundled-validator.key
+
+# Internal handoff / phase tracking (not for public distribution)
+docs/current-share/
+
+# PC-B watcher state
+.pc-b-last-commit

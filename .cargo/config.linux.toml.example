@@ -1,0 +1,6 @@
+[env]
+# Repo-local build defaults for host-side bindgen used by librocksdb-sys.
+# Operators may override these externally when using a different toolchain.
+BINDGEN_EXTRA_CLANG_ARGS = "-isystem /usr/lib/gcc/x86_64-linux-gnu/13/include"
+CC = "gcc"
+CXX = "g++"

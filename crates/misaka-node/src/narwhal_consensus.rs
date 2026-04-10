@@ -388,18 +388,26 @@ pub fn mempool_propose_channel(buffer: usize) -> (
 #[cfg(all(test, feature = "dag"))]
 mod tests {
     use super::*;
+    use misaka_pqc::pq_sign::{ml_dsa_sign_raw, MlDsaKeypair};
+    use misaka_types::intent::{AppId, IntentMessage, IntentScope};
+    use misaka_types::tx_signable::TxSignablePayload;
     use misaka_types::utxo::{OutputRef, TxInput, TxOutput, TxType, UTXO_TX_VERSION};
 
-    fn sample_v4_tx(salt: [u8; 32]) -> UtxoTransaction {
-        UtxoTransaction {
+    /// Audit #26: ingress now performs ML-DSA-65 signature verification,
+    /// so tests must sign with a real keypair and store the matching pubkey
+    /// on the referenced UTXO.
+    fn signed_sample_tx(
+        kp: &MlDsaKeypair,
+        outref: OutputRef,
+        app_id: &AppId,
+        salt: [u8; 32],
+    ) -> UtxoTransaction {
+        let mut tx = UtxoTransaction {
             version: UTXO_TX_VERSION,
             tx_type: TxType::TransparentTransfer,
             inputs: vec![TxInput {
-                utxo_refs: vec![OutputRef {
-                    tx_hash: [1u8; 32],
-                    output_index: 0,
-                }],
-                proof: vec![0u8; 2048],
+                utxo_refs: vec![outref],
+                proof: Vec::new(),
             }],
             outputs: vec![TxOutput {
                 amount: 9_900,
@@ -407,50 +415,64 @@ mod tests {
                 spending_pubkey: None,
             }],
             fee: 100,
-            extra: salt.to_vec(), // salt differentiates tx hashes
+            extra: salt.to_vec(),
             expiry: 0,
-        }
+        };
+        let payload = TxSignablePayload::from(&tx);
+        let intent = IntentMessage::wrap(IntentScope::TransparentTransfer, app_id.clone(), &payload);
+        let sig = ml_dsa_sign_raw(&kp.secret_key, &intent.signing_digest())
+            .expect("ml_dsa_sign_raw");
+        tx.inputs[0].proof = sig.as_bytes().to_vec();
+        tx
     }
 
-    fn sample_utxo_set() -> UtxoSet {
+    fn utxo_set_with_pubkey(pk_bytes: Vec<u8>) -> (UtxoSet, OutputRef) {
         let mut utxo_set = UtxoSet::new(100);
-        for i in 0..4u8 {
-            let outref = OutputRef {
-                tx_hash: [(i + 1) as u8; 32],
-                output_index: 0,
-            };
-            utxo_set
-                .add_output(
-                    outref.clone(),
-                    TxOutput {
-                        amount: 10_000,
-                        address: [0x11; 32],
-                        spending_pubkey: Some(vec![0x22; 1952]),
-                    },
-                    0,
-                    false,
-                )
-                .expect("add sample utxo");
-            utxo_set.register_spending_key(outref, vec![0x22; 1952])
-                .expect("test: register_spending_key");
-        }
+        let outref = OutputRef {
+            tx_hash: [1u8; 32],
+            output_index: 0,
+        };
         utxo_set
+            .add_output(
+                outref.clone(),
+                TxOutput {
+                    amount: 10_000,
+                    address: [0x11; 32],
+                    spending_pubkey: Some(pk_bytes.clone()),
+                },
+                0,
+                false,
+            )
+            .expect("add sample utxo");
+        utxo_set
+            .register_spending_key(outref.clone(), pk_bytes)
+            .expect("register_spending_key");
+        (utxo_set, outref)
     }
 
     #[tokio::test]
     async fn narwhal_consensus_submit_tx_relays_admitted_transaction() {
+        let kp = MlDsaKeypair::generate();
+        let pk_bytes = kp.public_key.as_bytes().to_vec();
+        let (utxo_set, outref) = utxo_set_with_pubkey(pk_bytes);
+
         let (relay_tx, mut relay_rx) = mempool_propose_channel(4);
-        let test_app_id = misaka_types::intent::AppId::new(2, [0u8; 32]);
-        let ingress = NarwhalMempoolIngress::new(16, sample_utxo_set(), relay_tx, test_app_id);
-        let tx = sample_v4_tx([0xAB; 32]);
+        let test_app_id = AppId::new(2, [0u8; 32]);
+        let ingress = NarwhalMempoolIngress::new(16, utxo_set, relay_tx, test_app_id.clone());
+        let tx = signed_sample_tx(&kp, outref, &test_app_id, [0xAB; 32]);
         let response = ingress
             .submit_tx(&serde_json::to_vec(&tx).expect("serialize tx"))
             .await;
 
-        assert_eq!(response["accepted"], serde_json::Value::Bool(true));
+        assert_eq!(
+            response["accepted"],
+            serde_json::Value::Bool(true),
+            "response: {response}"
+        );
         let relayed = relay_rx.recv().await.expect("relayed tx");
+        // The mempool relays borsh-encoded UtxoTransaction bytes.
         let relayed_tx: UtxoTransaction =
-            serde_json::from_slice(&relayed).expect("deserialize relayed tx");
+            borsh::from_slice(&relayed).expect("deserialize relayed tx");
         assert_eq!(relayed_tx.tx_hash(), tx.tx_hash());
     }
 }

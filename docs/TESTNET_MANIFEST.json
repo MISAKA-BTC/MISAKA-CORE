@@ -1,0 +1,54 @@
+{
+  "network": "MISAKA Testnet",
+  "version": "0.5.1",
+  "consensus": "Narwhal/Bullshark",
+  "pqSignature": "ML-DSA-65 (FIPS 204 / Dilithium3)",
+
+  "chainId": 2,
+  "networkId": "misaka-testnet-1",
+  "addressPrefix": "misakatest1",
+
+  "seedNodes": [
+    {
+      "host": "160.16.131.119",
+      "rpcPort": 3000,
+      "p2pPort": 6690,
+      "location": "Tokyo, Japan"
+    }
+  ],
+
+  "endpoints": {
+    "rpc": "http://160.16.131.119:3000",
+    "health": "http://160.16.131.119:3000/api/health",
+    "status": "http://160.16.131.119:3000/api/status",
+    "faucet": "http://160.16.131.119:3000/api/faucet",
+    "metrics": "http://160.16.131.119:3000/api/metrics",
+    "chainInfo": "http://160.16.131.119:3000/api/get_chain_info",
+    "submitTx": "http://160.16.131.119:3000/api/submit_tx"
+  },
+
+  "bridge": {
+    "ui": "https://testbridge.misakastake.com",
+    "solanaNetwork": "devnet",
+    "solanaRpc": "https://api.devnet.solana.com",
+    "programId": "GVb76FKRY7anhraL8WFEjXrNCuRXzQJ6TYj4BmgpiDQZ",
+    "tokenMint": "Dc5ni2yXsMeLuSVRg5fdYjgyKJyQFafBWfjmGSsUFMBA",
+    "explorer": "https://explorer.solana.com/address/GVb76FKRY7anhraL8WFEjXrNCuRXzQJ6TYj4BmgpiDQZ?cluster=devnet"
+  },
+
+  "faucet": {
+    "defaultAmount": 100000,
+    "cooldownSeconds": 300,
+    "endpoint": "POST /api/faucet {\"address\":\"...\",\"amount\":100000}"
+  },
+
+  "genesisTimestamp": "2025-01-01T00:00:00Z",
+  "maxSupply": 10000000000,
+
+  "minimumRequirements": {
+    "ram": "2 GB",
+    "disk": "20 GB",
+    "os": "Ubuntu 22.04+ / macOS 13+",
+    "rust": "1.75+"
+  }
+}

@@ -3006,18 +3006,6 @@ mod tests {
         path.to_string_lossy().into_owned()
     }
 
-        let path = std::path::PathBuf::from(path);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).expect("create result dir");
-        }
-        let _ = std::fs::remove_file(&path);
-        let enriched_payload = enrich_named_result_payload(payload);
-        std::fs::write(
-            &path,
-            serde_json::to_string_pretty(&enriched_payload).expect("bounded e2e json"),
-        )
-        .expect("write bounded e2e result");
-    }
     fn maybe_write_narwhal_dissemination_rehearsal_result(payload: &serde_json::Value) {
         maybe_write_named_json_result(
             "MISAKA_NARWHAL_DISSEMINATION_REHEARSAL_RESULT",

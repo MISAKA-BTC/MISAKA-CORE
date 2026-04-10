@@ -230,7 +230,7 @@ impl TestWallet {
             _tx_hash: tx_hash.to_string(),
             _output_index: idx,
             amount,
-            spend_id: spend_id.to_string(),
+            spend_id: spend_id_str.to_string(),
             spent: false,
         });
         self.recalc();
