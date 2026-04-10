@@ -143,13 +143,23 @@ else
     SEED_STATUS_TEXT="${YELLOW}(mismatch — skipping, solo mode)${RESET}"
 fi
 
+# v0.5.11 audit Mid #9: extract the real Narwhal relay port from
+# the genesis manifest instead of hardcoding 6691 (the legacy
+# GhostDAG port, which never matched the actual relay listener).
+RELAY_ADDR="$(awk -F'"' '/^[[:space:]]*network_address[[:space:]]*=/{print $2; exit}' "$GENESIS" 2>/dev/null || echo "")"
+if [ -n "$RELAY_ADDR" ]; then
+    RELAY_DISPLAY="$RELAY_ADDR  ${DIM}(from genesis)${RESET}"
+else
+    RELAY_DISPLAY="${YELLOW}(could not parse genesis network_address)${RESET}"
+fi
+
 printf "${BOLD}起動パラメータ${RESET}\n"
 printf "  ${DIM}Config :${RESET} $CONFIG\n"
 printf "  ${DIM}Genesis:${RESET} $GENESIS\n"
 printf "  ${DIM}Seeds  :${RESET} $SEED_STATUS_TEXT\n"
 printf "  ${DIM}Data   :${RESET} $DATA_DIR\n"
 printf "  ${DIM}RPC    :${RESET} http://localhost:3001\n"
-printf "  ${DIM}P2P    :${RESET} 6691\n"
+printf "  ${DIM}Relay  :${RESET} $RELAY_DISPLAY\n"
 printf "\n"
 printf "${GREEN}▶ ノードを起動します...${RESET}\n"
 printf "${DIM}（停止するには Ctrl+C を押してください）${RESET}\n"

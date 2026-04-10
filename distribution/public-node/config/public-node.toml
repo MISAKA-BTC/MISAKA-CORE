@@ -10,6 +10,12 @@ mode = "public"
 data_dir = "./misaka-data"
 log_level = "info"
 
+# v0.5.11 audit Mid #9:
+# `[p2p].port` は **legacy GhostDAG 互換パスでのみ使われる fallback** です。
+# Narwhal relay の実 listener ポートは `config/genesis_committee.toml` の
+# `network_address` から取得されます (現在のテストネットでは 16110)。
+# この値を変更しても Narwhal relay には反映されません。
+# 正しい公開ポートは genesis を編集してください。
 [p2p]
 port = 6691
 max_inbound_peers = 32

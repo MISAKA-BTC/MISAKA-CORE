@@ -1209,35 +1209,38 @@ async fn start_narwhal_node(cli: Cli) -> anyhow::Result<()> {
     if !cli.seeds.is_empty() && cli.seeds.len() == cli.seed_pubkeys.len() {
         let mut synthetic_index = manifest.validators.len() as u32;
         for (addr_s, pk_s) in cli.seeds.iter().zip(cli.seed_pubkeys.iter()) {
-            let addr = match addr_s.parse::<SocketAddr>() {
-                Ok(a) => a,
-                Err(e) => {
-                    warn!("--seeds: invalid address '{}': {} — skipping", addr_s, e);
-                    continue;
-                }
-            };
+            // v0.5.11 audit Mid #8: previously we emitted a warning and
+            // `continue`d on invalid seed address / pubkey / ML-DSA key,
+            // which let a typo silently disable a seed. Fail closed
+            // instead: the operator wants every seed they asked for, so
+            // any malformed entry is a configuration error that must
+            // stop startup.
+            let addr = addr_s.parse::<SocketAddr>().unwrap_or_else(|e| {
+                error!(
+                    "FATAL: --seeds entry '{}' is not a valid SocketAddr: {}. \
+                     Refusing to start with a malformed seed — fix the config.",
+                    addr_s, e
+                );
+                std::process::exit(1);
+            });
             let pk_hex = pk_s.trim_start_matches("0x");
-            let pk_bytes = match hex::decode(pk_hex) {
-                Ok(b) => b,
-                Err(e) => {
-                    warn!(
-                        "--seed-pubkeys: invalid hex for '{}': {} — skipping",
+            let pk_bytes = hex::decode(pk_hex).unwrap_or_else(|e| {
+                error!(
+                    "FATAL: --seed-pubkeys entry for '{}' is not valid hex: {}. \
+                     Refusing to start.",
+                    addr_s, e
+                );
+                std::process::exit(1);
+            });
+            let pk = misaka_crypto::validator_sig::ValidatorPqPublicKey::from_bytes(&pk_bytes)
+                .unwrap_or_else(|e| {
+                    error!(
+                        "FATAL: --seed-pubkeys entry for '{}' is not a valid ML-DSA-65 \
+                         public key: {}. Refusing to start.",
                         addr_s, e
                     );
-                    continue;
-                }
-            };
-            let pk = match misaka_crypto::validator_sig::ValidatorPqPublicKey::from_bytes(&pk_bytes)
-            {
-                Ok(k) => k,
-                Err(e) => {
-                    warn!(
-                        "--seed-pubkeys: invalid ML-DSA-65 pubkey for '{}': {} — skipping",
-                        addr_s, e
-                    );
-                    continue;
-                }
-            };
+                    std::process::exit(1);
+                });
             let pk_snapshot = pk.to_bytes();
             if let Some(existing) = relay_peers
                 .iter_mut()
@@ -1537,6 +1540,18 @@ async fn start_narwhal_node(cli: Cli) -> anyhow::Result<()> {
             let metrics2 = metrics_rpc.clone();
             let connected_peers = connected_peers.clone();
             let chain_id_for_rpc = cli.chain_id;
+            // v0.5.11 audit Mid #10: expose the config-level node mode
+            // (public/hidden/seed) as a distinct field. The existing
+            // "mode" field is retained as a back-compat alias but has
+            // always been topology-derived (solo/joined from peer_count),
+            // which confused operators who expected it to reflect the
+            // `[node].mode` setting.
+            let node_mode_str: &'static str = match crate::config::NodeMode::from_str_loose(&cli.mode) {
+                crate::config::NodeMode::Public => "public",
+                crate::config::NodeMode::Hidden => "hidden",
+                crate::config::NodeMode::Seed => "seed",
+            };
+            let is_observer_for_rpc = is_observer;
             move || {
                 let msg_tx = msg_tx.clone();
                 let metrics2 = metrics2.clone();
@@ -1552,13 +1567,21 @@ async fn start_narwhal_node(cli: Cli) -> anyhow::Result<()> {
                     let peers_snapshot: Vec<u32> =
                         connected_peers.read().await.iter().copied().collect();
                     let peer_count = peers_snapshot.len();
-                    // "mode" is a UX hint derived from peer_count: 0 peers ⇒
-                    // the node is isolated and is making self-progress with
-                    // only its own validator identity.
-                    let mode = if peer_count == 0 {
+                    // "topology" is a UX hint derived from peer_count: 0
+                    // peers ⇒ the node is isolated and is making
+                    // self-progress with only its own validator identity.
+                    let topology = if peer_count == 0 {
                         "solo"
                     } else {
                         "joined"
+                    };
+                    // Distinguish observer (no propose loop) from
+                    // validator (participates in consensus) at the role
+                    // level.
+                    let role = if is_observer_for_rpc {
+                        "observer"
+                    } else {
+                        "validator"
                     };
                     axum::Json(serde_json::json!({
                         "chain": "MISAKA Network",
@@ -1572,7 +1595,14 @@ async fn start_narwhal_node(cli: Cli) -> anyhow::Result<()> {
                         "version": env!("CARGO_PKG_VERSION"),
                         "pqSignature": "ML-DSA-65 (FIPS 204)",
                         "status": status,
-                        "mode": mode,
+                        // v0.5.11 audit Mid #10: "mode" is retained for
+                        // back-compat but it has always been topology,
+                        // not the config-level mode. Use "topology" /
+                        // "nodeMode" / "role" for clearer semantics.
+                        "mode": topology,
+                        "topology": topology,
+                        "nodeMode": node_mode_str,
+                        "role": role,
                         "peerCount": peer_count,
                         "peers": peers_snapshot,
                         "metrics": {
@@ -1760,9 +1790,17 @@ async fn start_narwhal_node(cli: Cli) -> anyhow::Result<()> {
             }
         }));
 
+    // v0.5.11 audit Confirmed Finding #1: use
+    // `into_make_service_with_connect_info::<SocketAddr>()` so the shared
+    // rpc_auth middleware can read the peer IP via the ConnectInfo
+    // extension. Without this, MISAKA_RPC_WRITE_ALLOWLIST always fails
+    // closed with 403 because the middleware cannot determine the
+    // caller's address. The write routes under
+    // rpc_server.rs / dag_rpc_legacy.rs / validator_api.rs all already
+    // read ConnectInfo; main.rs was the missing wiring.
     let rpc_server = axum::serve(
         tokio::net::TcpListener::bind(rpc_addr).await?,
-        rpc_router.into_make_service(),
+        rpc_router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     );
 
     info!("RPC server listening on {}", rpc_addr);

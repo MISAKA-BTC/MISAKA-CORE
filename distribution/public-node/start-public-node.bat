@@ -99,6 +99,19 @@ if !SEEDS_COUNT! GTR 0 (
     )
 )
 
+REM v0.5.11 audit Mid #9: parse the real Narwhal relay address from the
+REM first network_address line in genesis_committee.toml. The legacy
+REM "p2p.port = 6691" in public-node.toml never matched reality.
+set "RELAY_ADDR="
+for /f "tokens=2 delims==" %%a in ('findstr /c:"network_address" "%GENESIS%"') do (
+    if not defined RELAY_ADDR (
+        set "RAW=%%a"
+        set "RELAY_ADDR=!RAW:"=!"
+        set "RELAY_ADDR=!RELAY_ADDR: =!"
+    )
+)
+if not defined RELAY_ADDR set "RELAY_ADDR=(could not parse genesis network_address)"
+
 echo 起動パラメータ
 echo   Config : %CONFIG%
 echo   Genesis: %GENESIS%
@@ -109,7 +122,7 @@ if "!USE_SEEDS!"=="1" (
 )
 echo   Data   : %DATA_DIR%
 echo   RPC    : http://localhost:3001
-echo   P2P    : 6691
+echo   Relay  : !RELAY_ADDR! (from genesis)
 echo.
 echo ^> ノードを起動します...
 echo   (停止するには Ctrl+C または このウインドウを閉じる)
