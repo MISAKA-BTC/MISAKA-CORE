@@ -9,11 +9,16 @@ on:
     tags:
       - "v*"
 
+# Default to least-privilege. Individual jobs override as needed.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
+    # Build jobs only need to read the repo. No write access.
+    permissions:
+      contents: read
+
     strategy:
       fail-fast: false
       matrix:
@@ -90,6 +95,12 @@ jobs:
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
 
+    # Needs write to publish the release, id-token to request a
+    # keyless Sigstore signing certificate from Fulcio via OIDC.
+    permissions:
+      contents: write
+      id-token: write
+
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -104,6 +115,26 @@ jobs:
           done > ../SHA256SUMS
           cat ../SHA256SUMS
 
+      # ──  Sigstore keyless signing ──
+      # Produces SHA256SUMS.sig + SHA256SUMS.pem so downloaders can verify
+      # the checksums file (and thus every asset) was produced by this
+      # workflow, via Sigstore Fulcio / Rekor transparency log. No signing
+      # key stored anywhere — identity is the GitHub Actions OIDC token.
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign SHA256SUMS (Sigstore keyless)
+        run: |
+          cosign sign-blob --yes \
+            --output-signature SHA256SUMS.sig \
+            --output-certificate SHA256SUMS.pem \
+            SHA256SUMS
+          echo "--- signature ---"
+          cat SHA256SUMS.sig
+          echo "--- certificate ---"
+          head -c 400 SHA256SUMS.pem
+          echo
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -112,3 +143,5 @@ jobs:
             artifacts/**/*.tar.gz
             artifacts/**/*.zip
             SHA256SUMS
+            SHA256SUMS.sig
+            SHA256SUMS.pem

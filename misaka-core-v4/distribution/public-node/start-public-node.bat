@@ -49,6 +49,11 @@ if not exist "%DATA_DIR%\validator.key" (
     if exist "%BUNDLED_KEY%" (
         echo 初回起動: bundled validator key をコピー中...
         copy /Y "%BUNDLED_KEY%" "%DATA_DIR%\validator.key" >nul
+        REM Restrict the validator key to the current user only.
+        REM Windows has no chmod, so use icacls to remove inherited ACLs and
+        REM grant Full Control to the current user. Keeps the private key
+        REM unreadable by other local users on shared machines.
+        icacls "%DATA_DIR%\validator.key" /inheritance:r /grant:r "%USERNAME%:F" >nul 2>&1
     )
 )
 

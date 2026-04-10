@@ -57,9 +57,65 @@ curl http://localhost:3001/api/get_chain_info
 
 ## セキュリティ
 
+### bundled-validator.key について
+
 同梱の `bundled-validator.key` は **暗号化された testnet bootstrap 鍵** です。
 複数ノードが同じ鍵で公式 testnet に参加すると equivocation を起こすため、
 **単独テスト / self-host 用途のみで使用してください**。
 
+ノードは起動時に bundled key を検知すると：
+
+- `chain_id=1` (mainnet) では **起動を拒否** (`FATAL: refusing to start ...`)
+- `chain_id=2` (testnet) では **警告を出して続行**
+
 公式 testnet の validator として参加する場合は、運営から配布される鍵と
 genesis に差し替えが必要です。
+
+### Genesis の整合性確認
+
+ダウンロード先のミラーが改竄されている可能性を排除するため、解凍後に
+以下の SHA256 と一致することを確認してください:
+
+```
+config/genesis_committee.toml   c51d57a6d49c56e977d5b6e4b2ef673e752042785b42105027b7943a34ccceea
+config/bundled-validator.key    9a6d82004781195a9af06c768fdc3b70e148c63ef0c08fcc7298d52efee12c93
+```
+
+macOS / Linux:
+```bash
+shasum -a 256 config/genesis_committee.toml config/bundled-validator.key
+```
+
+Windows (PowerShell):
+```powershell
+Get-FileHash config\genesis_committee.toml -Algorithm SHA256
+Get-FileHash config\bundled-validator.key -Algorithm SHA256
+```
+
+ハッシュが上記と一致しない場合は **絶対に起動しないでください**。
+公式の配布元 (GitHub Releases) から再ダウンロードしてください。
+
+### SHA256SUMS の署名検証 (Sigstore cosign keyless)
+
+GitHub Release の `SHA256SUMS` は Sigstore の keyless signing で署名されています
+(`SHA256SUMS.sig` + `SHA256SUMS.pem`)。配布経路全体の改竄検知ができます:
+
+```bash
+# cosign のインストール: https://docs.sigstore.dev/system_config/installation/
+cosign verify-blob \
+  --certificate SHA256SUMS.pem \
+  --signature SHA256SUMS.sig \
+  --certificate-identity-regexp 'https://github\.com/sasakiyuuu/misaka-test-net/.*' \
+  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+  SHA256SUMS
+```
+
+`Verified OK` が出れば、この SHA256SUMS は当該リポジトリの GitHub Actions
+ワークフローから生成されたものであることが暗号学的に保証されます。
+
+### 公開ポート
+
+launcher は `MISAKA_RPC_AUTH_MODE=open` で起動します。**RPC ポート 3001 を
+インターネットに晒さないでください**。LAN / localhost 限定で使う想定です。
+公開するなら reverse proxy + 認証 + firewall を別途設定してください。
+P2P ポート 6691 は公開 OK。
