@@ -941,13 +941,55 @@ async fn start_narwhal_node(cli: Cli) -> anyhow::Result<()> {
     let authority_index = cli.validator_index as u32;
 
     // ── CRIT #1 fix: Load persistent validator identity (not generate fresh) ──
+    let validator_key_path = data_dir.join("validator.key");
     let identity = crate::identity::ValidatorIdentity::load_or_create(
-        &data_dir.join("validator.key"),
+        &validator_key_path,
     )?;
     tracing::info!(
         fingerprint = %hex::encode(identity.fingerprint()),
         "Loaded validator identity"
     );
+
+    // ── SEC-FIX: bundled validator key guard ──
+    //
+    // The distribution ships `config/bundled-validator.key`, a *shared*
+    // demonstration key matching `authority_index=0` in the default
+    // `genesis_committee.toml`. If two machines both bootstrap with this
+    // same file and connect to the same testnet, they will sign conflicting
+    // blocks for the same slot (equivocation) and get ejected by the
+    // (future) slashing pipeline. On mainnet this would be a guaranteed
+    // loss-of-funds event.
+    //
+    // We fail-closed on mainnet and warn loudly on non-mainnet chains.
+    const BUNDLED_VALIDATOR_KEY_SHA256: &str =
+        "9a6d82004781195a9af06c768fdc3b70e148c63ef0c08fcc7298d52efee12c93";
+    if let Ok(bytes) = std::fs::read(&validator_key_path) {
+        use sha2::{Digest as _, Sha256};
+        let file_sha256 = hex::encode(Sha256::digest(&bytes));
+        if file_sha256 == BUNDLED_VALIDATOR_KEY_SHA256 {
+            if cli.chain_id == 1 {
+                anyhow::bail!(
+                    "FATAL: refusing to start on mainnet (chain_id=1) with the bundled \
+                     demonstration validator key. The bundled key is shared among all \
+                     downloads of this distribution and must NEVER be used on mainnet. \
+                     Delete {} and restart to generate a fresh, unique validator key, \
+                     or run `misaka-cli --emit-validator-pubkey` to produce one under \
+                     a different data_dir.",
+                    validator_key_path.display(),
+                );
+            } else {
+                tracing::warn!(
+                    "⚠ Starting with the BUNDLED demonstration validator key. \
+                     This key is shared among every download of the distribution. \
+                     Do NOT use it to join the public testnet as a validator — \
+                     multiple users sharing this identity will equivocate. \
+                     Safe for: single-node smoke tests and self-hosted testnet only. \
+                     To run as a real validator, delete {} and restart.",
+                    validator_key_path.display(),
+                );
+            }
+        }
+    }
 
     // ── CRIT #1 fix: Load genesis committee from manifest (not placeholders) ──
     let genesis_path = resolve_genesis_committee_path(cli.genesis_path.as_deref());
@@ -1579,6 +1621,18 @@ async fn start_narwhal_node(cli: Cli) -> anyhow::Result<()> {
                             break;
                         }
                         if let Ok(outcome) = reply_rx.await {
+                            if outcome.sig_verify_failed {
+                                // Task D / audit follow-up: the sender pushed a
+                                // block whose ML-DSA-65 signature or structural
+                                // check failed inside CoreEngine. Surface that
+                                // fact to operators so bad peers are visible
+                                // even though the production code path currently
+                                // has no PeerScorer wired up.
+                                warn!(
+                                    "peer_sig_verify_failed from={} round={}",
+                                    authority_index, block_ref.round,
+                                );
+                            }
                             if !outcome.accepted.is_empty() {
                                 // Cache ONLY after verification succeeded
                                 relay_cache_for_ingress
@@ -1631,6 +1685,12 @@ async fn start_narwhal_node(cli: Cli) -> anyhow::Result<()> {
                                 break;
                             }
                             if let Ok(outcome) = reply_rx.await {
+                                if outcome.sig_verify_failed {
+                                    warn!(
+                                        "peer_sig_verify_failed from={} round={} (BlockResponse)",
+                                        authority_index, block_ref.round,
+                                    );
+                                }
                                 if !outcome.accepted.is_empty() {
                                     relay_cache_for_ingress
                                         .write()

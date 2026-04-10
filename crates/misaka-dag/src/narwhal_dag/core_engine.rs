@@ -105,6 +105,11 @@ pub struct ProcessResult {
     pub round_advanced: bool,
     /// New round number (if advanced).
     pub new_round: Option<Round>,
+    /// Set to true if step 1 (signature verification) rejected this block.
+    /// Network ingress code uses this to downgrade the sender's peer score
+    /// (Task D / audit follow-up). Distinguishes cryptographic failures
+    /// from benign rejections like duplicates or suspensions.
+    pub sig_verify_failed: bool,
 }
 
 /// Core engine for Narwhal/Bullshark consensus.
@@ -404,13 +409,6 @@ impl CoreEngine {
             slo_metrics::SIG_VERIFY_FAILURES.inc();
             // SLO N4: block rejected
             slo_metrics::BLOCKS_REJECTED.inc();
-            // SEC-AUDIT: PeerSignal::VerifyFailed is NOT emitted here because
-            // core_engine does not hold a reference to the PeerScorer.
-            // A malicious peer flooding invalid blocks gets rejected here but
-            // their peer score is not reduced, so they won't be disconnected.
-            // Pre-checks in anemo_network.rs (author/round/sig_len) do record
-            // VerifyFailed, but full ML-DSA signature failures are not scored.
-            // TODO(Task D): Add PeerScorer to CoreEngine or emit via channel.
             warn!(
                 "Block rejected by verifier: round={}, author={}, error={}",
                 block.round(),
@@ -420,6 +418,12 @@ impl CoreEngine {
             if let Some(m) = &self.metrics {
                 ConsensusMetrics::inc(&m.blocks_rejected);
             }
+            // Signal the caller (runtime / network ingress) that this
+            // specific rejection was a cryptographic failure, so it can
+            // downgrade the sender's peer score. CoreEngine does not hold
+            // a PeerScorer reference; the outcome is propagated through
+            // ProcessResult → NetworkBlockOutcome → main.rs.
+            result.sig_verify_failed = true;
             return result;
         }
 

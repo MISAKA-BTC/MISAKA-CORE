@@ -68,6 +68,9 @@ pub struct NetworkBlockOutcome {
     pub accepted: Vec<BlockRef>,
     pub fetch_requests: Vec<AncestorFetchRequest>,
     pub highest_accepted_round: Round,
+    /// Set to true if the signature / verifier rejected the incoming block.
+    /// Peer ingress code should reduce the sender's peer score when true.
+    pub sig_verify_failed: bool,
 }
 
 /// Configuration for the consensus runtime.
@@ -381,6 +384,7 @@ impl ConsensusRuntime {
             .collect();
         let fetch_requests = self.block_manager.take_fetch_requests();
         let highest_accepted_round = self.dag_state.highest_accepted_round();
+        let sig_verify_failed = result.sig_verify_failed;
 
         ProcessedIncomingBlock {
             outputs: result.outputs,
@@ -388,6 +392,7 @@ impl ConsensusRuntime {
                 accepted,
                 fetch_requests,
                 highest_accepted_round,
+                sig_verify_failed,
             },
         }
     }
