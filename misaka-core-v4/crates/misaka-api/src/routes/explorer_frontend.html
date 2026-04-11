@@ -79,7 +79,7 @@
   <!-- Stats -->
   <div class="stats" id="statsGrid">
     <div class="stat-card"><div class="stat-label">Block Height</div><div class="stat-value" id="statHeight">—</div></div>
-    <div class="stat-card"><div class="stat-label">Total Transactions</div><div class="stat-value" id="statTxs">—</div></div>
+    <div class="stat-card"><div class="stat-label">Total Commits</div><div class="stat-value" id="statTxs">—</div></div>
     <div class="stat-card"><div class="stat-label">Validators</div><div class="stat-value green" id="statVals">—</div></div>
     <div class="stat-card"><div class="stat-label">Chain Health</div><div class="stat-value green" id="statHealth">—</div></div>
   </div>
@@ -138,8 +138,8 @@ async function loadStats() {
   const d = await fetchJSON(API + '/api/v1/explorer/stats');
   if (!d) return;
   const s = d.status || {};
-  document.getElementById('statHeight').textContent = s.highest_accepted_round ?? s.current_round ?? '—';
-  document.getElementById('statTxs').textContent = s.num_commits ?? d.metrics?.commitsTotal ?? '—';
+  document.getElementById('statHeight').textContent = s.last_commit_index ?? s.num_commits ?? '—';
+  document.getElementById('statTxs').textContent = s.num_commits ?? '—';
   document.getElementById('statVals').textContent = (d.peerCount != null ? d.peerCount + 1 : '—');
   const health = s.num_suspended === 0 ? 'Healthy' : s.num_suspended + ' suspended';
   document.getElementById('statHealth').textContent = d.status ? health : '—';
@@ -150,12 +150,28 @@ function esc(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
 
+function timeAgoMs(ms) {
+  if (!ms) return '—';
+  const s = Math.floor((Date.now() - ms) / 1000);
+  if (s < 0) return 'just now';
+  if (s < 60) return s + 's ago';
+  if (s < 3600) return Math.floor(s/60) + 'm ago';
+  if (s < 86400) return Math.floor(s/3600) + 'h ago';
+  return Math.floor(s/86400) + 'd ago';
+}
+
 async function loadBlocks() {
   const d = await fetchJSON(API + '/api/v1/explorer/blocks?limit=15');
   if (!d) return;
   const blocks = d.blocks || d.data || [];
-  if (blocks.length === 0) return;
   const tbody = document.getElementById('blocksBody');
+  if (blocks.length === 0) {
+    tbody.textContent = '';
+    const tr = document.createElement('tr');
+    const td = document.createElement('td'); td.colSpan = 5; td.className = 'loading'; td.textContent = 'Waiting for blocks...';
+    tr.appendChild(td); tbody.appendChild(tr);
+    return;
+  }
   tbody.textContent = '';
   for (const b of blocks) {
     const height = b.height ?? b.round ?? '—';
@@ -168,7 +184,7 @@ async function loadBlocks() {
     const sp = document.createElement('span'); sp.className = 'hash'; sp.textContent = b.hash ? short(b.hash) : '—';
     tdHash.appendChild(sp); tr.appendChild(tdHash);
     const tdTx = document.createElement('td'); tdTx.textContent = b.txCount ?? b.tx_count ?? 0; tr.appendChild(tdTx);
-    const tdTime = document.createElement('td'); tdTime.textContent = b.timestamp ? timeAgo(b.timestamp) : '—'; tr.appendChild(tdTime);
+    const tdTime = document.createElement('td'); tdTime.textContent = b.timestamp ? timeAgoMs(b.timestamp) : '—'; tr.appendChild(tdTime);
     const tdProp = document.createElement('td'); tdProp.textContent = b.proposer ?? ('Validator ' + (b.author ?? 0)); tr.appendChild(tdProp);
     tbody.appendChild(tr);
   }

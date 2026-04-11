@@ -1486,6 +1486,23 @@ async fn start_narwhal_node(cli: Cli, p2p_config: P2pConfig) -> anyhow::Result<(
     let shared_state_root = std::sync::Arc::new(tokio::sync::RwLock::new([0u8; 32]));
     let propose_state_root = shared_state_root.clone();
 
+    // Ring buffer of recent committed block summaries for the explorer RPC.
+    #[derive(Clone, serde::Serialize)]
+    struct BlockSummary {
+        height: u64,
+        hash: String,
+        tx_count: usize,
+        txs_accepted: usize,
+        timestamp_ms: u64,
+        author: u32,
+        state_root: String,
+        fees: u64,
+    }
+    let recent_blocks: Arc<tokio::sync::RwLock<std::collections::VecDeque<BlockSummary>>> =
+        Arc::new(tokio::sync::RwLock::new(std::collections::VecDeque::with_capacity(64)));
+    let recent_blocks_writer = recent_blocks.clone();
+    let recent_blocks_rpc = recent_blocks.clone();
+
     // SEC-FIX v0.5.7: do not spawn the propose loop in observer mode.
     // Observers receive blocks from committee members but never propose
     // (they have no stake and no committee membership). Without this
@@ -1817,32 +1834,30 @@ async fn start_narwhal_node(cli: Cli, p2p_config: P2pConfig) -> anyhow::Result<(
         }))
         // ── Explorer: Recent blocks ──
         .route("/api/get_recent_blocks", axum::routing::get({
-            let msg_tx = msg_tx_rpc.clone();
+            let recent_blocks = recent_blocks_rpc.clone();
             move || {
-                let msg_tx = msg_tx.clone();
+                let recent_blocks = recent_blocks.clone();
                 async move {
-                    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-                    let _ = msg_tx.try_send(ConsensusMessage::GetStatus(reply_tx));
-                    match reply_rx.await {
-                        Ok(status) => {
-                            let highest = status.highest_accepted_round;
-                            let blocks: Vec<serde_json::Value> = (0..highest.min(20))
-                                .map(|i| {
-                                    let round = highest - i;
-                                    serde_json::json!({
-                                        "round": round,
-                                        "author": 0,
-                                    })
-                                })
-                                .collect();
-                            axum::Json(serde_json::json!({
-                                "blocks": blocks,
-                                "highestRound": highest,
-                                "totalBlocks": status.num_blocks,
-                            }))
-                        }
-                        Err(_) => axum::Json(serde_json::json!({"error": "runtime closed"})),
-                    }
+                    let buf = recent_blocks.read().await;
+                    let blocks: Vec<serde_json::Value> = buf.iter().take(20).map(|b| {
+                        serde_json::json!({
+                            "height": b.height,
+                            "hash": b.hash,
+                            "txCount": b.tx_count,
+                            "txsAccepted": b.txs_accepted,
+                            "timestamp": b.timestamp_ms,
+                            "author": b.author,
+                            "stateRoot": b.state_root,
+                            "fees": b.fees,
+                        })
+                    }).collect();
+                    let total = buf.len();
+                    let highest = buf.front().map(|b| b.height).unwrap_or(0);
+                    axum::Json(serde_json::json!({
+                        "blocks": blocks,
+                        "highestCommit": highest,
+                        "totalBlocks": total,
+                    }))
                 }
             }
         }))
@@ -2484,6 +2499,22 @@ async fn start_narwhal_node(cli: Cli, p2p_config: P2pConfig) -> anyhow::Result<(
                         // that has already diverged from the leader.
                         break;
                     }
+                }
+
+                {
+                    let summary = BlockSummary {
+                        height: output.commit_index,
+                        hash: hex::encode(output.leader.digest.0),
+                        tx_count: output.transactions.len(),
+                        txs_accepted: exec_result.txs_accepted,
+                        timestamp_ms: output.timestamp_ms,
+                        author: output.leader.author,
+                        state_root: hex::encode(&new_root[..8]),
+                        fees: exec_result.total_fees,
+                    };
+                    let mut buf = recent_blocks_writer.write().await;
+                    if buf.len() >= 64 { buf.pop_back(); }
+                    buf.push_front(summary);
                 }
 
                 info!(
