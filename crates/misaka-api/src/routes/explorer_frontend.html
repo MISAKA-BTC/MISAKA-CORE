@@ -138,8 +138,8 @@ async function loadStats() {
   const d = await fetchJSON(API + '/api/v1/explorer/stats');
   if (!d) return;
   const s = d.status || {};
-  document.getElementById('statHeight').textContent = s.last_commit_index ?? s.num_commits ?? '—';
-  document.getElementById('statTxs').textContent = s.num_commits ?? '—';
+  document.getElementById('statHeight').textContent = d.blockHeight ?? s.last_commit_index ?? '—';
+  document.getElementById('statTxs').textContent = d.blockHeight ?? s.num_commits ?? '—';
   document.getElementById('statVals').textContent = (d.peerCount != null ? d.peerCount + 1 : '—');
   const health = s.num_suspended === 0 ? 'Healthy' : s.num_suspended + ' suspended';
   document.getElementById('statHealth').textContent = d.status ? health : '—';

@@ -1503,6 +1503,12 @@ async fn start_narwhal_node(cli: Cli, p2p_config: P2pConfig) -> anyhow::Result<(
     let recent_blocks_writer = recent_blocks.clone();
     let recent_blocks_rpc = recent_blocks.clone();
 
+    // Shared persistent block height (from UtxoExecutor), survives restarts
+    let shared_block_height: Arc<std::sync::atomic::AtomicU64> =
+        Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let block_height_writer = shared_block_height.clone();
+    let block_height_rpc = shared_block_height.clone();
+
     // SEC-FIX v0.5.7: do not spawn the propose loop in observer mode.
     // Observers receive blocks from committee members but never propose
     // (they have no stake and no committee membership). Without this
@@ -1720,37 +1726,22 @@ async fn start_narwhal_node(cli: Cli, p2p_config: P2pConfig) -> anyhow::Result<(
                 crate::config::NodeMode::Seed => "seed",
             };
             let is_observer_for_rpc = is_observer;
+            let block_height = block_height_rpc.clone();
             move || {
                 let msg_tx = msg_tx.clone();
                 let metrics2 = metrics2.clone();
                 let connected_peers = connected_peers.clone();
+                let block_height = block_height.clone();
                 async move {
                     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
                     let _ = msg_tx.try_send(ConsensusMessage::GetStatus(reply_tx));
                     let status = tokio::time::timeout(RPC_TIMEOUT, reply_rx).await.ok().and_then(|r| r.ok());
-                    // Peer count is authoritative for whether we are joined to
-                    // a shared network or running self-host. The value is
-                    // updated by the narwhal_block_relay ingress loop when
-                    // PeerConnected / PeerDisconnected events arrive.
                     let peers_snapshot: Vec<u32> =
                         connected_peers.read().await.iter().copied().collect();
                     let peer_count = peers_snapshot.len();
-                    // "topology" is a UX hint derived from peer_count: 0
-                    // peers ⇒ the node is isolated and is making
-                    // self-progress with only its own validator identity.
-                    let topology = if peer_count == 0 {
-                        "solo"
-                    } else {
-                        "joined"
-                    };
-                    // Distinguish observer (no propose loop) from
-                    // validator (participates in consensus) at the role
-                    // level.
-                    let role = if is_observer_for_rpc {
-                        "observer"
-                    } else {
-                        "validator"
-                    };
+                    let topology = if peer_count == 0 { "solo" } else { "joined" };
+                    let role = if is_observer_for_rpc { "observer" } else { "validator" };
+                    let height = block_height.load(std::sync::atomic::Ordering::Relaxed);
                     axum::Json(serde_json::json!({
                         "chain": misaka_types::constants::CHAIN_DISPLAY_NAME,
                         "ticker": misaka_types::constants::CURRENCY_TICKER,
@@ -1763,6 +1754,7 @@ async fn start_narwhal_node(cli: Cli, p2p_config: P2pConfig) -> anyhow::Result<(
                         "version": env!("CARGO_PKG_VERSION"),
                         "pqSignature": "ML-DSA-65 (FIPS 204)",
                         "status": status,
+                        "blockHeight": height,
                         "mode": topology,
                         "topology": topology,
                         "nodeMode": node_mode_str,
@@ -2378,17 +2370,30 @@ async fn start_narwhal_node(cli: Cli, p2p_config: P2pConfig) -> anyhow::Result<(
             // Phase 2c-A: use real genesis_hash (computed from committee PKs)
             let app_id = misaka_types::intent::AppId::new(cli.chain_id, genesis_hash);
 
-            // R7 C-1: Build executor from the canonical UtxoSet so that
-            // persisted UTXO state, burn replay set, and total_emitted are
-            // carried across restarts.  Falls back to a fresh set when no
-            // snapshot exists (first boot).
+            // R7 C-1: Build executor from persisted UTXO snapshot (if any),
+            // falling back to the canonical set from mempool, then to fresh.
+            let utxo_snapshot_path = std::path::Path::new(&cli.data_dir)
+                .join("narwhal_utxo_snapshot.json");
             let mut tx_executor = {
-                let canonical = narwhal_mempool.utxo_set();
-                let snapshot = canonical.read().await;
-                crate::utxo_executor::UtxoExecutor::with_utxo_set(
-                    snapshot.clone(),
-                    app_id,
-                )
+                match misaka_storage::utxo_set::UtxoSet::load_from_file(
+                    &utxo_snapshot_path, 1000,
+                ) {
+                    Ok(Some(restored)) => {
+                        info!(
+                            "Restored UTXO snapshot: height={}, utxos={}",
+                            restored.height, restored.len()
+                        );
+                        crate::utxo_executor::UtxoExecutor::with_utxo_set(restored, app_id.clone())
+                    }
+                    _ => {
+                        let canonical = narwhal_mempool.utxo_set();
+                        let snapshot = canonical.read().await;
+                        crate::utxo_executor::UtxoExecutor::with_utxo_set(
+                            snapshot.clone(),
+                            app_id.clone(),
+                        )
+                    }
+                }
             };
             // v0.5.9: commit loop holds a handle to the safe-mode flag so
             // it can break out on state_root mismatch.
@@ -2468,6 +2473,11 @@ async fn start_narwhal_node(cli: Cli, p2p_config: P2pConfig) -> anyhow::Result<(
                     }
                 }
 
+                // Update shared persistent block height
+                block_height_writer.store(
+                    tx_executor.height(),
+                    std::sync::atomic::Ordering::Relaxed,
+                );
                 // Update shared state_root for propose loop
                 let new_root = tx_executor.state_root();
                 *shared_state_root.write().await = new_root;
@@ -2505,7 +2515,7 @@ async fn start_narwhal_node(cli: Cli, p2p_config: P2pConfig) -> anyhow::Result<(
 
                 {
                     let summary = BlockSummary {
-                        height: output.commit_index,
+                        height: tx_executor.height(),
                         hash: hex::encode(output.leader.digest.0),
                         tx_count: output.transactions.len(),
                         txs_accepted: exec_result.txs_accepted,
@@ -2531,6 +2541,19 @@ async fn start_narwhal_node(cli: Cli, p2p_config: P2pConfig) -> anyhow::Result<(
                     total_accepted_txs,
                     total_committed_txs,
                 );
+
+                // Persist UTXO snapshot every 100 commits for crash recovery
+                if output.commit_index % 100 == 0 {
+                    if let Err(e) = tx_executor.utxo_set().save_to_file(&utxo_snapshot_path) {
+                        tracing::warn!("Failed to save UTXO snapshot: {}", e);
+                    } else {
+                        tracing::info!(
+                            "UTXO snapshot saved at commit {} (height={})",
+                            output.commit_index,
+                            tx_executor.utxo_set().height,
+                        );
+                    }
+                }
             }
         } => {
             info!("Commit channel closed");
