@@ -1194,12 +1194,13 @@ async fn start_narwhal_node(cli: Cli, p2p_config: P2pConfig) -> anyhow::Result<(
         );
     }
 
+    info!("startup[1/6]: building committee from manifest...");
     let committee = manifest.to_committee()?;
+    info!("startup[2/6]: parsing validator keys...");
     let relay_public_key = identity.validator_public_key()?;
     let relay_secret_key = Arc::new(identity.validator_secret_key()?);
+    info!("startup[3/6]: validator keys OK");
 
-    // ── Block signer uses ValidatorIdentity::sign_block (ml_dsa_sign_raw) ──
-    // ── HIGH #6 fix: sign() returns Result, not silent vec![] ──
     struct IdentityBlockSigner {
         identity: crate::identity::ValidatorIdentity,
     }
@@ -1214,8 +1215,6 @@ async fn start_narwhal_node(cli: Cli, p2p_config: P2pConfig) -> anyhow::Result<(
     }
     impl misaka_dag::BlockSigner for IdentityBlockSigner {
         fn sign(&self, message: &[u8]) -> Vec<u8> {
-            // Phase 2c-B D5: raw signing (no domain prefix).
-            // Returns empty vec on error (caller will detect via BlockVerifier).
             self.identity.sign_block(message).unwrap_or_else(|e| {
                 tracing::error!("Block signing failed: {}", e);
                 vec![]
@@ -1228,15 +1227,12 @@ async fn start_narwhal_node(cli: Cli, p2p_config: P2pConfig) -> anyhow::Result<(
     let signer: std::sync::Arc<dyn misaka_dag::BlockSigner> =
         std::sync::Arc::new(IdentityBlockSigner { identity });
 
-    // Build persistence store (RocksDB — production default since Phase 1)
     let store_path = data_dir.join("narwhal_consensus");
+    info!("startup[4/6]: opening RocksDB at {}...", store_path.display());
     let store = misaka_dag::narwhal_dag::rocksdb_store::RocksDbConsensusStore::open(&store_path)?;
     let store: std::sync::Arc<dyn misaka_dag::narwhal_dag::store::ConsensusStore> =
         std::sync::Arc::new(store);
-
-    // CR-2: Chain context for cross-network replay prevention.
-    // genesis_hash is derived from the committee manifest (deterministic).
-    // Phase 2c-A: use shared utility for genesis hash computation
+    info!("startup[5/6]: RocksDB opened OK");
     let committee_pks: Vec<Vec<u8>> = committee
         .authorities
         .iter()
@@ -1263,7 +1259,7 @@ async fn start_narwhal_node(cli: Cli, p2p_config: P2pConfig) -> anyhow::Result<(
         retention_rounds: 10_000,
     };
 
-    // Spawn consensus runtime
+    info!("startup[6/6]: spawning consensus runtime...");
     let (msg_tx, mut commit_rx, mut block_rx, metrics, runtime_handle) =
         spawn_consensus_runtime(config, signer, Some(store), chain_ctx);
 
