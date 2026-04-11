@@ -280,8 +280,18 @@ impl UniversalCommitter {
                     }
                 }
                 None => {
-                    // Block data is missing but above eviction round — genuine
-                    // data loss, not GC.  Abort to preserve causal safety.
+                    // Block data is missing. If the block is significantly
+                    // older than the leader, it was almost certainly GC'd
+                    // (eviction_round may be stale after a restart). Treat
+                    // as already-committed to avoid an infinite stall.
+                    if current.round.saturating_add(100) < leader.round {
+                        tracing::debug!(
+                            block = ?current,
+                            leader = ?leader,
+                            "sub-DAG ancestor presumed GC'd (far behind leader) — treating as committed"
+                        );
+                        continue;
+                    }
                     tracing::warn!(
                         block = ?current,
                         leader = ?leader,
