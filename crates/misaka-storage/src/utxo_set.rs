@@ -111,6 +111,7 @@ pub const MAX_SPC_SWITCH_DEPTH: usize = 1000;
 /// for each UTXO. This is required for ring member resolution during
 /// signature verification. It MUST be persistent (not memory-only)
 /// so that verification works after node restart.
+#[derive(Clone)]
 pub struct UtxoSet {
     /// Unspent outputs indexed by OutputRef.
     unspent: HashMap<OutputRef, UtxoEntry>,
