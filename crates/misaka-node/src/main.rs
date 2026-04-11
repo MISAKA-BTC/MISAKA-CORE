@@ -1539,6 +1539,8 @@ async fn start_narwhal_node(cli: Cli, p2p_config: P2pConfig) -> anyhow::Result<(
             std::process::exit(1);
         });
 
+    const RPC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
     let rpc_router = axum::Router::new()
         .route("/api/health", axum::routing::get({
             let msg_tx = msg_tx_rpc.clone();
@@ -1558,15 +1560,15 @@ async fn start_narwhal_node(cli: Cli, p2p_config: P2pConfig) -> anyhow::Result<(
                             "reason": reason,
                         })
                     }).unwrap_or_else(|| serde_json::json!({"halted": false}));
-                    match reply_rx.await {
-                        Ok(status) => axum::Json(serde_json::json!({
+                    match tokio::time::timeout(RPC_TIMEOUT, reply_rx).await {
+                        Ok(Ok(status)) => axum::Json(serde_json::json!({
                             "status": if safe_mode.is_halted() { "safe_mode" } else { "ok" },
                             "consensus": "mysticeti-equivalent",
                             "blocks": status.num_blocks,
                             "round": status.highest_accepted_round,
                             "safeMode": safe_mode_json,
                         })),
-                        Err(_) => axum::Json(serde_json::json!({
+                        _ => axum::Json(serde_json::json!({
                             "status": "error",
                             "consensus": "stopped",
                             "safeMode": safe_mode_json,
@@ -1582,9 +1584,9 @@ async fn start_narwhal_node(cli: Cli, p2p_config: P2pConfig) -> anyhow::Result<(
                 async move {
                     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
                     let _ = msg_tx.try_send(ConsensusMessage::GetStatus(reply_tx));
-                    match reply_rx.await {
-                        Ok(_) => (axum::http::StatusCode::OK, "ready"),
-                        Err(_) => (axum::http::StatusCode::SERVICE_UNAVAILABLE, "not ready"),
+                    match tokio::time::timeout(RPC_TIMEOUT, reply_rx).await {
+                        Ok(Ok(_)) => (axum::http::StatusCode::OK, "ready"),
+                        _ => (axum::http::StatusCode::SERVICE_UNAVAILABLE, "not ready"),
                     }
                 }
             }
@@ -1596,9 +1598,9 @@ async fn start_narwhal_node(cli: Cli, p2p_config: P2pConfig) -> anyhow::Result<(
                 async move {
                     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
                     let _ = msg_tx.try_send(ConsensusMessage::GetStatus(reply_tx));
-                    match reply_rx.await {
-                        Ok(status) => axum::Json(serde_json::json!(status)),
-                        Err(_) => axum::Json(serde_json::json!({"error": "runtime closed"})),
+                    match tokio::time::timeout(RPC_TIMEOUT, reply_rx).await {
+                        Ok(Ok(status)) => axum::Json(serde_json::json!(status)),
+                        _ => axum::Json(serde_json::json!({"error": "runtime busy or closed"})),
                     }
                 }
             }
@@ -1687,15 +1689,15 @@ async fn start_narwhal_node(cli: Cli, p2p_config: P2pConfig) -> anyhow::Result<(
                     // Real balance requires UTXO set integration (Phase 2)
                     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
                     let _ = msg_tx.try_send(ConsensusMessage::GetStatus(reply_tx));
-                    match reply_rx.await {
-                        Ok(status) => axum::Json(serde_json::json!({
+                    match tokio::time::timeout(RPC_TIMEOUT, reply_rx).await {
+                        Ok(Ok(status)) => axum::Json(serde_json::json!({
                             "address": address,
-                            "balance": 0, // Balance requires UTXO index (issue #TBD)
+                            "balance": 0,
                             "num_blocks": status.num_blocks,
                             "num_commits": status.num_commits,
                             "note": "Balance tracking requires UTXO set integration. Use faucet to get testnet tokens."
                         })),
-                        Err(_) => axum::Json(serde_json::json!({"error": "runtime closed"})),
+                        _ => axum::Json(serde_json::json!({"error": "runtime busy or closed"})),
                     }
                 }
             }
@@ -1725,7 +1727,7 @@ async fn start_narwhal_node(cli: Cli, p2p_config: P2pConfig) -> anyhow::Result<(
                 async move {
                     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
                     let _ = msg_tx.try_send(ConsensusMessage::GetStatus(reply_tx));
-                    let status = reply_rx.await.ok();
+                    let status = tokio::time::timeout(RPC_TIMEOUT, reply_rx).await.ok().and_then(|r| r.ok());
                     // Peer count is authoritative for whether we are joined to
                     // a shared network or running self-host. The value is
                     // updated by the narwhal_block_relay ingress loop when
@@ -1975,13 +1977,13 @@ async fn start_narwhal_node(cli: Cli, p2p_config: P2pConfig) -> anyhow::Result<(
                     let address = body.get("address").and_then(|v| v.as_str()).unwrap_or("");
                     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
                     let _ = msg_tx.try_send(ConsensusMessage::GetStatus(reply_tx));
-                    match reply_rx.await {
-                        Ok(_) => axum::Json(serde_json::json!({
+                    match tokio::time::timeout(RPC_TIMEOUT, reply_rx).await {
+                        Ok(Ok(_)) => axum::Json(serde_json::json!({
                             "address": address,
                             "utxos": [],
                             "note": "UTXO indexer not yet implemented — returns empty set"
                         })),
-                        Err(_) => axum::Json(serde_json::json!({"error": "runtime closed"})),
+                        _ => axum::Json(serde_json::json!({"error": "runtime busy or closed"})),
                     }
                 }
             }
