@@ -9,9 +9,9 @@ setlocal enabledelayedexpansion
 title MISAKA Testnet - Public Node
 
 echo ===============================================================
-echo   MISAKA Testnet - Public Node  (Windows)
-echo   PQ Signature: ML-DSA-65 (FIPS 204)
-echo   Consensus:    Mysticeti-equivalent DAG (Bullshark)
+echo   MISAKA Testnet - Public Node  ^(Windows^)
+echo   PQ Signature: ML-DSA-65 ^(FIPS 204^)
+echo   Consensus:    Mysticeti-equivalent DAG ^(Bullshark^)
 echo ===============================================================
 echo.
 
@@ -71,18 +71,40 @@ REM generates a fresh ephemeral validator.key on first run and runs in
 REM OBSERVER mode (key is not in the genesis committee).
 if not exist "%DATA_DIR%" mkdir "%DATA_DIR%"
 if not exist "%DATA_DIR%\validator.key" (
-    echo 初回起動: ephemeral observer key を生成します (validator.key)
+    echo 初回起動: ephemeral observer key を生成します ^(validator.key^)
 )
-set "LOCAL_VALIDATOR_PK="
-for /f %%a in ('"%BINARY%" --emit-validator-pubkey --data-dir "%DATA_DIR%" --chain-id 2 2^>nul') do (
-    if not defined LOCAL_VALIDATOR_PK set "LOCAL_VALIDATOR_PK=%%a"
-)
-if not defined LOCAL_VALIDATOR_PK (
-    echo [ERROR] validator.key の公開鍵を取得できませんでした
-    echo         misaka-data\validator.key を確認し、必要なら削除して再生成してください。
+REM Redirect to temp files so the 3906-char ML-DSA-65 pubkey hex line
+REM is captured reliably (cmd for /f inline has issues with very long output).
+set "EMIT_OUT=%TEMP%\misaka_emit_pk_%RANDOM%.txt"
+set "EMIT_ERR=%TEMP%\misaka_emit_err_%RANDOM%.txt"
+"%BINARY%" --emit-validator-pubkey --data-dir "%DATA_DIR%" --chain-id 2 >"%EMIT_OUT%" 2>"%EMIT_ERR%"
+if errorlevel 1 (
+    echo [ERROR] misaka-node --emit-validator-pubkey が失敗しました
+    if exist "%EMIT_ERR%" type "%EMIT_ERR%"
+    if exist "%EMIT_OUT%" type "%EMIT_OUT%"
+    del "%EMIT_OUT%" 2>nul
+    del "%EMIT_ERR%" 2>nul
     pause
     exit /b 1
 )
+set "LOCAL_VALIDATOR_PK="
+for /f "usebackq delims=" %%a in (`findstr /b /c:"0x" "%EMIT_OUT%" 2^>nul`) do set "LOCAL_VALIDATOR_PK=%%a"
+if not defined LOCAL_VALIDATOR_PK (
+    echo [ERROR] validator.key の公開鍵を取得できませんでした
+    echo         misaka-data\validator.key を確認し、必要なら削除して再生成してください。
+    echo.
+    echo   misaka-node stdout:
+    if exist "%EMIT_OUT%" type "%EMIT_OUT%"
+    echo.
+    echo   misaka-node stderr:
+    if exist "%EMIT_ERR%" type "%EMIT_ERR%"
+    del "%EMIT_OUT%" 2>nul
+    del "%EMIT_ERR%" 2>nul
+    pause
+    exit /b 1
+)
+del "%EMIT_OUT%" 2>nul
+del "%EMIT_ERR%" 2>nul
 if /I "%LOCAL_VALIDATOR_PK%"=="%GENESIS_VALIDATOR_PK%" (
     echo [ERROR] misaka-data\validator.key が genesis validator と一致しています
     echo         public observer package は observer-only です。operator/shared validator key は使えません。
@@ -144,7 +166,7 @@ if !SEEDS_COUNT! EQU 0 (
     if !SEEDS_COUNT! EQU !PUBKEYS_COUNT! (
         set "USE_SEEDS=1"
     ) else (
-        echo [ERROR] seeds.txt (!SEEDS_COUNT! entries) と seed-pubkeys.txt (!PUBKEYS_COUNT! entries) が揃いません。
+        echo [ERROR] seeds.txt ^(!SEEDS_COUNT! entries^) と seed-pubkeys.txt ^(!PUBKEYS_COUNT! entries^) が揃いません。
         echo [ERROR] stock package の current truth が壊れているため、solo fallback せず停止します。
         echo         config\seeds.txt と config\seed-pubkeys.txt を同じ件数に揃えて再試行してください。
         exit /b 1
@@ -168,14 +190,14 @@ echo 起動パラメータ
 echo   Config : %CONFIG%
 echo   Genesis: %GENESIS%
 if "!USE_SEEDS!"=="1" (
-    echo   Seeds  : !SEEDS! (with !PUBKEYS_COUNT! pinned pubkey^(s^))
+    echo   Seeds  : !SEEDS! ^(with !PUBKEYS_COUNT! pinned pubkey^(s^)^)
 )
 echo   Data   : %DATA_DIR%
 echo   RPC    : http://localhost:3001
-echo   Relay  : !RELAY_ADDR! (from genesis)
+echo   Relay  : !RELAY_ADDR! ^(from genesis^)
 echo.
 echo ^> ノードを起動します...
-echo   (停止するには Ctrl+C または このウインドウを閉じる)
+echo   ^(停止するには Ctrl+C または このウインドウを閉じる^)
 echo.
 
 set MISAKA_RPC_AUTH_MODE=open
