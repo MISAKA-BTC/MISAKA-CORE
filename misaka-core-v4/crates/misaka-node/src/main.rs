@@ -1036,7 +1036,7 @@ fn resolve_genesis_committee_path(cli_path: Option<&str>) -> std::path::PathBuf 
 }
 
 #[cfg(all(feature = "dag", not(feature = "ghostdag-compat")))]
-async fn start_narwhal_node(cli: Cli, p2p_config: P2pConfig) -> anyhow::Result<()> {
+async fn start_narwhal_node(mut cli: Cli, p2p_config: P2pConfig) -> anyhow::Result<()> {
     use std::collections::{BTreeMap, BTreeSet};
 
     use misaka_dag::narwhal_dag::core_engine::ProposeContext;
@@ -1055,8 +1055,6 @@ async fn start_narwhal_node(cli: Cli, p2p_config: P2pConfig) -> anyhow::Result<(
 
     let data_dir = std::path::Path::new(&cli.data_dir);
     std::fs::create_dir_all(data_dir)?;
-
-    let authority_index = cli.validator_index as u32;
 
     // ── CRIT #1 fix: Load persistent validator identity (not generate fresh) ──
     let validator_key_path = data_dir.join("validator.key");
@@ -1113,19 +1111,33 @@ async fn start_narwhal_node(cli: Cli, p2p_config: P2pConfig) -> anyhow::Result<(
     let manifest = crate::genesis_committee::GenesisCommitteeManifest::load(&genesis_path)?;
     manifest.validate()?;
     let manifest_validator_count = manifest.validators.len();
+
+    // Auto-detect authority_index from genesis committee by matching our pubkey.
+    // This removes the need for users to manually set --validator-index and
+    // --validators when joining a multi-validator network.
+    let auto_detected = manifest.find_by_pubkey(identity.public_key());
+    if let Some(detected_idx) = auto_detected {
+        if cli.validator_index == 0 && detected_idx != 0 {
+            tracing::info!(
+                "Auto-detected authority_index={} from genesis committee (overriding default --validator-index=0)",
+                detected_idx,
+            );
+        }
+    }
+    let authority_index = auto_detected.unwrap_or(cli.validator_index as u32);
+    let _effective_validator_count = manifest_validator_count;
+
+    // Override CLI values with auto-detected / manifest values
     if cli.validators != manifest_validator_count {
-        anyhow::bail!(
-            "validator count mismatch: --validators={} but genesis committee has {} validators",
+        tracing::info!(
+            "Adjusting --validators from {} to {} (matching genesis committee)",
             cli.validators,
             manifest_validator_count,
         );
+        cli.validators = manifest_validator_count;
     }
-    if cli.validator_index >= manifest_validator_count {
-        anyhow::bail!(
-            "validator index out of range: --validator-index={} but genesis committee has {} validators",
-            cli.validator_index,
-            manifest_validator_count,
-        );
+    if cli.validator_index != authority_index as usize {
+        cli.validator_index = authority_index as usize;
     }
     if cli.validator {
         let expected_manifest_entry =
@@ -1420,6 +1432,15 @@ async fn start_narwhal_node(cli: Cli, p2p_config: P2pConfig) -> anyhow::Result<(
         Arc::new(RwLock::new(BTreeMap::new()));
     let connected_peers: Arc<RwLock<BTreeSet<u32>>> = Arc::new(RwLock::new(BTreeSet::new()));
     let observer_count: Arc<std::sync::atomic::AtomicU32> = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    #[derive(Clone, serde::Serialize)]
+    struct ObserverInfo {
+        peer_id: String,
+        address: String,
+        public_key: String,
+        connected_at: u64,
+    }
+    let observer_registry: Arc<RwLock<std::collections::HashMap<String, ObserverInfo>>> =
+        Arc::new(RwLock::new(std::collections::HashMap::new()));
     // SEC-FIX v0.5.7: opt-in observer acceptance.
     //
     // Validators set `MISAKA_ACCEPT_OBSERVERS=1` (typically only on the
@@ -1862,6 +1883,20 @@ async fn start_narwhal_node(cli: Cli, p2p_config: P2pConfig) -> anyhow::Result<(
                 }
             }
         }))
+        // ── Admin: Connected observers with public keys ──
+        .route("/api/admin/observers", axum::routing::get({
+            let observer_registry_rpc = observer_registry.clone();
+            move || {
+                let observer_registry_rpc = observer_registry_rpc.clone();
+                async move {
+                    let observers: Vec<ObserverInfo> = observer_registry_rpc.read().await.values().cloned().collect();
+                    axum::Json(serde_json::json!({
+                        "observers": observers,
+                        "count": observers.len(),
+                    }))
+                }
+            }
+        }))
         // ── Explorer: Supply info ──
         .route("/api/get_supply", axum::routing::get(|| async {
             axum::Json(serde_json::json!({
@@ -2211,6 +2246,7 @@ async fn start_narwhal_node(cli: Cli, p2p_config: P2pConfig) -> anyhow::Result<(
     let relay_cache_for_ingress = block_cache.clone();
     let connected_peers_for_ingress = connected_peers.clone();
     let observer_count_for_ingress = observer_count.clone();
+    let observer_registry_for_ingress = observer_registry.clone();
     let relay_ingress_handle = tokio::spawn(async move {
         while let Some(event) = relay_in_rx.recv().await {
             match event {
@@ -2218,6 +2254,7 @@ async fn start_narwhal_node(cli: Cli, p2p_config: P2pConfig) -> anyhow::Result<(
                     authority_index,
                     peer_id,
                     address,
+                    public_key,
                 } => {
                     connected_peers_for_ingress
                         .write()
@@ -2225,6 +2262,22 @@ async fn start_narwhal_node(cli: Cli, p2p_config: P2pConfig) -> anyhow::Result<(
                         .insert(authority_index);
                     if authority_index == crate::narwhal_block_relay_transport::OBSERVER_SENTINEL_AUTHORITY {
                         observer_count_for_ingress.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if let Some(pk_bytes) = public_key {
+                            let pid_hex = peer_id.short_hex();
+                            let now = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs();
+                            observer_registry_for_ingress.write().await.insert(
+                                pid_hex.clone(),
+                                ObserverInfo {
+                                    peer_id: pid_hex,
+                                    address: address.to_string(),
+                                    public_key: format!("0x{}", hex::encode(&pk_bytes)),
+                                    connected_at: now,
+                                },
+                            );
+                        }
                     }
                     info!(
                         "narwhal_peer_connected authority={} peer_id={} addr={}",
@@ -2243,6 +2296,7 @@ async fn start_narwhal_node(cli: Cli, p2p_config: P2pConfig) -> anyhow::Result<(
                         if prev > 0 {
                             observer_count_for_ingress.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
                         }
+                        observer_registry_for_ingress.write().await.remove(&peer_id.short_hex());
                         let remaining = observer_count_for_ingress.load(std::sync::atomic::Ordering::Relaxed);
                         if remaining == 0 {
                             connected_peers_for_ingress

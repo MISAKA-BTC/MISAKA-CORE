@@ -172,6 +172,18 @@ impl GenesisCommitteeManifest {
         })
     }
 
+    /// Find a validator's authority_index by matching their public key.
+    /// Returns `None` if the pubkey is not in the genesis committee.
+    #[must_use]
+    pub fn find_by_pubkey(&self, pk: &[u8]) -> Option<u32> {
+        self.validators.iter().find_map(|v| {
+            Self::decode_pk(&v.public_key)
+                .ok()
+                .filter(|decoded| decoded == pk)
+                .map(|_| v.authority_index)
+        })
+    }
+
     /// Build bootstrap validator identities from the genesis committee.
     ///
     /// On non-mainnet chains, Phase C uses the genesis committee as the first

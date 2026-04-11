@@ -45,8 +45,8 @@ if not exist "!GENESIS!" (
 
 set /a VALIDATOR_SLOTS=0
 for /f %%a in ('find /c "[[committee.validators]]" ^< "!GENESIS!"') do set "VALIDATOR_SLOTS=%%a"
-if not "!VALIDATOR_SLOTS!"=="1" (
-    echo [ERROR] This package is for single-operator genesis only ^(validators=!VALIDATOR_SLOTS!^)
+if "!VALIDATOR_SLOTS!"=="0" (
+    echo [ERROR] No validators defined in genesis_committee.toml
     pause
     exit /b 1
 )
