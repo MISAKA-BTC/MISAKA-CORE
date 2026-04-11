@@ -1,0 +1,41 @@
+[Unit]
+Description=MISAKA Network REST API (Explorer/Faucet/WebSocket)
+After=network-online.target misaka-node.service
+Wants=network-online.target
+Requires=misaka-node.service
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/misaka/misaka-public-node-linux-x86_64
+ExecStart=/home/ubuntu/misaka/misaka-public-node-linux-x86_64/misaka-api \
+    --node http://127.0.0.1:3001 \
+    --host 0.0.0.0 \
+    --port 4000
+EnvironmentFile=-/etc/misaka/api.env
+Restart=on-failure
+RestartSec=5
+StartLimitBurst=5
+StartLimitIntervalSec=300
+LimitNOFILE=65535
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=misaka-api
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/home/ubuntu/misaka/misaka-public-node-linux-x86_64
+PrivateTmp=true
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+LockPersonality=true
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target
