@@ -147,6 +147,7 @@ checksum = "edca88bc138befd0323b20752846e6587272d3b03b0343c8ea28a6f819e6e71f"
 dependencies = [
  "async-trait",
  "axum-core",
+ "base64",
  "bytes",
  "futures-util",
  "http",
@@ -165,8 +166,10 @@ dependencies = [
  "serde_json",
  "serde_path_to_error",
  "serde_urlencoded",
+ "sha1",
  "sync_wrapper",
  "tokio",
+ "tokio-tungstenite",
  "tower 0.5.3",
  "tower-layer",
  "tower-service",
@@ -328,6 +331,12 @@ name = "bumpalo"
 version = "3.20.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5d20789868f4b01b2f2caec9f5c4e0213b41e3e5702a50157d699ae31ced2fcb"
+
+[[package]]
+name = "byteorder"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
 
 [[package]]
 name = "bytes"
@@ -524,26 +533,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c74b8349d32d297c9134b8c88677813a227df8f779daa29bfc29c183fe3dca6"
 
 [[package]]
-name = "core-foundation"
-version = "0.9.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "91e195e091a93c46f7102ec7818a2aa394e1e1771c3ab4825963fa03e45afb8f"
-dependencies = [
- "core-foundation-sys",
- "libc",
-]
-
-[[package]]
-name = "core-foundation"
-version = "0.10.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b2a6cd9ae233e7f62ba4e9353e81a88df7fc8a5987b8d445b4d90c879bd156f6"
-dependencies = [
- "core-foundation-sys",
- "libc",
-]
-
-[[package]]
 name = "core-foundation-sys"
 version = "0.8.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -672,6 +661,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "data-encoding"
+version = "2.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d7a1e2f27636f116493b8b860f5546edb47c8d8f8ea73e1d2a20be88e28d1fea"
+
+[[package]]
 name = "deranged"
 version = "0.5.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -716,15 +711,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "48c757948c5ede0e46177b7add2e67155f70e33c07fea8284df6576da70b3719"
 
 [[package]]
-name = "encoding_rs"
-version = "0.8.35"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "75030f3c4f45dafd7586dd6780965a8c7e8e285a5ecb86713e63a79c5b2766f3"
-dependencies = [
- "cfg-if",
-]
-
-[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -763,21 +749,6 @@ name = "foldhash"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
-
-[[package]]
-name = "foreign-types"
-version = "0.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f6f339eb8adc052cd2ca78910fda869aefa38d22d5cb648e6485e4d3fc06f3b1"
-dependencies = [
- "foreign-types-shared",
-]
-
-[[package]]
-name = "foreign-types-shared"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "00b0228411908ca8685dba7fc2cdd70ec9990a6e753e89b6ac91a84c40fbaf4b"
 
 [[package]]
 name = "form_urlencoded"
@@ -822,6 +793,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "389ca41296e6190b48053de0321d02a77f32f8a5d2461dd38762c0593805c6d6"
 dependencies = [
  "futures-core",
+ "futures-sink",
  "futures-task",
  "pin-project-lite",
  "slab",
@@ -882,25 +854,6 @@ name = "glob"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
-
-[[package]]
-name = "h2"
-version = "0.4.13"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2f44da3a8150a6703ed5d34e164b875fd14c2cdab9af1252a9a1020bde2bdc54"
-dependencies = [
- "atomic-waker",
- "bytes",
- "fnv",
- "futures-core",
- "futures-sink",
- "http",
- "indexmap 2.13.1",
- "slab",
- "tokio",
- "tokio-util",
- "tracing",
-]
 
 [[package]]
 name = "half"
@@ -1025,7 +978,6 @@ dependencies = [
  "bytes",
  "futures-channel",
  "futures-core",
- "h2",
  "http",
  "http-body",
  "httparse",
@@ -1055,22 +1007,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "hyper-tls"
-version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "70206fc6890eaca9fde8a0bf71caa2ddfc9fe045ac9e5c70df101a7dbde866e0"
-dependencies = [
- "bytes",
- "http-body-util",
- "hyper",
- "hyper-util",
- "native-tls",
- "tokio",
- "tokio-native-tls",
- "tower-service",
-]
-
-[[package]]
 name = "hyper-util"
 version = "0.1.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1088,11 +1024,9 @@ dependencies = [
  "percent-encoding",
  "pin-project-lite",
  "socket2",
- "system-configuration",
  "tokio",
  "tower-service",
  "tracing",
- "windows-registry",
 ]
 
 [[package]]
@@ -1492,7 +1426,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-addressmanager"
-version = "0.5.13"
+version = "0.7.0"
 dependencies = [
  "misaka-database",
  "parking_lot",
@@ -1525,7 +1459,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-cli"
-version = "0.5.13"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -1547,7 +1481,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-config"
-version = "0.5.13"
+version = "0.7.0"
 dependencies = [
  "misaka-types",
  "serde",
@@ -1559,7 +1493,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-connectionmanager"
-version = "0.5.13"
+version = "0.7.0"
 dependencies = [
  "misaka-addressmanager",
  "parking_lot",
@@ -1569,7 +1503,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-consensus"
-version = "0.5.13"
+version = "0.7.0"
 dependencies = [
  "bincode",
  "hex",
@@ -1592,7 +1526,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-consensusmanager"
-version = "0.5.13"
+version = "0.7.0"
 dependencies = [
  "misaka-consensus",
  "misaka-database",
@@ -1602,7 +1536,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-crypto"
-version = "0.5.13"
+version = "0.7.0"
 dependencies = [
  "argon2",
  "blake3",
@@ -1624,7 +1558,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-dag"
-version = "0.5.13"
+version = "0.7.0"
 dependencies = [
  "blake3",
  "borsh",
@@ -1655,7 +1589,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-database"
-version = "0.5.13"
+version = "0.7.0"
 dependencies = [
  "bincode",
  "hex",
@@ -1672,7 +1606,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-execution"
-version = "0.5.13"
+version = "0.7.0"
 dependencies = [
  "misaka-consensus",
  "misaka-crypto",
@@ -1689,7 +1623,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-governance"
-version = "0.5.13"
+version = "0.7.0"
 dependencies = [
  "hex",
  "misaka-crypto",
@@ -1703,7 +1637,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-indexes"
-version = "0.5.13"
+version = "0.7.0"
 dependencies = [
  "hex",
  "parking_lot",
@@ -1714,7 +1648,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-math"
-version = "0.5.13"
+version = "0.7.0"
 dependencies = [
  "hex",
  "serde",
@@ -1722,7 +1656,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-mempool"
-version = "0.5.13"
+version = "0.7.0"
 dependencies = [
  "borsh",
  "hex",
@@ -1738,7 +1672,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-mev"
-version = "0.5.13"
+version = "0.7.0"
 dependencies = [
  "misaka-crypto",
  "misaka-types",
@@ -1750,7 +1684,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-mining"
-version = "0.5.13"
+version = "0.7.0"
 dependencies = [
  "blake3",
  "hex",
@@ -1766,7 +1700,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-muhash"
-version = "0.5.13"
+version = "0.7.0"
 dependencies = [
  "serde",
  "sha3",
@@ -1774,7 +1708,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-node"
-version = "0.5.13"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -1819,7 +1753,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-notify"
-version = "0.5.13"
+version = "0.7.0"
 dependencies = [
  "hex",
  "misaka-database",
@@ -1833,7 +1767,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-p2p"
-version = "0.5.13"
+version = "0.7.0"
 dependencies = [
  "async-trait",
  "bitflags",
@@ -1860,7 +1794,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-pqc"
-version = "0.5.13"
+version = "0.7.0"
 dependencies = [
  "blake3",
  "hex",
@@ -1883,14 +1817,14 @@ dependencies = [
 
 [[package]]
 name = "misaka-protocol-config"
-version = "0.5.13"
+version = "0.7.0"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "misaka-rpc"
-version = "0.5.13"
+version = "0.7.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1910,7 +1844,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-rpc-core"
-version = "0.5.13"
+version = "0.7.0"
 dependencies = [
  "borsh",
  "misaka-types",
@@ -1921,7 +1855,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-security"
-version = "0.5.13"
+version = "0.7.0"
 dependencies = [
  "hex",
  "parking_lot",
@@ -1930,11 +1864,12 @@ dependencies = [
  "sha3",
  "thiserror 1.0.69",
  "tracing",
+ "zeroize",
 ]
 
 [[package]]
 name = "misaka-simulator"
-version = "0.5.13"
+version = "0.7.0"
 dependencies = [
  "misaka-dag",
  "misaka-pqc",
@@ -1948,7 +1883,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-storage"
-version = "0.5.13"
+version = "0.7.0"
 dependencies = [
  "bincode",
  "blake3",
@@ -1975,7 +1910,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-test-cluster"
-version = "0.5.13"
+version = "0.7.0"
 dependencies = [
  "misaka-dag",
  "misaka-protocol-config",
@@ -1989,7 +1924,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-tokenomics"
-version = "0.5.13"
+version = "0.7.0"
 dependencies = [
  "misaka-crypto",
  "misaka-types",
@@ -2002,7 +1937,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-txscript"
-version = "0.5.13"
+version = "0.7.0"
 dependencies = [
  "blake3",
  "hex",
@@ -2017,7 +1952,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-types"
-version = "0.5.13"
+version = "0.7.0"
 dependencies = [
  "borsh",
  "hex",
@@ -2030,7 +1965,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-utils"
-version = "0.5.13"
+version = "0.7.0"
 dependencies = [
  "async-trait",
  "blake3",
@@ -2049,7 +1984,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-wallet-core"
-version = "0.5.13"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "argon2",
@@ -2068,23 +2003,6 @@ dependencies = [
  "tokio",
  "tracing",
  "zeroize",
-]
-
-[[package]]
-name = "native-tls"
-version = "0.2.18"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "465500e14ea162429d264d44189adc38b199b62b1c21eea9f69e4b73cb03bbf2"
-dependencies = [
- "libc",
- "log",
- "openssl",
- "openssl-probe",
- "openssl-sys",
- "schannel",
- "security-framework",
- "security-framework-sys",
- "tempfile",
 ]
 
 [[package]]
@@ -2154,50 +2072,6 @@ name = "opaque-debug"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
-
-[[package]]
-name = "openssl"
-version = "0.10.76"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "951c002c75e16ea2c65b8c7e4d3d51d5530d8dfa7d060b4776828c88cfb18ecf"
-dependencies = [
- "bitflags",
- "cfg-if",
- "foreign-types",
- "libc",
- "once_cell",
- "openssl-macros",
- "openssl-sys",
-]
-
-[[package]]
-name = "openssl-macros"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a948666b637a0f465e8564c73e89d4dde00d72d4d473cc972f390fc3dcee7d9c"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
-]
-
-[[package]]
-name = "openssl-probe"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
-
-[[package]]
-name = "openssl-sys"
-version = "0.9.112"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "57d55af3b3e226502be1526dfdba67ab0e9c96fc293004e79576b2b9edb0dbdb"
-dependencies = [
- "cc",
- "libc",
- "pkg-config",
- "vcpkg",
-]
 
 [[package]]
 name = "parking_lot"
@@ -2683,20 +2557,15 @@ checksum = "eddd3ca559203180a307f12d114c268abf583f59b03cb906fd0b3ff8646c1147"
 dependencies = [
  "base64",
  "bytes",
- "encoding_rs",
  "futures-core",
- "h2",
  "http",
  "http-body",
  "http-body-util",
  "hyper",
  "hyper-rustls",
- "hyper-tls",
  "hyper-util",
  "js-sys",
  "log",
- "mime",
- "native-tls",
  "percent-encoding",
  "pin-project-lite",
  "quinn",
@@ -2707,7 +2576,6 @@ dependencies = [
  "serde_urlencoded",
  "sync_wrapper",
  "tokio",
- "tokio-native-tls",
  "tokio-rustls",
  "tower 0.5.3",
  "tower-http 0.6.8",
@@ -2837,15 +2705,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "schannel"
-version = "0.1.29"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "91c1b7e4904c873ef0710c1f407dde2e6287de2bebc1bbbf7d430bb7cbffd939"
-dependencies = [
- "windows-sys 0.61.2",
-]
-
-[[package]]
 name = "scopeguard"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2859,29 +2718,6 @@ checksum = "9bd1c54ea06cfd2f6b63219704de0b9b4f72dcc2b8fdef820be6cd799780e91e"
 dependencies = [
  "serde",
  "zeroize",
-]
-
-[[package]]
-name = "security-framework"
-version = "3.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b7f4bc775c73d9a02cde8bf7b2ec4c9d12743edf609006c7facc23998404cd1d"
-dependencies = [
- "bitflags",
- "core-foundation 0.10.1",
- "core-foundation-sys",
- "libc",
- "security-framework-sys",
-]
-
-[[package]]
-name = "security-framework-sys"
-version = "2.17.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6ce2691df843ecc5d231c0b14ece2acc3efb62c0a398c7e1d875f3983ce020e3"
-dependencies = [
- "core-foundation-sys",
- "libc",
 ]
 
 [[package]]
@@ -2993,6 +2829,17 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "sha1"
+version = "0.10.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e3bf829a2d51ab4a5ddf1352d8470c140cadc8301b2ae1789db023f01cedd6ba"
+dependencies = [
+ "cfg-if",
+ "cpufeatures",
+ "digest",
 ]
 
 [[package]]
@@ -3110,27 +2957,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
-]
-
-[[package]]
-name = "system-configuration"
-version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a13f3d0daba03132c0aa9767f98351b3488edc2c100cda2d2ec2b04f3d8d3c8b"
-dependencies = [
- "bitflags",
- "core-foundation 0.9.4",
- "system-configuration-sys",
-]
-
-[[package]]
-name = "system-configuration-sys"
-version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8e1d1b10ced5ca923a1fcb8d03e96b8d3268065d724548c0211415ff6ac6bac4"
-dependencies = [
- "core-foundation-sys",
- "libc",
 ]
 
 [[package]]
@@ -3290,16 +3116,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tokio-native-tls"
-version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bbae76ab933c85776efabc971569dd6119c580d8f5d448769dec1764bf796ef2"
-dependencies = [
- "native-tls",
- "tokio",
-]
-
-[[package]]
 name = "tokio-rustls"
 version = "0.26.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3307,6 +3123,18 @@ checksum = "1729aa945f29d91ba541258c8df89027d5792d85a8841fb65e8bf0f4ede4ef61"
 dependencies = [
  "rustls",
  "tokio",
+]
+
+[[package]]
+name = "tokio-tungstenite"
+version = "0.24.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "edc5f74e248dc973e0dbb7b74c7e0d6fcc301c694ff50049504004ef4d0cdcd9"
+dependencies = [
+ "futures-util",
+ "log",
+ "tokio",
+ "tungstenite",
 ]
 
 [[package]]
@@ -3518,6 +3346,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tracing-serde"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "704b1aeb7be0d0a84fc9828cae51dab5970fee5088f83d1dd7ee6f6246fc6ff1"
+dependencies = [
+ "serde",
+ "tracing-core",
+]
+
+[[package]]
 name = "tracing-subscriber"
 version = "0.3.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3527,12 +3365,15 @@ dependencies = [
  "nu-ansi-term",
  "once_cell",
  "regex-automata",
+ "serde",
+ "serde_json",
  "sharded-slab",
  "smallvec",
  "thread_local",
  "tracing",
  "tracing-core",
  "tracing-log",
+ "tracing-serde",
 ]
 
 [[package]]
@@ -3540,6 +3381,24 @@ name = "try-lock"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
+
+[[package]]
+name = "tungstenite"
+version = "0.24.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "18e5b8366ee7a95b16d32197d0b2604b43a0be89dc5fac9f8e96ccafbaedda8a"
+dependencies = [
+ "byteorder",
+ "bytes",
+ "data-encoding",
+ "http",
+ "httparse",
+ "log",
+ "rand 0.8.5",
+ "sha1",
+ "thiserror 1.0.69",
+ "utf-8",
+]
 
 [[package]]
 name = "typenum"
@@ -3592,6 +3451,12 @@ dependencies = [
  "percent-encoding",
  "serde",
 ]
+
+[[package]]
+name = "utf-8"
+version = "0.7.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "09cc8ee72d2a9becf2f2febe0205bbed8fc6615b7cb429ad062dc7b7ddd036a9"
 
 [[package]]
 name = "utf8_iter"
@@ -3842,17 +3707,6 @@ name = "windows-link"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f0805222e57f7521d6a62e36fa9163bc891acd422f971defe97d64e70d0a4fe5"
-
-[[package]]
-name = "windows-registry"
-version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "02752bf7fbdcce7f2a27a742f798510f3e5ad88dbe84871e5168e2120c3d5720"
-dependencies = [
- "windows-link",
- "windows-result",
- "windows-strings",
-]
 
 [[package]]
 name = "windows-result"

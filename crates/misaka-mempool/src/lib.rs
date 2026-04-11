@@ -308,6 +308,50 @@ impl UtxoMempool {
         Ok(tx_hash)
     }
 
+    /// Admit a system-originated transaction (Faucet, SystemEmission) that
+    /// bypasses the tx_type rejection in `admit`. Only the node's own RPC
+    /// should call this — never expose to external users directly.
+    pub fn admit_system_tx(
+        &mut self,
+        tx: UtxoTransaction,
+        now_ms: u64,
+    ) -> Result<[u8; 32], MempoolError> {
+        let tx_hash = tx.tx_hash();
+        if self.entries.contains_key(&tx_hash) {
+            return Err(MempoolError::Duplicate(tx_hash));
+        }
+        if self.entries.len() >= self.max_size {
+            return Err(MempoolError::CapacityFull);
+        }
+
+        #[cfg(feature = "dag")]
+        let relay_bytes = match &self.dag_relay {
+            Some(_) => Some(borsh::to_vec(&tx).map_err(|e| {
+                MempoolError::DagRelay(format!("borsh encode system tx for Narwhal: {}", e))
+            })?),
+            None => None,
+        };
+
+        self.entries.insert(
+            tx_hash,
+            MempoolEntry {
+                tx,
+                tx_hash,
+                received_at_ms: now_ms,
+            },
+        );
+
+        #[cfg(feature = "dag")]
+        if let (Some(sender), Some(tx_bytes)) = (&self.dag_relay, relay_bytes) {
+            if let Err(e) = sender.try_send(tx_bytes) {
+                self.remove(&tx_hash);
+                return Err(MempoolError::DagRelay(e.to_string()));
+            }
+        }
+
+        Ok(tx_hash)
+    }
+
     pub fn remove(&mut self, tx_hash: &[u8; 32]) -> bool {
         if let Some(entry) = self.entries.remove(tx_hash) {
             // Clean up spent_inputs tracking

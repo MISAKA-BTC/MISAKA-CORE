@@ -264,7 +264,14 @@ impl UtxoSet {
         self.unspent.get(outref).map(|e| &e.output)
     }
 
-    // Phase 2c-B D4c: has_spend_tag / is_spend_tag_spent / record_spend_tag deleted
+    /// Query all unspent outputs belonging to a given address (P2PKH: SHA3-256 of pubkey).
+    /// O(N) scan over all unspent outputs. Acceptable for testnet scale.
+    pub fn get_utxos_by_address(&self, address: &[u8; 32]) -> Vec<&UtxoEntry> {
+        self.unspent
+            .values()
+            .filter(|e| &e.output.address == address)
+            .collect()
+    }
 
     /// Number of unspent outputs.
     pub fn len(&self) -> usize {

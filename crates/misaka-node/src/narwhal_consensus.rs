@@ -196,6 +196,47 @@ impl NarwhalMempoolIngress {
         }
     }
 
+    /// Submit a faucet transaction (testnet only). Bypasses the SystemEmission/Faucet
+    /// rejection in submit_tx. Builds a TxType::Faucet transaction with the given
+    /// address and spending pubkey, then admits it to the mempool.
+    pub async fn submit_faucet_tx(
+        &self,
+        address: [u8; 32],
+        spending_pubkey: Option<Vec<u8>>,
+        amount: u64,
+    ) -> serde_json::Value {
+        let faucet_tx = UtxoTransaction {
+            version: misaka_types::utxo::UTXO_TX_VERSION,
+            tx_type: misaka_types::utxo::TxType::Faucet,
+            inputs: vec![],
+            outputs: vec![misaka_types::utxo::TxOutput {
+                amount,
+                address,
+                spending_pubkey,
+            }],
+            fee: 0,
+            extra: b"faucet".to_vec(),
+            expiry: 0,
+        };
+
+        let tx_hash = hex::encode(faucet_tx.tx_hash());
+        let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+        let mut mempool = self.mempool.lock().await;
+        match mempool.admit_system_tx(faucet_tx, now_ms) {
+            Ok(_) => serde_json::json!({
+                "accepted": true,
+                "txHash": tx_hash,
+                "amount": amount,
+                "error": serde_json::Value::Null,
+            }),
+            Err(e) => serde_json::json!({
+                "accepted": false,
+                "txHash": tx_hash,
+                "error": e.to_string(),
+            }),
+        }
+    }
+
     /// Audit #26: Verify ML-DSA-65 signatures via IntentMessage before mempool admission.
     /// This is the same verification logic as utxo_executor::validate_transparent_transfer
     /// but performed at the RPC ingress point to prevent garbage tx flooding.

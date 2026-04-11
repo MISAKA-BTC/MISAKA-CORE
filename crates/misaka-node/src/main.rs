@@ -1509,6 +1509,24 @@ async fn start_narwhal_node(cli: Cli, p2p_config: P2pConfig) -> anyhow::Result<(
     let block_height_writer = shared_block_height.clone();
     let block_height_rpc = shared_block_height.clone();
 
+    // Shared UtxoSet snapshot for RPC queries (get_utxos_by_address, get_balance).
+    // Updated by the commit loop after each commit.
+    let shared_utxo_set: Arc<tokio::sync::RwLock<misaka_storage::utxo_set::UtxoSet>> =
+        Arc::new(tokio::sync::RwLock::new(misaka_storage::utxo_set::UtxoSet::new(36)));
+    let utxo_set_writer = shared_utxo_set.clone();
+    let utxo_set_rpc = shared_utxo_set.clone();
+
+    // Committed TX index for get_tx_status (maps tx_hash -> (height, status))
+    #[derive(Clone, serde::Serialize)]
+    struct CommittedTx {
+        height: u64,
+        status: &'static str,
+    }
+    let committed_txs: Arc<tokio::sync::RwLock<std::collections::HashMap<[u8; 32], CommittedTx>>> =
+        Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
+    let committed_txs_writer = committed_txs.clone();
+    let committed_txs_rpc = committed_txs.clone();
+
     // SEC-FIX v0.5.7: do not spawn the propose loop in observer mode.
     // Observers receive blocks from committee members but never propose
     // (they have no stake and no committee membership). Without this
@@ -1679,32 +1697,58 @@ async fn start_narwhal_node(cli: Cli, p2p_config: P2pConfig) -> anyhow::Result<(
                 crate::rpc_auth::require_api_key,
             )),
         )
-        // SECURITY: /api/faucet is ONLY available when compiled with
-        // "faucet" or "testnet" feature. Never on mainnet release builds.
-        // See compile_error! at main.rs:29 for release+faucet guard.
+        // ── Testnet: Faucet endpoint ──
+        .route("/api/faucet", axum::routing::post({
+            let narwhal_mempool = narwhal_mempool.clone();
+            move |body: axum::Json<serde_json::Value>| {
+                let narwhal_mempool = narwhal_mempool.clone();
+                async move {
+                    let address_str = body.get("address").and_then(|v| v.as_str()).unwrap_or("");
+                    let spending_pk_hex = body.get("spendingPubkey").and_then(|v| v.as_str());
+
+                    let addr_bytes: Option<[u8; 32]> = if address_str.len() == 64 {
+                        hex::decode(address_str).ok().and_then(|b| <[u8; 32]>::try_from(b).ok())
+                    } else if address_str.starts_with("misakatest1") || address_str.starts_with("misaka1") {
+                        misaka_types::address::decode_address(address_str, 2).ok()
+                    } else {
+                        None
+                    };
+
+                    let addr = match addr_bytes {
+                        Some(a) => a,
+                        None => {
+                            return axum::Json(serde_json::json!({
+                                "accepted": false,
+                                "error": "invalid address format",
+                            }));
+                        }
+                    };
+
+                    let spending_pubkey = spending_pk_hex.and_then(|h| hex::decode(h).ok());
+
+                    let faucet_amount: u64 = std::env::var("MISAKA_FAUCET_AMOUNT")
+                        .ok()
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(1_000_000_000);
+
+                    axum::Json(narwhal_mempool.submit_faucet_tx(
+                        addr,
+                        spending_pubkey,
+                        faucet_amount,
+                    ).await)
+                }
+            }
+        }))
         // ── Testnet: Balance query ──
         .route("/api/get_balance", axum::routing::post({
-            let msg_tx = msg_tx_rpc.clone();
+            let utxo_set = utxo_set_rpc.clone();
             move |body: axum::body::Bytes| {
-                let msg_tx = msg_tx.clone();
+                let utxo_set = utxo_set.clone();
                 async move {
                     let req: serde_json::Value = serde_json::from_slice(&body)
                         .unwrap_or(serde_json::json!({}));
                     let address = req["address"].as_str().unwrap_or("");
-                    // For testnet: return committed TX count as proxy for "balance"
-                    // Real balance requires UTXO set integration (Phase 2)
-                    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-                    let _ = msg_tx.try_send(ConsensusMessage::GetStatus(reply_tx));
-                    match tokio::time::timeout(RPC_TIMEOUT, reply_rx).await {
-                        Ok(Ok(status)) => axum::Json(serde_json::json!({
-                            "address": address,
-                            "balance": 0,
-                            "num_blocks": status.num_blocks,
-                            "num_commits": status.num_commits,
-                            "note": "Balance tracking requires UTXO set integration. Use faucet to get testnet tokens."
-                        })),
-                        _ => axum::Json(serde_json::json!({"error": "runtime busy or closed"})),
-                    }
+                    axum::Json(query_utxos_by_address(&utxo_set, address).await)
                 }
             }
         }))
@@ -1960,23 +2004,24 @@ async fn start_narwhal_node(cli: Cli, p2p_config: P2pConfig) -> anyhow::Result<(
                 }
             }
         }))
-        // ── Indexer stubs (R5-C1): misaka-api expects these POST endpoints ──
+        // ── UTXO query endpoints ──
         .route("/api/get_indexed_utxos", axum::routing::post({
-            let msg_tx = msg_tx_rpc.clone();
+            let utxo_set = utxo_set_rpc.clone();
             move |body: axum::Json<serde_json::Value>| {
-                let msg_tx = msg_tx.clone();
+                let utxo_set = utxo_set.clone();
                 async move {
-                    let address = body.get("address").and_then(|v| v.as_str()).unwrap_or("");
-                    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-                    let _ = msg_tx.try_send(ConsensusMessage::GetStatus(reply_tx));
-                    match tokio::time::timeout(RPC_TIMEOUT, reply_rx).await {
-                        Ok(Ok(_)) => axum::Json(serde_json::json!({
-                            "address": address,
-                            "utxos": [],
-                            "note": "UTXO indexer not yet implemented — returns empty set"
-                        })),
-                        _ => axum::Json(serde_json::json!({"error": "runtime busy or closed"})),
-                    }
+                    let address_str = body.get("address").and_then(|v| v.as_str()).unwrap_or("");
+                    axum::Json(query_utxos_by_address(&utxo_set, address_str).await)
+                }
+            }
+        }))
+        .route("/api/get_utxos_by_address", axum::routing::post({
+            let utxo_set = utxo_set_rpc.clone();
+            move |body: axum::Json<serde_json::Value>| {
+                let utxo_set = utxo_set.clone();
+                async move {
+                    let address_str = body.get("address").and_then(|v| v.as_str()).unwrap_or("");
+                    axum::Json(query_utxos_by_address(&utxo_set, address_str).await)
                 }
             }
         }))
@@ -2013,20 +2058,36 @@ async fn start_narwhal_node(cli: Cli, p2p_config: P2pConfig) -> anyhow::Result<(
         }))
         .route("/api/get_tx_status", axum::routing::post({
             let mempool = narwhal_mempool.clone();
+            let committed = committed_txs_rpc.clone();
             move |body: axum::Json<serde_json::Value>| {
                 let mempool = mempool.clone();
+                let committed = committed.clone();
                 async move {
                     let tx_hash_hex = body.get("txHash").and_then(|v| v.as_str()).unwrap_or("");
                     let hash_bytes: Option<[u8; 32]> = hex::decode(tx_hash_hex)
                         .ok()
                         .and_then(|b| b.try_into().ok());
-                    let status = match hash_bytes {
-                        Some(h) if mempool.contains_tx(&h).await => "pending",
-                        _ => "unknown",
+
+                    let (status, block_height) = match hash_bytes {
+                        Some(h) => {
+                            if mempool.contains_tx(&h).await {
+                                ("pending", None)
+                            } else {
+                                let tx_map = committed.read().await;
+                                if let Some(record) = tx_map.get(&h) {
+                                    ("confirmed", Some(record.height))
+                                } else {
+                                    ("unknown", None)
+                                }
+                            }
+                        }
+                        None => ("unknown", None),
                     };
+
                     axum::Json(serde_json::json!({
                         "txHash": tx_hash_hex,
                         "status": status,
+                        "blockHeight": block_height,
                     }))
                 }
             }
@@ -2529,6 +2590,33 @@ async fn start_narwhal_node(cli: Cli, p2p_config: P2pConfig) -> anyhow::Result<(
                     buf.push_front(summary);
                 }
 
+                // Update shared UtxoSet for RPC queries
+                {
+                    let mut shared = utxo_set_writer.write().await;
+                    *shared = tx_executor.utxo_set().clone();
+                }
+
+                // Index committed transaction hashes for get_tx_status
+                {
+                    let current_height = tx_executor.height();
+                    let mut tx_map = committed_txs_writer.write().await;
+                    for raw_tx in &output.transactions {
+                        if let Ok(tx) = serde_json::from_slice::<misaka_types::utxo::UtxoTransaction>(raw_tx) {
+                            let hash = tx.tx_hash();
+                            tx_map.insert(hash, CommittedTx {
+                                height: current_height,
+                                status: "confirmed",
+                            });
+                        }
+                    }
+                    // Cap at 10k entries
+                    if tx_map.len() > 10_000 {
+                        let excess = tx_map.len() - 10_000;
+                        let keys_to_remove: Vec<[u8; 32]> = tx_map.keys().take(excess).copied().collect();
+                        for k in keys_to_remove { tx_map.remove(&k); }
+                    }
+                }
+
                 info!(
                     "Committed: index={}, txs={} (accepted={}), \
                      fees={}, utxos_created={}, state_root={}, total={}/{} accepted",
@@ -2571,6 +2659,66 @@ async fn start_narwhal_node(cli: Cli, p2p_config: P2pConfig) -> anyhow::Result<(
     }
 
     Ok(())
+}
+
+// ════════════════════════════════════════════════════════════════
+//  Shared RPC helpers for Narwhal mode
+// ════════════════════════════════════════════════════════════════
+
+/// Query UTXOs by address string (hex or bech32). Returns JSON response
+/// compatible with both `/api/get_utxos_by_address` and `/api/get_indexed_utxos`.
+async fn query_utxos_by_address(
+    utxo_set: &Arc<tokio::sync::RwLock<misaka_storage::utxo_set::UtxoSet>>,
+    address_str: &str,
+) -> serde_json::Value {
+    let addr_bytes: Option<[u8; 32]> = if address_str.len() == 64 {
+        hex::decode(address_str)
+            .ok()
+            .and_then(|b| <[u8; 32]>::try_from(b).ok())
+    } else if address_str.starts_with("misakatest1") || address_str.starts_with("misaka1") {
+        misaka_types::address::decode_address(address_str, 2).ok()
+    } else {
+        None
+    };
+
+    let addr = match addr_bytes {
+        Some(a) => a,
+        None => {
+            return serde_json::json!({
+                "address": address_str,
+                "utxos": [],
+                "balance": 0,
+                "utxoCount": 0,
+                "error": "invalid address format",
+            });
+        }
+    };
+
+    let guard = utxo_set.read().await;
+    let entries = guard.get_utxos_by_address(&addr);
+    let mut balance: u64 = 0;
+    let utxos: Vec<serde_json::Value> = entries
+        .iter()
+        .map(|e| {
+            balance = balance.saturating_add(e.output.amount);
+            serde_json::json!({
+                "txHash": hex::encode(e.outref.tx_hash),
+                "outputIndex": e.outref.output_index,
+                "amount": e.output.amount,
+                "address": hex::encode(e.output.address),
+                "createdAt": e.created_at,
+                "isEmission": e.is_emission,
+                "spendingPubkey": e.output.spending_pubkey.as_ref().map(|pk| hex::encode(pk)),
+            })
+        })
+        .collect();
+
+    serde_json::json!({
+        "address": address_str,
+        "utxos": utxos,
+        "balance": balance,
+        "utxoCount": utxos.len(),
+    })
 }
 
 // ════════════════════════════════════════════════════════════════
