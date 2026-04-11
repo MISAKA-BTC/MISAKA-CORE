@@ -25,20 +25,20 @@ set "DATA_DIR=%SCRIPT_DIR%misaka-data"
 
 REM --- Pre-flight checks -----------------------------------------
 if not exist "%BINARY%" (
-    echo [ERROR] misaka-node.exe が見つかりません:
+    echo [ERROR] misaka-node.exe not found:
     echo    %BINARY%
-    echo    アーカイブを正しく展開してから再度実行してください。
+    echo    Extract the release archive and try again.
     echo.
     pause
     exit /b 1
 )
 if not exist "%CONFIG%" (
-    echo [ERROR] 設定ファイルが見つかりません: config\public-node.toml
+    echo [ERROR] Config not found: config\public-node.toml
     pause
     exit /b 1
 )
 if not exist "%GENESIS%" (
-    echo [ERROR] genesis_committee.toml が見つかりません
+    echo [ERROR] genesis_committee.toml not found
     pause
     exit /b 1
 )
@@ -46,8 +46,7 @@ if not exist "%GENESIS%" (
 set /a VALIDATOR_SLOTS=0
 for /f %%a in ('find /c "[[committee.validators]]" ^< "%GENESIS%"') do set "VALIDATOR_SLOTS=%%a"
 if not "%VALIDATOR_SLOTS%"=="1" (
-    echo [ERROR] public observer package は single-operator genesis 専用です ^(validators=%VALIDATOR_SLOTS%^)
-    echo         multi-validator / committee genesis では operator / self-host validator 用の導線を使ってください。
+    echo [ERROR] This package is for single-operator genesis only ^(validators=%VALIDATOR_SLOTS%^)
     pause
     exit /b 1
 )
@@ -60,26 +59,23 @@ for /f "tokens=2 delims==" %%a in ('findstr /c:"public_key" "%GENESIS%"') do (
     )
 )
 if not defined GENESIS_VALIDATOR_PK (
-    echo [ERROR] genesis_committee.toml から validator public_key を取得できません
+    echo [ERROR] Could not read public_key from genesis_committee.toml
     pause
     exit /b 1
 )
 
 REM --- First-run setup -------------------------------------------
-REM v0.5.7: bundled-validator.key has been REMOVED. Each install now
-REM generates a fresh ephemeral validator.key on first run and runs in
-REM OBSERVER mode (key is not in the genesis committee).
 if not exist "%DATA_DIR%" mkdir "%DATA_DIR%"
 if not exist "%DATA_DIR%\validator.key" (
-    echo 初回起動: ephemeral observer key を生成します ^(validator.key^)
+    echo First run: generating ephemeral observer key ^(validator.key^)
 )
 REM Redirect to temp files so the 3906-char ML-DSA-65 pubkey hex line
-REM is captured reliably (cmd for /f inline has issues with very long output).
+REM is captured reliably (cmd for /f has issues with very long output).
 set "EMIT_OUT=%TEMP%\misaka_emit_pk_%RANDOM%.txt"
 set "EMIT_ERR=%TEMP%\misaka_emit_err_%RANDOM%.txt"
 "%BINARY%" --emit-validator-pubkey --data-dir "%DATA_DIR%" --chain-id 2 >"%EMIT_OUT%" 2>"%EMIT_ERR%"
 if errorlevel 1 (
-    echo [ERROR] misaka-node --emit-validator-pubkey が失敗しました
+    echo [ERROR] misaka-node --emit-validator-pubkey failed
     if exist "%EMIT_ERR%" type "%EMIT_ERR%"
     if exist "%EMIT_OUT%" type "%EMIT_OUT%"
     del "%EMIT_OUT%" 2>nul
@@ -90,13 +86,13 @@ if errorlevel 1 (
 set "LOCAL_VALIDATOR_PK="
 for /f "usebackq delims=" %%a in (`findstr /b /c:"0x" "%EMIT_OUT%" 2^>nul`) do set "LOCAL_VALIDATOR_PK=%%a"
 if not defined LOCAL_VALIDATOR_PK (
-    echo [ERROR] validator.key の公開鍵を取得できませんでした
-    echo         misaka-data\validator.key を確認し、必要なら削除して再生成してください。
+    echo [ERROR] Could not read validator public key
+    echo         Delete misaka-data\validator.key and try again.
     echo.
-    echo   misaka-node stdout:
+    echo   stdout:
     if exist "%EMIT_OUT%" type "%EMIT_OUT%"
     echo.
-    echo   misaka-node stderr:
+    echo   stderr:
     if exist "%EMIT_ERR%" type "%EMIT_ERR%"
     del "%EMIT_OUT%" 2>nul
     del "%EMIT_ERR%" 2>nul
@@ -106,18 +102,14 @@ if not defined LOCAL_VALIDATOR_PK (
 del "%EMIT_OUT%" 2>nul
 del "%EMIT_ERR%" 2>nul
 if /I "%LOCAL_VALIDATOR_PK%"=="%GENESIS_VALIDATOR_PK%" (
-    echo [ERROR] misaka-data\validator.key が genesis validator と一致しています
-    echo         public observer package は observer-only です。operator/shared validator key は使えません。
-    echo         misaka-data\validator.key を削除して再起動し、ephemeral observer key を再生成してください。
+    echo [ERROR] validator.key matches genesis validator.
+    echo         This package is observer-only. Delete misaka-data\validator.key and restart.
     pause
     exit /b 1
 )
 
-REM --- Read seeds + pubkeys (both required or both skipped) ------
-REM Narwhal relay は ML-DSA-65 PK-pinning 必須。stock public-node package
-REM では seeds.txt と seed-pubkeys.txt は 1:1 で揃っている前提です。
-REM mismatch を warning で握りつぶすと joined のつもりで solo 起動して
-REM しまうので、ここでは fail-closed にします。
+REM --- Read seeds + pubkeys --------------------------------------
+REM Both files are required and must have the same number of entries.
 set "SEEDS="
 set /a SEEDS_COUNT=0
 if exist "%SEEDS_FILE%" (
@@ -153,29 +145,25 @@ if exist "%SEED_PUBKEYS_FILE%" (
 set "USE_SEEDS=0"
 if !SEEDS_COUNT! EQU 0 (
     if !PUBKEYS_COUNT! EQU 0 (
-        echo [ERROR] seeds.txt と seed-pubkeys.txt が空です。
-        echo [ERROR] public observer package は official/public seed への join 専用です。solo self-host mode には入りません。
-        echo         stock package の config を復元して再試行してください。
+        echo [ERROR] seeds.txt and seed-pubkeys.txt are empty.
+        echo         This package requires seeds to join the network.
+        pause
         exit /b 1
     ) else (
-        echo [ERROR] seeds.txt ^(0 entries^) と seed-pubkeys.txt ^(!PUBKEYS_COUNT! entries^) が揃いません。
-        echo [ERROR] stock package の current truth が壊れているため、solo fallback せず停止します。
+        echo [ERROR] seeds.txt ^(0^) and seed-pubkeys.txt ^(!PUBKEYS_COUNT!^) count mismatch.
+        pause
         exit /b 1
     )
 ) else (
     if !SEEDS_COUNT! EQU !PUBKEYS_COUNT! (
         set "USE_SEEDS=1"
     ) else (
-        echo [ERROR] seeds.txt ^(!SEEDS_COUNT! entries^) と seed-pubkeys.txt ^(!PUBKEYS_COUNT! entries^) が揃いません。
-        echo [ERROR] stock package の current truth が壊れているため、solo fallback せず停止します。
-        echo         config\seeds.txt と config\seed-pubkeys.txt を同じ件数に揃えて再試行してください。
+        echo [ERROR] seeds.txt ^(!SEEDS_COUNT!^) and seed-pubkeys.txt ^(!PUBKEYS_COUNT!^) count mismatch.
+        pause
         exit /b 1
     )
 )
 
-REM v0.5.11 audit Mid #9: parse the real Narwhal relay address from the
-REM first network_address line in genesis_committee.toml. The legacy
-REM "p2p.port = 6691" in public-node.toml never matched reality.
 set "RELAY_ADDR="
 for /f "tokens=2 delims==" %%a in ('findstr /c:"network_address" "%GENESIS%"') do (
     if not defined RELAY_ADDR (
@@ -184,9 +172,9 @@ for /f "tokens=2 delims==" %%a in ('findstr /c:"network_address" "%GENESIS%"') d
         set "RELAY_ADDR=!RELAY_ADDR: =!"
     )
 )
-if not defined RELAY_ADDR set "RELAY_ADDR=(could not parse genesis network_address)"
+if not defined RELAY_ADDR set "RELAY_ADDR=(unknown)"
 
-echo 起動パラメータ
+echo Startup parameters
 echo   Config : %CONFIG%
 echo   Genesis: %GENESIS%
 if "!USE_SEEDS!"=="1" (
@@ -196,11 +184,12 @@ echo   Data   : %DATA_DIR%
 echo   RPC    : http://localhost:3001
 echo   Relay  : !RELAY_ADDR! ^(from genesis^)
 echo.
-echo ^> ノードを起動します...
-echo   ^(停止するには Ctrl+C または このウインドウを閉じる^)
+echo Starting node...
+echo   ^(Press Ctrl+C or close this window to stop^)
 echo.
 
 set MISAKA_RPC_AUTH_MODE=open
+set RUST_BACKTRACE=1
 
 if "!USE_SEEDS!"=="1" (
     "%BINARY%" --config "%CONFIG%" --data-dir "%DATA_DIR%" --genesis-path "%GENESIS%" --seeds "!SEEDS!" --seed-pubkeys "!SEED_PUBKEYS!" --chain-id 2
@@ -208,7 +197,14 @@ if "!USE_SEEDS!"=="1" (
     "%BINARY%" --config "%CONFIG%" --data-dir "%DATA_DIR%" --genesis-path "%GENESIS%" --chain-id 2
 )
 
+set "EXIT_CODE=!ERRORLEVEL!"
 echo.
-echo --- 終了しました ---
+if not "!EXIT_CODE!"=="0" (
+    echo [ERROR] Node exited with code !EXIT_CODE!
+    echo         Check the output above for error details.
+) else (
+    echo Node stopped normally.
+)
+echo.
 endlocal
 pause
