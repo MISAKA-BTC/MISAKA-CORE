@@ -68,10 +68,8 @@ if [ ! -f "$GENESIS" ]; then
     exit 1
 fi
 VALIDATOR_SLOTS="$(grep -c '^\[\[committee\.validators\]\]' "$GENESIS" 2>/dev/null || printf '0')"
-if [ "$VALIDATOR_SLOTS" -ne 1 ]; then
-    printf "${RED}✗ public observer package は single-operator genesis 専用です (validators=%s)${RESET}\n" \
-        "$VALIDATOR_SLOTS"
-    printf "${DIM}  multi-validator / committee genesis ではこの package を使わず、operator か self-host validator 用の導線を使ってください。${RESET}\n"
+if [ "$VALIDATOR_SLOTS" -eq 0 ]; then
+    printf "${RED}✗ genesis_committee.toml にバリデータが定義されていません${RESET}\n"
     exit 1
 fi
 GENESIS_VALIDATOR_PK="$(awk -F'"' '/^[[:space:]]*public_key[[:space:]]*=/{print $2; exit}' "$GENESIS" 2>/dev/null || echo "")"

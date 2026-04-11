@@ -1426,7 +1426,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-addressmanager"
-version = "0.7.0"
+version = "0.7.4"
 dependencies = [
  "misaka-database",
  "parking_lot",
@@ -1459,7 +1459,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-cli"
-version = "0.7.0"
+version = "0.7.4"
 dependencies = [
  "anyhow",
  "base64",
@@ -1481,7 +1481,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-config"
-version = "0.7.0"
+version = "0.7.4"
 dependencies = [
  "misaka-types",
  "serde",
@@ -1493,7 +1493,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-connectionmanager"
-version = "0.7.0"
+version = "0.7.4"
 dependencies = [
  "misaka-addressmanager",
  "parking_lot",
@@ -1503,7 +1503,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-consensus"
-version = "0.7.0"
+version = "0.7.4"
 dependencies = [
  "bincode",
  "hex",
@@ -1526,7 +1526,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-consensusmanager"
-version = "0.7.0"
+version = "0.7.4"
 dependencies = [
  "misaka-consensus",
  "misaka-database",
@@ -1536,7 +1536,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-crypto"
-version = "0.7.0"
+version = "0.7.4"
 dependencies = [
  "argon2",
  "blake3",
@@ -1558,7 +1558,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-dag"
-version = "0.7.0"
+version = "0.7.4"
 dependencies = [
  "blake3",
  "borsh",
@@ -1589,7 +1589,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-database"
-version = "0.7.0"
+version = "0.7.4"
 dependencies = [
  "bincode",
  "hex",
@@ -1606,7 +1606,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-execution"
-version = "0.7.0"
+version = "0.7.4"
 dependencies = [
  "misaka-consensus",
  "misaka-crypto",
@@ -1623,7 +1623,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-governance"
-version = "0.7.0"
+version = "0.7.4"
 dependencies = [
  "hex",
  "misaka-crypto",
@@ -1637,7 +1637,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-indexes"
-version = "0.7.0"
+version = "0.7.4"
 dependencies = [
  "hex",
  "parking_lot",
@@ -1648,7 +1648,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-math"
-version = "0.7.0"
+version = "0.7.4"
 dependencies = [
  "hex",
  "serde",
@@ -1656,7 +1656,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-mempool"
-version = "0.7.0"
+version = "0.7.4"
 dependencies = [
  "borsh",
  "hex",
@@ -1672,7 +1672,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-mev"
-version = "0.7.0"
+version = "0.7.4"
 dependencies = [
  "misaka-crypto",
  "misaka-types",
@@ -1684,7 +1684,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-mining"
-version = "0.7.0"
+version = "0.7.4"
 dependencies = [
  "blake3",
  "hex",
@@ -1700,7 +1700,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-muhash"
-version = "0.7.0"
+version = "0.7.4"
 dependencies = [
  "serde",
  "sha3",
@@ -1708,7 +1708,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-node"
-version = "0.7.0"
+version = "0.7.4"
 dependencies = [
  "anyhow",
  "axum",
@@ -1753,7 +1753,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-notify"
-version = "0.7.0"
+version = "0.7.4"
 dependencies = [
  "hex",
  "misaka-database",
@@ -1767,7 +1767,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-p2p"
-version = "0.7.0"
+version = "0.7.4"
 dependencies = [
  "async-trait",
  "bitflags",
@@ -1794,7 +1794,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-pqc"
-version = "0.7.0"
+version = "0.7.4"
 dependencies = [
  "blake3",
  "hex",
@@ -1817,14 +1817,14 @@ dependencies = [
 
 [[package]]
 name = "misaka-protocol-config"
-version = "0.7.0"
+version = "0.7.4"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "misaka-rpc"
-version = "0.7.0"
+version = "0.7.4"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1844,7 +1844,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-rpc-core"
-version = "0.7.0"
+version = "0.7.4"
 dependencies = [
  "borsh",
  "misaka-types",
@@ -1855,7 +1855,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-security"
-version = "0.7.0"
+version = "0.7.4"
 dependencies = [
  "hex",
  "parking_lot",
@@ -1869,7 +1869,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-simulator"
-version = "0.7.0"
+version = "0.7.4"
 dependencies = [
  "misaka-dag",
  "misaka-pqc",
@@ -1883,7 +1883,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-storage"
-version = "0.7.0"
+version = "0.7.4"
 dependencies = [
  "bincode",
  "blake3",
@@ -1910,7 +1910,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-test-cluster"
-version = "0.7.0"
+version = "0.7.4"
 dependencies = [
  "misaka-dag",
  "misaka-protocol-config",
@@ -1924,7 +1924,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-tokenomics"
-version = "0.7.0"
+version = "0.7.4"
 dependencies = [
  "misaka-crypto",
  "misaka-types",
@@ -1937,7 +1937,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-txscript"
-version = "0.7.0"
+version = "0.7.4"
 dependencies = [
  "blake3",
  "hex",
@@ -1952,7 +1952,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-types"
-version = "0.7.0"
+version = "0.7.4"
 dependencies = [
  "borsh",
  "hex",
@@ -1965,7 +1965,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-utils"
-version = "0.7.0"
+version = "0.7.4"
 dependencies = [
  "async-trait",
  "blake3",
@@ -1984,7 +1984,7 @@ dependencies = [
 
 [[package]]
 name = "misaka-wallet-core"
-version = "0.7.0"
+version = "0.7.4"
 dependencies = [
  "anyhow",
  "argon2",

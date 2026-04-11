@@ -90,6 +90,7 @@ pub enum InboundNarwhalRelayEvent {
         authority_index: u32,
         peer_id: misaka_p2p::PeerId,
         address: SocketAddr,
+        public_key: Option<Vec<u8>>,
     },
     PeerDisconnected {
         authority_index: u32,
@@ -613,6 +614,7 @@ async fn connect_outbound_peer(
                                 authority_index: peer.authority_index,
                                 peer_id,
                                 address: peer.address,
+                                public_key: None,
                             })
                             .await;
                         run_peer_session(
@@ -867,6 +869,7 @@ pub fn spawn_narwhal_block_relay_transport(
                                         authority_index: peer.authority_index,
                                         peer_id,
                                         address,
+                                        public_key: None,
                                     })
                                     .await;
                                 (peer, RegistryHandle::Validator)
@@ -890,6 +893,7 @@ pub fn spawn_narwhal_block_relay_transport(
                                         authority_index: OBSERVER_SENTINEL_AUTHORITY,
                                         peer_id,
                                         address,
+                                        public_key: Some(hs.peer_pk.to_bytes().to_vec()),
                                     })
                                     .await;
                                 (synthetic_peer, RegistryHandle::Observer(observer_id))
