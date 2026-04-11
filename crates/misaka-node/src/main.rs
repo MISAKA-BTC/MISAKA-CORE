@@ -1419,6 +1419,7 @@ async fn start_narwhal_node(cli: Cli, p2p_config: P2pConfig) -> anyhow::Result<(
     let block_cache: Arc<RwLock<BTreeMap<BlockRef, NarwhalBlock>>> =
         Arc::new(RwLock::new(BTreeMap::new()));
     let connected_peers: Arc<RwLock<BTreeSet<u32>>> = Arc::new(RwLock::new(BTreeSet::new()));
+    let observer_count: Arc<std::sync::atomic::AtomicU32> = Arc::new(std::sync::atomic::AtomicU32::new(0));
     // SEC-FIX v0.5.7: opt-in observer acceptance.
     //
     // Validators set `MISAKA_ACCEPT_OBSERVERS=1` (typically only on the
@@ -1773,6 +1774,8 @@ async fn start_narwhal_node(cli: Cli, p2p_config: P2pConfig) -> anyhow::Result<(
                 crate::config::NodeMode::Seed => "seed",
             };
             let is_observer_for_rpc = is_observer;
+            let observer_count_rpc = observer_count.clone();
+            let committee_size_rpc = manifest_validator_count;
             let block_height = block_height_rpc.clone();
             move || {
                 let msg_tx = msg_tx.clone();
@@ -1785,7 +1788,12 @@ async fn start_narwhal_node(cli: Cli, p2p_config: P2pConfig) -> anyhow::Result<(
                     let status = tokio::time::timeout(RPC_TIMEOUT, reply_rx).await.ok().and_then(|r| r.ok());
                     let peers_snapshot: Vec<u32> =
                         connected_peers.read().await.iter().copied().collect();
-                    let peer_count = peers_snapshot.len();
+                    let observers = observer_count_rpc.load(std::sync::atomic::Ordering::Relaxed);
+                    let validator_peers: Vec<u32> = peers_snapshot.iter()
+                        .copied()
+                        .filter(|&a| a != crate::narwhal_block_relay_transport::OBSERVER_SENTINEL_AUTHORITY)
+                        .collect();
+                    let peer_count = validator_peers.len() + observers as usize;
                     let topology = if peer_count == 0 { "solo" } else { "joined" };
                     let role = if is_observer_for_rpc { "observer" } else { "validator" };
                     let height = block_height.load(std::sync::atomic::Ordering::Relaxed);
@@ -1807,6 +1815,8 @@ async fn start_narwhal_node(cli: Cli, p2p_config: P2pConfig) -> anyhow::Result<(
                         "nodeMode": node_mode_str,
                         "role": role,
                         "peerCount": peer_count,
+                        "validatorCount": committee_size_rpc,
+                        "observerCount": observers,
                         "peers": peers_snapshot,
                         "metrics": {
                             "blocksProposed": misaka_dag::narwhal_dag::metrics::ConsensusMetrics::get(
@@ -1837,13 +1847,17 @@ async fn start_narwhal_node(cli: Cli, p2p_config: P2pConfig) -> anyhow::Result<(
         // ── Testnet: Network peers ──
         .route("/api/get_peers", axum::routing::get({
             let connected_peers = connected_peers.clone();
+            let observer_count_peers = observer_count.clone();
             move || {
                 let connected_peers = connected_peers.clone();
+                let observer_count_peers = observer_count_peers.clone();
                 async move {
                     let peers: Vec<u32> = connected_peers.read().await.iter().copied().collect();
+                    let observers = observer_count_peers.load(std::sync::atomic::Ordering::Relaxed);
                     axum::Json(serde_json::json!({
                         "peers": peers,
                         "count": peers.len(),
+                        "observerCount": observers,
                     }))
                 }
             }
@@ -2196,6 +2210,7 @@ async fn start_narwhal_node(cli: Cli, p2p_config: P2pConfig) -> anyhow::Result<(
     let relay_out_tx_for_ingress = relay_out_tx.clone();
     let relay_cache_for_ingress = block_cache.clone();
     let connected_peers_for_ingress = connected_peers.clone();
+    let observer_count_for_ingress = observer_count.clone();
     let relay_ingress_handle = tokio::spawn(async move {
         while let Some(event) = relay_in_rx.recv().await {
             match event {
@@ -2208,6 +2223,9 @@ async fn start_narwhal_node(cli: Cli, p2p_config: P2pConfig) -> anyhow::Result<(
                         .write()
                         .await
                         .insert(authority_index);
+                    if authority_index == crate::narwhal_block_relay_transport::OBSERVER_SENTINEL_AUTHORITY {
+                        observer_count_for_ingress.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
                     info!(
                         "narwhal_peer_connected authority={} peer_id={} addr={}",
                         authority_index,
@@ -2220,10 +2238,24 @@ async fn start_narwhal_node(cli: Cli, p2p_config: P2pConfig) -> anyhow::Result<(
                     peer_id,
                     address,
                 } => {
-                    connected_peers_for_ingress
-                        .write()
-                        .await
-                        .remove(&authority_index);
+                    if authority_index == crate::narwhal_block_relay_transport::OBSERVER_SENTINEL_AUTHORITY {
+                        let prev = observer_count_for_ingress.load(std::sync::atomic::Ordering::Relaxed);
+                        if prev > 0 {
+                            observer_count_for_ingress.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        let remaining = observer_count_for_ingress.load(std::sync::atomic::Ordering::Relaxed);
+                        if remaining == 0 {
+                            connected_peers_for_ingress
+                                .write()
+                                .await
+                                .remove(&authority_index);
+                        }
+                    } else {
+                        connected_peers_for_ingress
+                            .write()
+                            .await
+                            .remove(&authority_index);
+                    }
                     info!(
                         "narwhal_peer_disconnected authority={} peer_id={} addr={}",
                         authority_index,
