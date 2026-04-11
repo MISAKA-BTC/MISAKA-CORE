@@ -83,17 +83,17 @@ async fn get_tx(
         ));
     }
 
-    state
+    match state
         .proxy
-        .post("/api/get_tx_by_hash", &serde_json::json!({ "hash": hash }))
+        .post("/api/get_tx_status", &serde_json::json!({ "txHash": hash }))
         .await
-        .map(Json)
-        .map_err(|e| {
-            (
-                StatusCode::BAD_GATEWAY,
-                Json(crate::proxy::public_upstream_error(&e)),
-            )
-        })
+    {
+        Ok(data) => Ok(Json(data)),
+        Err(e) => Err((
+            StatusCode::BAD_GATEWAY,
+            Json(crate::proxy::public_upstream_error(&e)),
+        )),
+    }
 }
 
 // SEC-FIX: faucet() handler removed — all faucet traffic goes through
