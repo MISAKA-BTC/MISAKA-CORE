@@ -137,10 +137,12 @@ async function fetchJSON(url) {
 async function loadStats() {
   const d = await fetchJSON(API + '/api/v1/explorer/stats');
   if (!d) return;
-  document.getElementById('statHeight').textContent = d.latestBlockHeight ?? '—';
-  document.getElementById('statTxs').textContent = d.totalTransactions ?? '—';
-  document.getElementById('statVals').textContent = d.activeValidators ?? '—';
-  document.getElementById('statHealth').textContent = d.chainHealth ?? '—';
+  const s = d.status || {};
+  document.getElementById('statHeight').textContent = s.highest_accepted_round ?? s.current_round ?? '—';
+  document.getElementById('statTxs').textContent = s.num_commits ?? d.metrics?.commitsTotal ?? '—';
+  document.getElementById('statVals').textContent = (d.peerCount != null ? d.peerCount + 1 : '—');
+  const health = s.num_suspended === 0 ? 'Healthy' : s.num_suspended + ' suspended';
+  document.getElementById('statHealth').textContent = d.status ? health : '—';
 }
 
 function esc(s) {
@@ -150,34 +152,36 @@ function esc(s) {
 
 async function loadBlocks() {
   const d = await fetchJSON(API + '/api/v1/explorer/blocks?limit=15');
-  if (!d || !d.data) return;
+  if (!d) return;
+  const blocks = d.blocks || d.data || [];
+  if (blocks.length === 0) return;
   const tbody = document.getElementById('blocksBody');
   tbody.textContent = '';
-  for (const b of d.data) {
+  for (const b of blocks) {
+    const height = b.height ?? b.round ?? '—';
     const tr = document.createElement('tr');
     const tdH = document.createElement('td');
-    const a = document.createElement('a'); a.href = '#'; a.textContent = b.height;
-    a.addEventListener('click', (e) => { e.preventDefault(); showBlock(b.height); });
+    const a = document.createElement('a'); a.href = '#'; a.textContent = height;
+    a.addEventListener('click', (e) => { e.preventDefault(); showBlock(height); });
     tdH.appendChild(a); tr.appendChild(tdH);
     const tdHash = document.createElement('td'); tdHash.className = 'mono';
-    const sp = document.createElement('span'); sp.className = 'hash'; sp.textContent = short(b.hash);
+    const sp = document.createElement('span'); sp.className = 'hash'; sp.textContent = b.hash ? short(b.hash) : '—';
     tdHash.appendChild(sp); tr.appendChild(tdHash);
-    const tdTx = document.createElement('td'); tdTx.textContent = b.txCount; tr.appendChild(tdTx);
-    const tdTime = document.createElement('td'); tdTime.textContent = timeAgo(b.timestamp); tr.appendChild(tdTime);
-    const tdProp = document.createElement('td'); tdProp.textContent = b.proposer || '—'; tr.appendChild(tdProp);
+    const tdTx = document.createElement('td'); tdTx.textContent = b.txCount ?? b.tx_count ?? 0; tr.appendChild(tdTx);
+    const tdTime = document.createElement('td'); tdTime.textContent = b.timestamp ? timeAgo(b.timestamp) : '—'; tr.appendChild(tdTime);
+    const tdProp = document.createElement('td'); tdProp.textContent = b.proposer ?? ('Validator ' + (b.author ?? 0)); tr.appendChild(tdProp);
     tbody.appendChild(tr);
   }
 }
 
 async function loadTxs() {
-  const d = await fetchJSON(API + '/v1/chain/info');
-  // Use the existing latest txs endpoint
   const txd = await fetchJSON(API + '/api/v1/explorer/blocks?limit=5');
-  if (!txd || !txd.data) return;
+  if (!txd) return;
+  const blocks = txd.blocks || txd.data || [];
   const txs = [];
-  for (const b of txd.data) {
+  for (const b of blocks) {
     for (const t of (b.transactions || [])) {
-      txs.push({...t, blockHeight: b.height});
+      txs.push({...t, blockHeight: b.height ?? b.round});
     }
   }
   const tbody = document.getElementById('txsBody');
