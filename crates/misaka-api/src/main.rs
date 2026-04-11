@@ -66,6 +66,20 @@ pub struct AppState {
 
 fn build_api_cors_layer(cors_origins: Option<&str>) -> Result<CorsLayer> {
     match cors_origins {
+        Some(origins) if origins.trim() == "*" => {
+            info!("  CORS: any origin (wildcard)");
+            Ok(CorsLayer::new()
+                .allow_origin(tower_http::cors::AllowOrigin::any())
+                .allow_methods([
+                    axum::http::Method::GET,
+                    axum::http::Method::POST,
+                    axum::http::Method::OPTIONS,
+                ])
+                .allow_headers([
+                    axum::http::header::CONTENT_TYPE,
+                    axum::http::header::AUTHORIZATION,
+                ]))
+        }
         Some(origins) if !origins.trim().is_empty() => {
             let allowed: Vec<axum::http::HeaderValue> = origins
                 .split(',')
