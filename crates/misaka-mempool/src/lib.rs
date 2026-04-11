@@ -316,6 +316,8 @@ impl UtxoMempool {
         tx: UtxoTransaction,
         now_ms: u64,
     ) -> Result<[u8; 32], MempoolError> {
+        cheap_size_gate(&tx)?;
+
         let tx_hash = tx.tx_hash();
         if self.entries.contains_key(&tx_hash) {
             return Err(MempoolError::Duplicate(tx_hash));

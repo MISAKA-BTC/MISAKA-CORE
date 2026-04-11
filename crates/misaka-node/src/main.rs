@@ -1697,9 +1697,10 @@ async fn start_narwhal_node(cli: Cli, p2p_config: P2pConfig) -> anyhow::Result<(
                 crate::rpc_auth::require_api_key,
             )),
         )
-        // ── Testnet: Faucet endpoint ──
+        // ── Testnet: Faucet endpoint (inside auth layer) ──
         .route("/api/faucet", axum::routing::post({
             let narwhal_mempool = narwhal_mempool.clone();
+            let faucet_chain_id = cli.chain_id;
             move |body: axum::Json<serde_json::Value>| {
                 let narwhal_mempool = narwhal_mempool.clone();
                 async move {
@@ -1709,7 +1710,7 @@ async fn start_narwhal_node(cli: Cli, p2p_config: P2pConfig) -> anyhow::Result<(
                     let addr_bytes: Option<[u8; 32]> = if address_str.len() == 64 {
                         hex::decode(address_str).ok().and_then(|b| <[u8; 32]>::try_from(b).ok())
                     } else if address_str.starts_with("misakatest1") || address_str.starts_with("misaka1") {
-                        misaka_types::address::decode_address(address_str, 2).ok()
+                        misaka_types::address::decode_address(address_str, faucet_chain_id).ok()
                     } else {
                         None
                     };
@@ -1726,10 +1727,12 @@ async fn start_narwhal_node(cli: Cli, p2p_config: P2pConfig) -> anyhow::Result<(
 
                     let spending_pubkey = spending_pk_hex.and_then(|h| hex::decode(h).ok());
 
+                    const MAX_FAUCET_DRIP: u64 = 1_000_000_000_000;
                     let faucet_amount: u64 = std::env::var("MISAKA_FAUCET_AMOUNT")
                         .ok()
                         .and_then(|s| s.parse().ok())
-                        .unwrap_or(1_000_000_000);
+                        .unwrap_or(1_000_000_000)
+                        .min(MAX_FAUCET_DRIP);
 
                     axum::Json(narwhal_mempool.submit_faucet_tx(
                         addr,
@@ -1738,17 +1741,21 @@ async fn start_narwhal_node(cli: Cli, p2p_config: P2pConfig) -> anyhow::Result<(
                     ).await)
                 }
             }
-        }))
+        }).route_layer(axum::middleware::from_fn_with_state(
+            auth_state.clone(),
+            crate::rpc_auth::require_api_key,
+        )))
         // ── Testnet: Balance query ──
         .route("/api/get_balance", axum::routing::post({
             let utxo_set = utxo_set_rpc.clone();
+            let balance_chain_id = cli.chain_id;
             move |body: axum::body::Bytes| {
                 let utxo_set = utxo_set.clone();
                 async move {
                     let req: serde_json::Value = serde_json::from_slice(&body)
                         .unwrap_or(serde_json::json!({}));
                     let address = req["address"].as_str().unwrap_or("");
-                    axum::Json(query_utxos_by_address(&utxo_set, address).await)
+                    axum::Json(query_utxos_by_address(&utxo_set, address, balance_chain_id).await)
                 }
             }
         }))
@@ -2007,21 +2014,23 @@ async fn start_narwhal_node(cli: Cli, p2p_config: P2pConfig) -> anyhow::Result<(
         // ── UTXO query endpoints ──
         .route("/api/get_indexed_utxos", axum::routing::post({
             let utxo_set = utxo_set_rpc.clone();
+            let idx_chain_id = cli.chain_id;
             move |body: axum::Json<serde_json::Value>| {
                 let utxo_set = utxo_set.clone();
                 async move {
                     let address_str = body.get("address").and_then(|v| v.as_str()).unwrap_or("");
-                    axum::Json(query_utxos_by_address(&utxo_set, address_str).await)
+                    axum::Json(query_utxos_by_address(&utxo_set, address_str, idx_chain_id).await)
                 }
             }
         }))
         .route("/api/get_utxos_by_address", axum::routing::post({
             let utxo_set = utxo_set_rpc.clone();
+            let utxo_chain_id = cli.chain_id;
             move |body: axum::Json<serde_json::Value>| {
                 let utxo_set = utxo_set.clone();
                 async move {
                     let address_str = body.get("address").and_then(|v| v.as_str()).unwrap_or("");
-                    axum::Json(query_utxos_by_address(&utxo_set, address_str).await)
+                    axum::Json(query_utxos_by_address(&utxo_set, address_str, utxo_chain_id).await)
                 }
             }
         }))
@@ -2609,11 +2618,17 @@ async fn start_narwhal_node(cli: Cli, p2p_config: P2pConfig) -> anyhow::Result<(
                             });
                         }
                     }
-                    // Cap at 10k entries
+                    // Evict oldest entries (lowest height) to cap at 10k
                     if tx_map.len() > 10_000 {
                         let excess = tx_map.len() - 10_000;
-                        let keys_to_remove: Vec<[u8; 32]> = tx_map.keys().take(excess).copied().collect();
-                        for k in keys_to_remove { tx_map.remove(&k); }
+                        let mut entries: Vec<([u8; 32], u64)> = tx_map
+                            .iter()
+                            .map(|(k, v)| (*k, v.height))
+                            .collect();
+                        entries.sort_unstable_by_key(|&(_, h)| h);
+                        for (k, _) in entries.into_iter().take(excess) {
+                            tx_map.remove(&k);
+                        }
                     }
                 }
 
@@ -2670,13 +2685,14 @@ async fn start_narwhal_node(cli: Cli, p2p_config: P2pConfig) -> anyhow::Result<(
 async fn query_utxos_by_address(
     utxo_set: &Arc<tokio::sync::RwLock<misaka_storage::utxo_set::UtxoSet>>,
     address_str: &str,
+    chain_id: u32,
 ) -> serde_json::Value {
     let addr_bytes: Option<[u8; 32]> = if address_str.len() == 64 {
         hex::decode(address_str)
             .ok()
             .and_then(|b| <[u8; 32]>::try_from(b).ok())
     } else if address_str.starts_with("misakatest1") || address_str.starts_with("misaka1") {
-        misaka_types::address::decode_address(address_str, 2).ok()
+        misaka_types::address::decode_address(address_str, chain_id).ok()
     } else {
         None
     };
@@ -2708,7 +2724,7 @@ async fn query_utxos_by_address(
                 "address": hex::encode(e.output.address),
                 "createdAt": e.created_at,
                 "isEmission": e.is_emission,
-                "spendingPubkey": e.output.spending_pubkey.as_ref().map(|pk| hex::encode(pk)),
+                "hasSpendingKey": e.output.spending_pubkey.is_some(),
             })
         })
         .collect();
