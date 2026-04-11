@@ -117,9 +117,14 @@ impl UniversalCommitter {
                 if round == anchor_round {
                     // This is the anchor itself — direct commit
                     if let Some(sub_dag) = self.commit_leader(&leader_ref, true, dag_state) {
-                        self.last_decided_round = round;
                         committed.push(sub_dag);
+                    } else {
+                        tracing::warn!(
+                            leader = ?leader_ref, round,
+                            "anchor sub-DAG collection failed — skipping to avoid stall"
+                        );
                     }
+                    self.last_decided_round = round;
                 } else {
                     // Try direct first
                     let decision = self
@@ -129,9 +134,14 @@ impl UniversalCommitter {
                         Decision::Direct(_) => {
                             if let Some(sub_dag) = self.commit_leader(&leader_ref, true, dag_state)
                             {
-                                self.last_decided_round = round;
                                 committed.push(sub_dag);
+                            } else {
+                                tracing::warn!(
+                                    leader = ?leader_ref, round,
+                                    "direct leader sub-DAG collection failed — skipping"
+                                );
                             }
+                            self.last_decided_round = round;
                         }
                         _ => {
                             // Try indirect via anchor
@@ -145,12 +155,16 @@ impl UniversalCommitter {
                                     if let Some(sub_dag) =
                                         self.commit_leader(&leader_ref, false, dag_state)
                                     {
-                                        self.last_decided_round = round;
                                         committed.push(sub_dag);
+                                    } else {
+                                        tracing::warn!(
+                                            leader = ?leader_ref, round,
+                                            "indirect leader sub-DAG collection failed — skipping"
+                                        );
                                     }
+                                    self.last_decided_round = round;
                                 }
                                 Decision::Skip => {
-                                    // Leader skipped
                                     self.last_decided_round = round;
                                 }
                                 _ => {
@@ -227,6 +241,7 @@ impl UniversalCommitter {
     /// preventing incomplete sub-DAG commits that could skip dependencies.
     fn collect_sub_dag(&self, leader: &BlockRef, dag_state: &DagState) -> Option<Vec<BlockRef>> {
         const MAX_SUB_DAG_BLOCKS: usize = 10_000;
+        let eviction_round = dag_state.eviction_round();
 
         let mut sub_dag = Vec::new();
         let mut frontier = vec![*leader];
@@ -237,6 +252,12 @@ impl UniversalCommitter {
                 continue;
             }
             if dag_state.is_committed(&current) && current != *leader {
+                continue;
+            }
+            // Blocks below the eviction round have been GC'd (data + committed
+            // status pruned).  Treat them as already-committed so that the
+            // sub-DAG traversal does not stall on ancient, unreachable blocks.
+            if current.round < eviction_round && current != *leader {
                 continue;
             }
             if sub_dag.len() >= MAX_SUB_DAG_BLOCKS {
@@ -250,8 +271,6 @@ impl UniversalCommitter {
 
             sub_dag.push(current);
 
-            // R4-H2 FIX: If block data is missing, abort the commit to prevent
-            // an incomplete sub-DAG (missing causal dependencies).
             match dag_state.get_block(&current) {
                 Some(block) => {
                     for ancestor in block.ancestors() {
@@ -261,9 +280,12 @@ impl UniversalCommitter {
                     }
                 }
                 None => {
+                    // Block data is missing but above eviction round — genuine
+                    // data loss, not GC.  Abort to preserve causal safety.
                     tracing::warn!(
                         block = ?current,
                         leader = ?leader,
+                        eviction_round,
                         "sub-DAG block data unavailable — aborting commit to preserve causal closure"
                     );
                     return None;
