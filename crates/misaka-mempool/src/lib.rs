@@ -322,11 +322,16 @@ impl UtxoMempool {
         }
     }
 
+    /// R7 M-9: Sort by fee_rate (fee per byte), consistent with eviction policy.
     pub fn top_by_fee(&self, n: usize) -> Vec<&UtxoTransaction> {
         let mut txs: Vec<&MempoolEntry> = self.entries.values().collect();
-        txs.sort_by(|a, b| b.tx.fee.cmp(&a.tx.fee));
+        txs.sort_by(|a, b| fee_rate(&b.tx).cmp(&fee_rate(&a.tx)));
         txs.truncate(n);
         txs.into_iter().map(|e| &e.tx).collect()
+    }
+
+    pub fn contains_tx(&self, tx_hash: &[u8; 32]) -> bool {
+        self.entries.contains_key(tx_hash)
     }
 
     pub fn len(&self) -> usize {

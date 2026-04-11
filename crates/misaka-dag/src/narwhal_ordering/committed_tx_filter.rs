@@ -234,6 +234,14 @@ impl CommittedTxFilter {
 
         let read_hashset = |pos: &mut usize, data: &[u8]| -> Option<HashSet<[u8; 32]>> {
             let count = read_u64(pos, data)? as usize;
+            const MAX_FILTER_ENTRIES: usize = 10_000_000;
+            if count > MAX_FILTER_ENTRIES {
+                return None;
+            }
+            let remaining_hashes = (data.len() - *pos) / 32;
+            if count > remaining_hashes {
+                return None;
+            }
             let mut set = HashSet::with_capacity(count);
             for _ in 0..count {
                 if *pos + 32 > data.len() {

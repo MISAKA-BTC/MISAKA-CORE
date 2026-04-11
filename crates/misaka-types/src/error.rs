@@ -66,6 +66,9 @@ pub enum MisakaError {
     #[error("action args too large: {size} bytes > {max}")]
     ActionArgsTooLarge { size: usize, max: usize },
 
+    #[error("too many args per action: {count} > {max}")]
+    TooManyArgsPerAction { count: usize, max: usize },
+
     #[error("gas price too low: {price} < {min}")]
     GasPriceTooLow { price: u64, min: u64 },
 

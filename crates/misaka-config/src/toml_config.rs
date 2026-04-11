@@ -24,7 +24,10 @@ pub struct TomlConfig {
     pub rpc: RpcSection,
     pub consensus: ConsensusSection,
     pub weak_subjectivity: WeakSubjectivitySection,
-    /// Catch-all for unrecognised top-level sections (faucet, staking, bridge, etc.).
+    pub faucet: FaucetSection,
+    pub staking: StakingSection,
+    pub security: SecuritySection,
+    /// Catch-all for unrecognised top-level sections (bridge, ring_signature, etc.).
     #[serde(flatten)]
     pub _extra: std::collections::HashMap<String, toml::Value>,
 }
@@ -78,6 +81,7 @@ pub struct RpcSection {
 pub struct ConsensusSection {
     pub fast_block_time_secs: Option<u64>,
     pub zkp_block_time_secs: Option<u64>,
+    pub retention_rounds: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -85,6 +89,29 @@ pub struct ConsensusSection {
 pub struct WeakSubjectivitySection {
     pub checkpoint: Option<String>,
     pub ws_period_epochs: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(default)]
+pub struct FaucetSection {
+    pub enabled: Option<bool>,
+    pub amount: Option<u64>,
+    pub cooldown_secs: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(default)]
+pub struct StakingSection {
+    pub min_stake: Option<u64>,
+    pub unbonding_period: Option<u64>,
+    pub max_validators: Option<u32>,
+    pub min_delegation: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(default)]
+pub struct SecuritySection {
+    pub require_encrypted_keystore: Option<bool>,
 }
 
 impl From<TomlConfig> for NodeConfig {
@@ -110,6 +137,16 @@ impl From<TomlConfig> for NodeConfig {
             peers: t.p2p.peers.or(defaults.peers),
             rpc_bind: rpc_bind.or(defaults.rpc_bind),
             metrics_bind: defaults.metrics_bind,
+            faucet_enabled: t.faucet.enabled.unwrap_or(defaults.faucet_enabled),
+            faucet_amount: t.faucet.amount.unwrap_or(defaults.faucet_amount),
+            faucet_cooldown_secs: t.faucet.cooldown_secs.unwrap_or(defaults.faucet_cooldown_secs),
+            staking_min_stake: t.staking.min_stake.unwrap_or(defaults.staking_min_stake),
+            staking_unbonding_period: t.staking.unbonding_period.unwrap_or(defaults.staking_unbonding_period),
+            staking_max_validators: t.staking.max_validators.unwrap_or(defaults.staking_max_validators),
+            consensus_fast_block_time_secs: t.consensus.fast_block_time_secs.unwrap_or(defaults.consensus_fast_block_time_secs),
+            consensus_zkp_block_time_secs: t.consensus.zkp_block_time_secs.unwrap_or(defaults.consensus_zkp_block_time_secs),
+            dag_retention_rounds: t.consensus.retention_rounds.unwrap_or(defaults.dag_retention_rounds),
+            security_require_encrypted_keystore: t.security.require_encrypted_keystore.unwrap_or(defaults.security_require_encrypted_keystore),
         }
     }
 }
@@ -135,6 +172,23 @@ port = 6690
 [rpc]
 port = 3001
 
+[consensus]
+fast_block_time_secs = 2
+zkp_block_time_secs = 30
+
+[faucet]
+enabled = true
+amount = 1000000000
+cooldown_secs = 300
+
+[staking]
+min_stake = 100000000000
+unbonding_period = 43200
+max_validators = 50
+
+[security]
+require_encrypted_keystore = false
+
 [weak_subjectivity]
 checkpoint = "42:abcdef1234567890abcdef1234567890"
 "#;
@@ -145,6 +199,13 @@ checkpoint = "42:abcdef1234567890abcdef1234567890"
         assert_eq!(config.listen_port, 6690);
         assert_eq!(config.rpc_bind, Some("0.0.0.0:3001".to_string()));
         assert!(config.ws_checkpoint.is_some());
+        assert!(config.faucet_enabled);
+        assert_eq!(config.faucet_amount, 1_000_000_000);
+        assert_eq!(config.faucet_cooldown_secs, 300);
+        assert_eq!(config.staking_min_stake, 100_000_000_000);
+        assert_eq!(config.staking_max_validators, 50);
+        assert_eq!(config.consensus_fast_block_time_secs, 2);
+        assert!(!config.security_require_encrypted_keystore);
     }
 
     #[test]

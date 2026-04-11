@@ -61,6 +61,7 @@ struct Cli {
 pub struct AppState {
     pub proxy: Arc<proxy::NodeProxy>,
     pub faucet: routes::faucet::FaucetState,
+    pub ws_broadcaster: routes::ws::WsBroadcaster,
 }
 
 fn build_api_cors_layer(cors_origins: Option<&str>) -> Result<CorsLayer> {
@@ -136,7 +137,7 @@ async fn main() -> Result<()> {
     info!("  Upstream timeout: {}s", proxy.timeout_secs());
 
     // Verify upstream is reachable
-    match proxy.get("/health").await {
+    match proxy.get("/api/health").await {
         Ok(h) => info!("  Upstream health: {}", h),
         Err(e) => warn!("  Upstream not reachable: {} (will retry on requests)", e),
     }
@@ -156,13 +157,20 @@ async fn main() -> Result<()> {
     );
 
     // ── Faucet service (queue-based, separate state) ──
-    let faucet_config = routes::faucet::FaucetConfig::default();
+    let faucet_config = routes::faucet::FaucetConfig::from_env();
+    info!(
+        "  Faucet: queue-based, {}s cooldown per IP/address",
+        faucet_config.cooldown_secs
+    );
     let faucet_state = routes::faucet::FaucetState::new(faucet_config, proxy.clone());
-    info!("  Faucet: queue-based, 24h cooldown per IP/address");
+
+    let ws_broadcaster = routes::ws::WsBroadcaster::new();
+    ws_broadcaster.start_polling(proxy.clone());
 
     let state = AppState {
         proxy,
         faucet: faucet_state,
+        ws_broadcaster,
     };
 
     // ── Swagger UI ──
@@ -188,6 +196,14 @@ async fn main() -> Result<()> {
         .merge(routes::tx::router())
         .merge(routes::explorer::router())
         .merge(routes::faucet::router())
+        .merge(routes::ws::router())
+        .route("/api/chain-icon.svg", axum::routing::get(|| async {
+            axum::response::Response::builder()
+                .header("content-type", "image/svg+xml")
+                .header("cache-control", "public, max-age=86400")
+                .body(axum::body::Body::from(include_str!("../../../assets/misaka-icon.svg")))
+                .expect("static SVG response")
+        }))
         .merge(docs_routes)
         .with_state(state)
         // FIX-F: Rate limiting middleware CONNECTED to all routes

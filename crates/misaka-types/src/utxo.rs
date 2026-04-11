@@ -322,7 +322,20 @@ impl UtxoTransaction {
                 max: MAX_EXTRA_LEN,
             });
         }
-        // Phase 2c-B: ZK proof validation deleted
+        // R7 M-1: Validate spending_pubkey length (must be None or exactly
+        // ML-DSA-65 PK size). Prevents DoS via oversized pubkeys that would
+        // be hashed during output binding validation.
+        for (i, output) in self.outputs.iter().enumerate() {
+            if let Some(ref spk) = output.spending_pubkey {
+                if spk.len() != crate::constants::PQ_PK_SIZE {
+                    return Err(MisakaError::FieldTooLarge {
+                        field: format!("output[{i}].spending_pubkey"),
+                        size: spk.len(),
+                        max: crate::constants::PQ_PK_SIZE,
+                    });
+                }
+            }
+        }
         Ok(())
     }
 
@@ -337,9 +350,11 @@ impl UtxoTransaction {
         self.tx_content_hash_legacy()
     }
 
-    /// Total output amount.
+    /// Total output amount (saturating to prevent wrapping overflow).
     pub fn total_output(&self) -> u64 {
-        self.outputs.iter().map(|o| o.amount).sum()
+        self.outputs
+            .iter()
+            .fold(0u64, |acc, o| acc.saturating_add(o.amount))
     }
 }
 

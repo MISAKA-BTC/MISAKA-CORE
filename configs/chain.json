@@ -1,0 +1,59 @@
+{
+  "$schema": "https://raw.githubusercontent.com/cosmos/chain-registry/master/chain.schema.json",
+  "chainName": "misaka-testnet",
+  "chainId": "misaka-testnet-2",
+  "prettyName": "MISAKA Testnet",
+  "networkType": "testnet",
+  "bech32Prefix": "misakatest1",
+  "slip44": 5063515,
+  "fees": {
+    "feeTokens": [
+      {
+        "denom": "umsk",
+        "fixedMinGasPrice": 1
+      }
+    ]
+  },
+  "staking": {
+    "stakingTokens": [
+      {
+        "denom": "umsk"
+      }
+    ]
+  },
+  "currencies": [
+    {
+      "coinDenom": "MSK",
+      "coinMinimalDenom": "umsk",
+      "coinDecimals": 9,
+      "coinGeckoId": ""
+    }
+  ],
+  "description": "MISAKA is a post-quantum Layer 1 blockchain using ML-DSA-65 (FIPS 204) signatures and a Mysticeti-equivalent DAG consensus.",
+  "apis": {
+    "rpc": [
+      {
+        "address": "https://rpc.testnet.misaka.network",
+        "provider": "MISAKA Foundation"
+      }
+    ],
+    "rest": [
+      {
+        "address": "https://api.testnet.misaka.network",
+        "provider": "MISAKA Foundation"
+      }
+    ]
+  },
+  "explorers": [
+    {
+      "kind": "MISAKAscan",
+      "url": "https://scan.testnet.misaka.network",
+      "txPage": "https://scan.testnet.misaka.network/tx/${txHash}"
+    }
+  ],
+  "images": [
+    {
+      "svg": "/api/chain-icon.svg"
+    }
+  ]
+}

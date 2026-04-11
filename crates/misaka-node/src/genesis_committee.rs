@@ -9,10 +9,13 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::net::SocketAddr;
 use std::path::Path;
 
+use misaka_crypto::validator_sig::ValidatorPqPublicKey;
 use misaka_dag::narwhal_types::block::AuthorityIndex;
 use misaka_dag::narwhal_types::committee::{Authority, Committee};
+use misaka_types::validator::{ValidatorIdentity, ValidatorPublicKey};
 
 /// ML-DSA-65 public key length.
 const PK_LEN: usize = 1952;
@@ -32,6 +35,12 @@ pub enum ManifestError {
     WrongKeyLength(u32, usize, usize),
     #[error("authority {0} has zero stake")]
     ZeroStake(u32),
+    #[error("authority {0} network_address is invalid: {1}")]
+    InvalidNetworkAddress(u32, String),
+    #[error("authority {0} public_key is not a valid ML-DSA-65 key: {1}")]
+    InvalidPublicKey(u32, String),
+    #[error("duplicate network_address: {0}")]
+    DuplicateNetworkAddress(String),
     #[error("authority_index gap: expected {expected}, got {got}")]
     IndexGap { expected: u32, got: u32 },
     #[error("empty committee")]
@@ -89,6 +98,7 @@ impl GenesisCommitteeManifest {
 
         let mut seen_indices = HashSet::new();
         let mut seen_pks = HashSet::new();
+        let mut seen_addresses = HashSet::new();
 
         for (i, v) in self.validators.iter().enumerate() {
             // Contiguous indices
@@ -120,6 +130,14 @@ impl GenesisCommitteeManifest {
             // Non-zero stake
             if v.stake == 0 {
                 return Err(ManifestError::ZeroStake(v.authority_index));
+            }
+            let addr = v.network_address.parse::<SocketAddr>().map_err(|_| {
+                ManifestError::InvalidNetworkAddress(v.authority_index, v.network_address.clone())
+            })?;
+            if !seen_addresses.insert(addr) {
+                return Err(ManifestError::DuplicateNetworkAddress(
+                    v.network_address.clone(),
+                ));
             }
         }
         Ok(())
@@ -154,6 +172,51 @@ impl GenesisCommitteeManifest {
         })
     }
 
+    /// Build bootstrap validator identities from the genesis committee.
+    ///
+    /// On non-mainnet chains, Phase C uses the genesis committee as the first
+    /// committee source of truth before stake reconciliation and epoch-based
+    /// SR21 rotation take over. We therefore normalize the bootstrap weights to
+    /// at least the chain's SR floor while preserving manifest ordering.
+    pub fn bootstrap_validator_identities(
+        &self,
+        chain_id: u32,
+    ) -> Result<Vec<ValidatorIdentity>, ManifestError> {
+        let effective_floor = crate::sr21_election::effective_min_sr_stake(chain_id);
+        let validator_count = self.validators.len() as u128;
+
+        self.validators
+            .iter()
+            .map(|validator| {
+                let pk_bytes = Self::decode_pk(&validator.public_key).map_err(|_| {
+                    ManifestError::WrongKeyLength(validator.authority_index, 0, PK_LEN)
+                })?;
+                let pq_pk = ValidatorPqPublicKey::from_bytes(&pk_bytes).map_err(|err| {
+                    ManifestError::InvalidPublicKey(validator.authority_index, err.to_string())
+                })?;
+                let public_key = ValidatorPublicKey::from_bytes(&pk_bytes).map_err(|err| {
+                    ManifestError::InvalidPublicKey(validator.authority_index, err.to_string())
+                })?;
+                let authority_bonus =
+                    validator_count.saturating_sub(u128::from(validator.authority_index));
+                let bootstrap_stake_weight = if chain_id == 1 {
+                    u128::from(validator.stake).max(1)
+                } else {
+                    effective_floor
+                        .saturating_add(u128::from(validator.stake))
+                        .saturating_add(authority_bonus)
+                };
+
+                Ok(ValidatorIdentity {
+                    validator_id: pq_pk.to_canonical_id(),
+                    stake_weight: bootstrap_stake_weight,
+                    public_key,
+                    is_active: true,
+                })
+            })
+            .collect()
+    }
+
     fn decode_pk(hex_str: &str) -> Result<Vec<u8>, ()> {
         let trimmed = hex_str.strip_prefix("0x").unwrap_or(hex_str);
         hex::decode(trimmed).map_err(|_| ())
@@ -174,7 +237,7 @@ mod tests {
                     authority_index: i as u32,
                     public_key: format!("0x{}", hex::encode(&pk_varied)),
                     stake: 1000,
-                    network_address: format!("validator-{}.test:16111", i),
+                    network_address: format!("127.0.0.{}:16111", i + 1),
                     solana_stake_account: None,
                 }
             })
@@ -229,6 +292,26 @@ mod tests {
     }
 
     #[test]
+    fn test_invalid_network_address_rejected() {
+        let mut m = sample_manifest(4);
+        m.validators[1].network_address = "not-an-addr".to_string();
+        assert!(matches!(
+            m.validate(),
+            Err(ManifestError::InvalidNetworkAddress(1, _))
+        ));
+    }
+
+    #[test]
+    fn test_duplicate_network_address_rejected() {
+        let mut m = sample_manifest(4);
+        m.validators[2].network_address = m.validators[1].network_address.clone();
+        assert!(matches!(
+            m.validate(),
+            Err(ManifestError::DuplicateNetworkAddress(_))
+        ));
+    }
+
+    #[test]
     fn test_contains() {
         let m = sample_manifest(4);
         let mut pk = vec![0xAA; PK_LEN];
@@ -255,13 +338,13 @@ epoch = 0
 authority_index = 0
 public_key = "0x{pk0}"
 stake = 1000
-network_address = "v0.test:16111"
+network_address = "127.0.0.1:16111"
 
 [[committee.validators]]
 authority_index = 1
 public_key = "0x{pk1}"
 stake = 1000
-network_address = "v1.test:16111"
+network_address = "127.0.0.2:16111"
 "#
         );
         std::fs::write(&path, toml_content).unwrap();
@@ -269,5 +352,18 @@ network_address = "v1.test:16111"
         let m = GenesisCommitteeManifest::load(&path).unwrap();
         assert!(m.validate().is_ok());
         assert_eq!(m.validators.len(), 2);
+    }
+
+    #[test]
+    fn test_bootstrap_validator_identities_preserve_manifest_order_and_floor() {
+        let manifest = sample_manifest(3);
+        let identities = manifest.bootstrap_validator_identities(2).unwrap();
+        let floor = crate::sr21_election::effective_min_sr_stake(2);
+
+        assert_eq!(identities.len(), 3);
+        assert_eq!(identities[0].stake_weight, floor + 1000 + 3);
+        assert_eq!(identities[1].stake_weight, floor + 1000 + 2);
+        assert_eq!(identities[2].stake_weight, floor + 1000 + 1);
+        assert_ne!(identities[0].validator_id, identities[1].validator_id);
     }
 }

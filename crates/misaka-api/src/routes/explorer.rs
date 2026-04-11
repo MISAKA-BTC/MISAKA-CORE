@@ -202,10 +202,7 @@ async fn get_recent_blocks(
 
     state
         .proxy
-        .post(
-            "/api/get_latest_blocks",
-            &serde_json::json!({ "page": 1, "pageSize": limit }),
-        )
+        .get("/api/get_recent_blocks")
         .await
         .map(Json)
         .map_err(|e| {
@@ -297,7 +294,7 @@ async fn get_stats(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     state
         .proxy
-        .post("/api/get_chain_info", &serde_json::json!({}))
+        .get("/api/get_chain_info")
         .await
         .map(Json)
         .map_err(|e| {

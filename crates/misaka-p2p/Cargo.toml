@@ -29,6 +29,7 @@ parking_lot = { workspace = true }
 indexmap = { workspace = true }
 smallvec = { workspace = true }
 async-trait = "0.1"
+zeroize = { workspace = true }
 
 [lints]
 workspace = true

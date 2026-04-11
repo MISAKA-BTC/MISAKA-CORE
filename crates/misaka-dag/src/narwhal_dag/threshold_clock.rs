@@ -130,7 +130,7 @@ impl ThresholdClock {
         agg.add(author);
 
         if round >= self.current_round && agg.reached_quorum() {
-            let new_round = round + 1;
+            let new_round = round.saturating_add(1);
             if new_round > self.current_round {
                 self.current_round = new_round;
                 // GC: keep only recent 2 rounds

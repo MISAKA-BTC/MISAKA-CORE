@@ -85,7 +85,7 @@ impl UniversalCommitter {
         let start_round = if self.last_decided_round == 0 {
             wave
         } else {
-            self.last_decided_round + wave
+            self.last_decided_round.saturating_add(wave)
         };
 
         // Phase 1: Find the latest directly committable leader (the anchor)
@@ -100,7 +100,7 @@ impl UniversalCommitter {
                     anchor = Some((round, leader_ref));
                 }
             }
-            round += wave;
+            round = round.saturating_add(wave);
         }
 
         // If no anchor found, nothing can be committed
@@ -165,7 +165,7 @@ impl UniversalCommitter {
                 // No leader block at this slot — skip
                 self.last_decided_round = round;
             }
-            round += wave;
+            round = round.saturating_add(wave);
         }
 
         committed
@@ -250,11 +250,23 @@ impl UniversalCommitter {
 
             sub_dag.push(current);
 
-            if let Some(block) = dag_state.get_block(&current) {
-                for ancestor in block.ancestors() {
-                    if !dag_state.is_committed(ancestor) {
-                        frontier.push(*ancestor);
+            // R4-H2 FIX: If block data is missing, abort the commit to prevent
+            // an incomplete sub-DAG (missing causal dependencies).
+            match dag_state.get_block(&current) {
+                Some(block) => {
+                    for ancestor in block.ancestors() {
+                        if !dag_state.is_committed(ancestor) {
+                            frontier.push(*ancestor);
+                        }
                     }
+                }
+                None => {
+                    tracing::warn!(
+                        block = ?current,
+                        leader = ?leader,
+                        "sub-DAG block data unavailable — aborting commit to preserve causal closure"
+                    );
+                    return None;
                 }
             }
         }

@@ -228,6 +228,13 @@ impl Transaction {
                     max: MAX_FUNCTION_NAME_LEN,
                 });
             }
+            // R7 M-2: Enforce per-action argument count limit
+            if act.args.len() > MAX_ARGS_PER_ACTION {
+                return Err(MisakaError::TooManyArgsPerAction {
+                    count: act.args.len(),
+                    max: MAX_ARGS_PER_ACTION,
+                });
+            }
             let total_args_size: usize = act.args.iter().map(|a| a.len()).sum();
             if total_args_size > MAX_ARGS_TOTAL_BYTES {
                 return Err(MisakaError::ActionArgsTooLarge {
@@ -350,21 +357,21 @@ mod tests {
     }
 
     #[test]
-    fn test_falcon_tx_hash_differs() {
+    fn test_different_sender_tx_hash_differs() {
         let ed_tx = make_test_tx();
-        let falcon_tx = Transaction {
+        let other_tx = Transaction {
             sender: MisakaPublicKey {
-                scheme: SignatureScheme::LatticeRing,
-                bytes: vec![0xAA; 897],
+                scheme: SignatureScheme::MlDsa65,
+                bytes: vec![0xAA; 1952],
             },
             signature: MisakaSignature {
-                scheme: SignatureScheme::LatticeRing,
-                bytes: vec![0xCC; 655],
+                scheme: SignatureScheme::MlDsa65,
+                bytes: vec![0xCC; 3309],
             },
             ..make_test_tx()
         };
-        // Different sender scheme → different hash
-        assert_ne!(ed_tx.tx_hash(), falcon_tx.tx_hash());
+        // Different sender bytes → different hash
+        assert_ne!(ed_tx.tx_hash(), other_tx.tx_hash());
     }
 
     #[test]

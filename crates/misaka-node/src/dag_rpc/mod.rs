@@ -23,3 +23,10 @@
 mod legacy;
 
 pub use legacy::*;
+pub(crate) use legacy::{
+    checkpoint_vote_pool_json, dag_authority_switch_readiness_json,
+    dag_consensus_architecture_json, dag_consumer_surfaces_json, dag_ordering_contract_json,
+    dag_runtime_recovery_json, dag_sr21_committee_json, dag_tx_dissemination_json,
+    dag_validator_attestation_json, latest_checkpoint_json,
+    sync_runtime_recovery_from_shadow_state, validator_lifecycle_recovery_json,
+};

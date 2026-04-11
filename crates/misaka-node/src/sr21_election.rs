@@ -23,6 +23,20 @@ pub const MIN_SR_STAKE: u128 = 10_000_000 * 1_000_000_000; // 10M MISAKA
 /// Maximum SRs in the active set.
 pub const MAX_SR_COUNT: usize = 21;
 
+/// Effective minimum stake for the current chain.
+///
+/// On non-mainnet chains, Phase C uses the validator lifecycle testnet
+/// threshold so SR21 bootstrap/rehearsal can operate before Solana-backed
+/// stake reconciliation lands. Mainnet keeps the production 10M floor.
+pub fn effective_min_sr_stake(chain_id: u32) -> u128 {
+    let config = if chain_id == 1 {
+        misaka_consensus::staking::StakingConfig::mainnet()
+    } else {
+        misaka_consensus::staking::StakingConfig::testnet()
+    };
+    u128::from(config.min_validator_stake)
+}
+
 /// Result of an SR21 election.
 #[derive(Debug, Clone)]
 pub struct ElectionResult {
@@ -50,10 +64,19 @@ pub struct ElectedSR {
 /// Returns the active set sorted by stake_weight (descending).
 /// Only validators with `stake_weight >= MIN_SR_STAKE` and `is_active == true` are eligible.
 pub fn run_election(validators: &[ValidatorIdentity], epoch: u64) -> ElectionResult {
+    run_election_with_min_stake(validators, MIN_SR_STAKE, epoch)
+}
+
+/// Run SR21 election using a caller-provided minimum stake floor.
+pub fn run_election_with_min_stake(
+    validators: &[ValidatorIdentity],
+    min_sr_stake: u128,
+    epoch: u64,
+) -> ElectionResult {
     // Filter eligible validators
     let mut eligible: Vec<&ValidatorIdentity> = validators
         .iter()
-        .filter(|v| v.is_active && v.stake_weight >= MIN_SR_STAKE)
+        .filter(|v| v.is_active && v.stake_weight >= min_sr_stake)
         .collect();
 
     // Sort by stake_weight descending (tie-break by validator_id for determinism)
@@ -103,6 +126,15 @@ pub fn run_election(validators: &[ValidatorIdentity], epoch: u64) -> ElectionRes
         dropped_count: dropped,
         epoch,
     }
+}
+
+/// Run SR21 election using the effective minimum stake floor for the chain.
+pub fn run_election_for_chain(
+    validators: &[ValidatorIdentity],
+    chain_id: u32,
+    epoch: u64,
+) -> ElectionResult {
+    run_election_with_min_stake(validators, effective_min_sr_stake(chain_id), epoch)
 }
 
 /// Find the SR index for a given validator_id in the election result.
@@ -182,5 +214,22 @@ mod tests {
         assert_eq!(find_sr_index(&result, &[1u8; 32]), Some(0));
         assert_eq!(find_sr_index(&result, &[2u8; 32]), Some(1));
         assert_eq!(find_sr_index(&result, &[99u8; 32]), None);
+    }
+
+    #[test]
+    fn test_effective_min_sr_stake_uses_testnet_floor_on_non_mainnet() {
+        assert_eq!(effective_min_sr_stake(2), 1_000_000_000_000_000u128);
+        assert_eq!(effective_min_sr_stake(1), MIN_SR_STAKE);
+    }
+
+    #[test]
+    fn test_run_election_for_chain_uses_testnet_threshold() {
+        let validators = vec![
+            make_validator(1, 1_500_000_000_000_000, true), // 1.5M
+            make_validator(2, 900_000_000_000_000, true),   // 0.9M
+        ];
+        let result = run_election_for_chain(&validators, 2, 1);
+        assert_eq!(result.num_active, 1);
+        assert_eq!(result.active_srs[0].validator_id, [1u8; 32]);
     }
 }

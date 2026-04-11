@@ -44,13 +44,16 @@ pub struct TxMassData {
 
 /// Calculate transaction mass.
 pub fn calculate_tx_mass(params: &MassParams, data: &TxMassData) -> u64 {
+    // R3-M3 FIX: Use saturating arithmetic to prevent u64 wraparound.
+    // On overflow, mass saturates to u64::MAX, guaranteeing the transaction
+    // will be rejected by any fee threshold check.
     let mut mass = params.base_mass;
-    mass += data.serialized_size as u64 * params.mass_per_tx_byte;
-    mass += data.input_count as u64 * params.mass_per_input;
-    mass += data.output_count as u64 * params.mass_per_output;
-    mass += data.sig_op_count as u64 * params.mass_per_sig_op;
-    mass += data.pq_sig_op_count as u64 * params.mass_per_pq_sig_op;
-    mass += data.total_script_pub_key_bytes as u64 * params.mass_per_script_pub_key_byte;
+    mass = mass.saturating_add((data.serialized_size as u64).saturating_mul(params.mass_per_tx_byte));
+    mass = mass.saturating_add((data.input_count as u64).saturating_mul(params.mass_per_input));
+    mass = mass.saturating_add((data.output_count as u64).saturating_mul(params.mass_per_output));
+    mass = mass.saturating_add((data.sig_op_count as u64).saturating_mul(params.mass_per_sig_op));
+    mass = mass.saturating_add((data.pq_sig_op_count as u64).saturating_mul(params.mass_per_pq_sig_op));
+    mass = mass.saturating_add((data.total_script_pub_key_bytes as u64).saturating_mul(params.mass_per_script_pub_key_byte));
     mass
 }
 

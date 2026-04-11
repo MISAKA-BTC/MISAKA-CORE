@@ -473,7 +473,19 @@ pub async fn run_block_producer(state: SharedState, block_time_secs: u64, propos
                         let result = tokio::task::spawn_blocking(move || {
                             let json =
                                 serde_json::to_string(&snapshot).map_err(|e| e.to_string())?;
-                            std::fs::write(&snap_path, json).map_err(|e| e.to_string())
+                            // R3-H4 FIX: Write to tmp file, set restrictive permissions,
+                            // then atomically rename to prevent partial reads and
+                            // world-readable snapshots.
+                            let tmp_path = snap_path.with_extension("json.tmp");
+                            std::fs::write(&tmp_path, json).map_err(|e| e.to_string())?;
+                            #[cfg(unix)]
+                            {
+                                use std::os::unix::fs::PermissionsExt;
+                                let perms = std::fs::Permissions::from_mode(0o600);
+                                std::fs::set_permissions(&tmp_path, perms)
+                                    .map_err(|e| e.to_string())?;
+                            }
+                            std::fs::rename(&tmp_path, &snap_path).map_err(|e| e.to_string())
                         })
                         .await;
                         match result {

@@ -107,7 +107,8 @@ pub async fn run_rpc_server(
         .route("/api/get_peers", post(get_peers))
         .route("/api/search", post(search))
         .route("/api/get_anonymity_set", post(get_anonymity_set))
-        .route("/health", get(health));
+        .route("/health", get(health))
+        .route("/api/health", get(health));
 
     // ── Write endpoints (auth required when MISAKA_RPC_API_KEY is set) ──
     // SEC-FIX [Audit #1]: route_layer is applied AFTER all routes are added,
@@ -420,8 +421,43 @@ fn stored_tx_to_info(tx: &crate::chain_store::StoredTx, block_h: u64) -> TxInfo 
 
 // ─── Handlers ────────────────────────────────────────
 
-async fn health() -> &'static str {
-    "ok"
+async fn health(State(rpc): State<RpcState>) -> (StatusCode, Json<serde_json::Value>) {
+    let s = rpc.node.read().await;
+    let block_height = s.chain.len() as u64;
+    let peer_count = rpc.p2p.peer_count().await;
+
+    let last_block_age_secs = s
+        .chain
+        .last()
+        .map(|b| {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            now.saturating_sub(b.header.timestamp / 1000)
+        })
+        .unwrap_or(0);
+
+    let stale_threshold_secs = 300;
+    let is_healthy = peer_count > 0 || block_height == 0;
+    let is_synced = last_block_age_secs < stale_threshold_secs || block_height == 0;
+
+    let status = if is_healthy && is_synced { "ok" } else { "degraded" };
+    let code = if is_healthy && is_synced {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+
+    (
+        code,
+        Json(serde_json::json!({
+            "status": status,
+            "block_height": block_height,
+            "peer_count": peer_count,
+            "last_block_age_secs": last_block_age_secs,
+        })),
+    )
 }
 
 async fn get_chain_info(State(rpc): State<RpcState>) -> Json<serde_json::Value> {
@@ -1324,7 +1360,7 @@ mod tests {
     #[tokio::test]
     async fn test_rpc_write_routes_require_api_key_and_health_stays_public() {
         let auth_state = ApiKeyState {
-            required_key: Some("rpc-secret".into()),
+            required_key: Some(secrecy::SecretString::new("rpc-secret".into())),
             write_ip_allowlist: vec![],
             auth_required: false,
         };

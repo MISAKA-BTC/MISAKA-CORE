@@ -85,7 +85,7 @@ impl BaseCommitter {
         dag_state: &DagState,
         ledger: &SlotEquivocationLedger,
     ) -> Decision {
-        let voting_round = leader_ref.round + 1;
+        let voting_round = leader_ref.round.saturating_add(1);
         let voting_blocks = dag_state.get_blocks_at_round(voting_round);
 
         if voting_blocks.is_empty() {
@@ -214,7 +214,7 @@ impl BaseCommitter {
         ledger: &SlotEquivocationLedger,
     ) -> (Decision, VoteRegistry) {
         let mut registry = VoteRegistry::new(*leader_ref);
-        let voting_round = leader_ref.round + 1;
+        let voting_round = leader_ref.round.saturating_add(1);
         let voting_blocks = dag_state.get_blocks_at_round(voting_round);
 
         for block in &voting_blocks {
@@ -309,7 +309,7 @@ impl BaseCommitter {
     /// A block at `leader.round + 1` is a "vote" for the leader if it
     /// includes the leader as an ancestor.
     pub fn is_vote(block: &VerifiedBlock, leader_ref: &BlockRef) -> bool {
-        block.round() == leader_ref.round + 1 && block.ancestors().contains(leader_ref)
+        block.round() == leader_ref.round.saturating_add(1) && block.ancestors().contains(leader_ref)
     }
 
     /// Check if a leader is certified (has ≥ quorum direct votes) (WP4).
@@ -341,7 +341,7 @@ impl BaseCommitter {
         support_threshold: u32,
         ledger: &SlotEquivocationLedger,
     ) -> bool {
-        let voting_round = leader_ref.round + 1;
+        let voting_round = leader_ref.round.saturating_add(1);
         let voting_blocks = dag_state.get_blocks_at_round(voting_round);
 
         // v0.5.9 WP8 follow-up: only count support from non-banned voters.

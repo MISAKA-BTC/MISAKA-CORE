@@ -26,9 +26,21 @@
 //! payload = serde_json serialized message
 //! ```
 
-// TODO(Task D): When block signature verification is added to handle_connection,
-// record PeerSignal::VerifyFailed on verification failure before rejecting the block.
-// Currently new_verified() trusts the caller, so there is no failure path to hook into.
+// Task D — Block signature verification at the network edge.
+//
+// Structural pre-validation (author bounds, round > 0, sig_len == 3309) is
+// performed in handle_connection before forwarding to core_engine. Full
+// ML-DSA-65 cryptographic verification is deferred to core_engine::process_block
+// because:
+//   1. It requires ChainContext (chain_id + genesis_hash) which the transport
+//      layer does not carry.
+//   2. ML-DSA-65 verification (~2ms per block) at the network edge would be
+//      a DoS amplification vector under flood attacks.
+//   3. core_engine already rejects invalid blocks and records PeerSignal::VerifyFailed.
+//
+// Blocks are wrapped in VerifiedBlock::new_pending_verification() (not
+// new_verified()) to explicitly mark them as untrusted until core_engine
+// completes crypto verification.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -425,7 +437,7 @@ impl ConsensusNetworkServer {
 
                     // Task C: Admission control
                     {
-                        let mut adm = admission.lock().unwrap();
+                        let mut adm = admission.lock().unwrap_or_else(|e| e.into_inner());
                         if let super::admission::AdmissionResult::Denied { .. } =
                             adm.try_consume(peer_id, super::admission::RequestKind::SendBlock)
                         {
@@ -448,7 +460,7 @@ impl ConsensusNetworkServer {
                         || block.round == 0
                         || block.signature.len() != 3309
                     {
-                        let mut sc = scorer.lock().unwrap();
+                        let mut sc = scorer.lock().unwrap_or_else(|e| e.into_inner());
                         sc.record(peer_id, super::peer_scorer::PeerSignal::VerifyFailed);
                         warn!(
                             "Block rejected at network edge: author={}, round={}, sig_len={}",
@@ -613,7 +625,15 @@ impl ConsensusNetworkClient {
         )
         .await?;
 
-        let resp_msg = read_message(&mut stream).await?;
+        // R4-M3 FIX: Client-side read_message with timeout to prevent
+        // a malicious or stuck peer from blocking the client indefinitely.
+        let resp_msg = tokio::time::timeout(
+            std::time::Duration::from_secs(MESSAGE_READ_TIMEOUT_SECS),
+            read_message(&mut stream),
+        )
+        .await
+        .map_err(|_| ProtocolError::Timeout)?
+        ?;
         let resp: BlockResponse = serde_json::from_slice(&resp_msg.payload)
             .map_err(|e| ProtocolError::Serde(e.to_string()))?;
         Ok(resp)
@@ -634,7 +654,13 @@ impl ConsensusNetworkClient {
         )
         .await?;
 
-        let resp_msg = read_message(&mut stream).await?;
+        let resp_msg = tokio::time::timeout(
+            std::time::Duration::from_secs(MESSAGE_READ_TIMEOUT_SECS),
+            read_message(&mut stream),
+        )
+        .await
+        .map_err(|_| ProtocolError::Timeout)?
+        ?;
         let resp: CommitResponse = serde_json::from_slice(&resp_msg.payload)
             .map_err(|e| ProtocolError::Serde(e.to_string()))?;
         Ok(resp)
@@ -652,16 +678,21 @@ impl ConsensusNetworkClient {
         let (tx, rx) = mpsc::channel(1000);
         tokio::spawn(async move {
             loop {
-                match read_message(&mut stream).await {
-                    Ok(msg) if msg.msg_type == MessageType::Block => {
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(MESSAGE_READ_TIMEOUT_SECS),
+                    read_message(&mut stream),
+                )
+                .await
+                {
+                    Ok(Ok(msg)) if msg.msg_type == MessageType::Block => {
                         if let Ok(block) = serde_json::from_slice::<Block>(&msg.payload) {
                             if tx.send(block).await.is_err() {
                                 break;
                             }
                         }
                     }
-                    Ok(_) => continue,
-                    Err(_) => break,
+                    Ok(Ok(_)) => continue,
+                    Ok(Err(_)) | Err(_) => break,
                 }
             }
         });
@@ -673,7 +704,13 @@ impl ConsensusNetworkClient {
     pub async fn ping(&self) -> Result<(), ProtocolError> {
         let mut stream = TcpStream::connect(&self.addr).await?;
         write_message(&mut stream, &WireMessage::new(MessageType::Ping, vec![])).await?;
-        let resp = read_message(&mut stream).await?;
+        let resp = tokio::time::timeout(
+            std::time::Duration::from_secs(MESSAGE_READ_TIMEOUT_SECS),
+            read_message(&mut stream),
+        )
+        .await
+        .map_err(|_| ProtocolError::Timeout)?
+        ?;
         if resp.msg_type != MessageType::Pong {
             return Err(ProtocolError::Serde("expected pong".into()));
         }

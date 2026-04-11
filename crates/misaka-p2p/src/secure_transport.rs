@@ -113,17 +113,13 @@ pub struct DirectionalKeys {
     pub recv_key: [u8; 32],
 }
 
-/// SEC-FIX: Zeroize session keys on drop to prevent heap/stack residue.
-/// Previously session keys persisted in memory after connection close.
+/// SEC-FIX N-M9: Uses `zeroize` crate instead of hand-rolled `unsafe`
+/// volatile writes for session key cleanup on drop.
 impl Drop for DirectionalKeys {
     fn drop(&mut self) {
-        for b in self.send_key.iter_mut() {
-            unsafe { std::ptr::write_volatile(b, 0) };
-        }
-        for b in self.recv_key.iter_mut() {
-            unsafe { std::ptr::write_volatile(b, 0) };
-        }
-        std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
+        use zeroize::Zeroize;
+        self.send_key.zeroize();
+        self.recv_key.zeroize();
     }
 }
 

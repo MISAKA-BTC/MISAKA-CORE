@@ -55,12 +55,16 @@ pub fn sanitize_script(script: &[u8], max_size: usize) -> Result<&[u8], Sanitize
 }
 
 /// Sanitize a user-provided address.
+///
+/// SEC-FIX N-L10: Checks `starts_with("misaka1")` to be consistent with
+/// `InputValidator::validate_address` in `misaka-rpc`. Previously checked
+/// `starts_with("misaka")` which could admit `misakatest1...` prefixes.
 pub fn sanitize_address(address: &str) -> Result<String, SanitizeError> {
     let trimmed = address.trim();
     if trimmed.len() < 47 || trimmed.len() > 60 {
         return Err(SanitizeError::InvalidAddressLength(trimmed.len()));
     }
-    if !trimmed.starts_with("misaka") {
+    if !trimmed.starts_with("misaka1") && !trimmed.starts_with("msk1") {
         return Err(SanitizeError::InvalidAddressPrefix);
     }
     // Only allow alphanumeric characters
@@ -96,7 +100,7 @@ pub fn sanitize_method(method: &str) -> Result<&str, SanitizeError> {
 pub enum SanitizeError {
     #[error("invalid length: expected {expected}, got {got}")]
     InvalidLength { expected: usize, got: usize },
-    #[error("invalid hex: {0}")]
+    #[error("invalid hex input")]
     InvalidHex(String),
     #[error("hex decode failed: {0}")]
     DecodeFailed(String),

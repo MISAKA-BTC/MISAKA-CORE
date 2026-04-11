@@ -26,7 +26,7 @@ impl Default for WrpcServerConfig {
             encoding: Encoding::Json,
             max_connections: 1000,
             max_subscriptions_per_client: 256,
-            max_frame_size: 16 * 1024 * 1024,
+            max_frame_size: 4 * 1024 * 1024,
             heartbeat_interval_ms: 30_000,
         }
     }
@@ -49,28 +49,35 @@ pub struct WrpcServer {
     config: WrpcServerConfig,
     clients: RwLock<HashMap<u64, WrpcClientSession>>,
     next_client_id: std::sync::atomic::AtomicU64,
+    notification_tx: tokio::sync::broadcast::Sender<WrpcNotification>,
 }
 
 impl WrpcServer {
     pub fn new(config: WrpcServerConfig) -> Self {
+        let (notification_tx, _) = tokio::sync::broadcast::channel(1024);
         Self {
             config,
             clients: RwLock::new(HashMap::new()),
             next_client_id: std::sync::atomic::AtomicU64::new(1),
+            notification_tx,
         }
     }
 
+    /// Subscribe to server-push notifications.
+    pub fn subscribe_notifications(&self) -> tokio::sync::broadcast::Receiver<WrpcNotification> {
+        self.notification_tx.subscribe()
+    }
+
     pub fn register_client(&self, addr: SocketAddr, encoding: Encoding) -> Option<u64> {
-        let clients = self.clients.read();
+        let mut clients = self.clients.write();
         if clients.len() >= self.config.max_connections {
             return None;
         }
-        drop(clients);
 
         let id = self
             .next_client_id
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.clients.write().insert(
+        clients.insert(
             id,
             WrpcClientSession {
                 id,
@@ -95,10 +102,11 @@ impl WrpcServer {
     }
 
     /// Broadcast a notification to all subscribed clients.
-    pub fn broadcast_notification(&self, _notification: &WrpcNotification) -> usize {
-        let clients = self.clients.read();
-        // In production, this would filter by subscription scope
-        clients.len()
+    pub fn broadcast_notification(&self, notification: &WrpcNotification) -> usize {
+        match self.notification_tx.send(notification.clone()) {
+            Ok(n) => n,
+            Err(_) => 0,
+        }
     }
 
     /// Get client info.

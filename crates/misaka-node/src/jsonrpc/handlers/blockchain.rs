@@ -191,24 +191,47 @@ pub async fn uptime(_rpc: &DagRpcState) -> HandlerResult {
     Ok(Value::Number(start.elapsed().as_secs().into()))
 }
 
-/// `getconnectioncount` — number of connected peers.
-pub async fn get_connection_count(_rpc: &DagRpcState) -> HandlerResult {
-    // TODO: wire to P2P observation
-    Ok(Value::Number(0.into()))
+/// `getconnectioncount` — number of connected peers (via P2P observation).
+pub async fn get_connection_count(rpc: &DagRpcState) -> HandlerResult {
+    let count = if let Some(ref obs) = rpc.dag_p2p_observation {
+        let state = obs.read().await;
+        state.by_surface.values().map(|c| c.inbound + c.outbound_unicast).sum::<u64>().min(1)
+            * if state.total_messages > 0 { 1 } else { 0 }
+    } else {
+        0
+    };
+    Ok(Value::Number(count.into()))
 }
 
-/// `getpeerinfo` — connected peer details.
-pub async fn get_peer_info(_rpc: &DagRpcState) -> HandlerResult {
-    // TODO: wire to P2P observation
-    Ok(Value::Array(vec![]))
+/// `getpeerinfo` — P2P observation summary.
+pub async fn get_peer_info(rpc: &DagRpcState) -> HandlerResult {
+    if let Some(ref obs) = rpc.dag_p2p_observation {
+        let state = obs.read().await;
+        let peers: Vec<Value> = state.by_surface.iter().map(|(surface, counts)| {
+            json!({
+                "surface": format!("{:?}", surface),
+                "inbound": counts.inbound,
+                "outbound_unicast": counts.outbound_unicast,
+                "outbound_broadcast": counts.outbound_broadcast,
+            })
+        }).collect();
+        Ok(Value::Array(peers))
+    } else {
+        Ok(Value::Array(vec![]))
+    }
 }
 
 /// `getnetworkinfo` — network metadata.
-pub async fn get_network_info(_rpc: &DagRpcState) -> HandlerResult {
+pub async fn get_network_info(rpc: &DagRpcState) -> HandlerResult {
+    let total_messages = if let Some(ref obs) = rpc.dag_p2p_observation {
+        obs.read().await.total_messages
+    } else {
+        0
+    };
     Ok(json!({
         "version": "0.1.0",
         "subversion": "/MISAKA:0.1.0/",
         "protocolversion": 1,
-        "connections": 0,
+        "total_p2p_messages": total_messages,
     }))
 }

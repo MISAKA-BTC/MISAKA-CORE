@@ -18,15 +18,12 @@ use sha3::{Digest as Sha3Digest, Sha3_256};
 pub enum SignatureScheme {
     /// ML-DSA-65 (FIPS 204 / Dilithium3). pk=1952, sig=3309.
     MlDsa65 = 0x01,
-    /// Lattice ML-DSA signature (MISAKA-LRS-v1). Variable size.
-    LatticeRing = 0x02,
 }
 
 impl SignatureScheme {
     pub fn from_u8(v: u8) -> Result<Self, MisakaError> {
         match v {
             0x01 => Ok(Self::MlDsa65),
-            0x02 => Ok(Self::LatticeRing),
             _ => Err(MisakaError::UnknownSignatureScheme(v)),
         }
     }
@@ -34,14 +31,12 @@ impl SignatureScheme {
     pub fn pk_size(&self) -> usize {
         match self {
             Self::MlDsa65 => 1952,
-            Self::LatticeRing => 512, // lattice public poly (256 * 2 bytes)
         }
     }
 
     pub fn max_sig_size(&self) -> usize {
         match self {
             Self::MlDsa65 => 3309,
-            Self::LatticeRing => 0, // variable (ring-size dependent)
         }
     }
 }
@@ -68,7 +63,7 @@ impl MisakaPublicKey {
         })
     }
 
-    /// Derive MISAKA address: SHA3-256(scheme_tag || pk_bytes)[0..20]
+    /// Derive MISAKA address: SHA3-256(scheme_tag || pk_bytes) → full 32-byte hash
     pub fn to_address(&self) -> Address {
         let mut hasher = Sha3_256::new();
         hasher.update([self.scheme as u8]);
@@ -94,6 +89,14 @@ impl MisakaPublicKey {
         let scheme = SignatureScheme::from_u8(data[*offset])?;
         *offset += 1;
         let len = mcs1::read_u32(data, offset)? as usize;
+        // R7 M-3: Reject oversized blobs before allocation
+        let max_pk = scheme.pk_size();
+        if len > max_pk {
+            return Err(MisakaError::DeserializationError(format!(
+                "pk blob too large: {} > scheme max {}",
+                len, max_pk
+            )));
+        }
         if *offset + len > data.len() {
             return Err(MisakaError::DeserializationError(
                 "EOF reading pk bytes".into(),
@@ -139,6 +142,14 @@ impl MisakaSignature {
         let scheme = SignatureScheme::from_u8(data[*offset])?;
         *offset += 1;
         let len = mcs1::read_u32(data, offset)? as usize;
+        // R7 M-3: Reject oversized signature blobs before allocation
+        let max_sig = scheme.max_sig_size();
+        if len > max_sig {
+            return Err(MisakaError::DeserializationError(format!(
+                "sig blob too large: {} > scheme max {}",
+                len, max_sig
+            )));
+        }
         if *offset + len > data.len() {
             return Err(MisakaError::DeserializationError(
                 "EOF reading sig bytes".into(),
@@ -155,7 +166,6 @@ impl MisakaSignature {
 }
 
 /// Secret key (NEVER serialized on-chain). Zeroized on drop.
-#[derive(Clone)]
 pub struct MisakaSecretKey {
     pub scheme: SignatureScheme,
     pub bytes: Vec<u8>,
@@ -229,10 +239,7 @@ mod tests {
             SignatureScheme::from_u8(0x01).unwrap(),
             SignatureScheme::MlDsa65
         );
-        assert_eq!(
-            SignatureScheme::from_u8(0x02).unwrap(),
-            SignatureScheme::LatticeRing
-        );
+        assert!(SignatureScheme::from_u8(0x02).is_err());
         assert!(SignatureScheme::from_u8(0xFF).is_err());
     }
 }

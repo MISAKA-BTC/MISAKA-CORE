@@ -428,8 +428,18 @@ impl ConsensusStore for RocksDbConsensusStore {
         for item in iter {
             let (key, value) =
                 item.map_err(|e| StoreError::Corrupted(format!("RocksDB iterator error: {}", e)))?;
-            if let Ok(block) = serde_json::from_slice::<Block>(&value) {
-                if block.round < round {
+            match serde_json::from_slice::<Block>(&value) {
+                Ok(block) if block.round < round => {
+                    to_delete.push(key.to_vec());
+                }
+                Ok(_) => {} // block.round >= round, keep
+                Err(e) => {
+                    // R7 L-9: Log and delete corrupt entries instead of silently skipping
+                    tracing::warn!(
+                        "gc_below_round: corrupt block entry (key={} bytes), deleting: {}",
+                        key.len(),
+                        e
+                    );
                     to_delete.push(key.to_vec());
                 }
             }

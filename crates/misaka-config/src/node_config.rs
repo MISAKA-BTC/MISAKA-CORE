@@ -34,6 +34,26 @@ pub struct NodeConfig {
     pub rpc_bind: Option<String>,
     /// Metrics bind address.
     pub metrics_bind: Option<String>,
+
+    // ── Faucet ──
+    pub faucet_enabled: bool,
+    pub faucet_amount: u64,
+    pub faucet_cooldown_secs: u64,
+
+    // ── Staking ──
+    pub staking_min_stake: u64,
+    pub staking_unbonding_period: u64,
+    pub staking_max_validators: u32,
+
+    // ── Consensus timing ──
+    pub consensus_fast_block_time_secs: u64,
+    pub consensus_zkp_block_time_secs: u64,
+
+    // ── DAG pruning ──
+    pub dag_retention_rounds: u64,
+
+    // ── Security ──
+    pub security_require_encrypted_keystore: bool,
 }
 
 impl Default for NodeConfig {
@@ -52,6 +72,16 @@ impl Default for NodeConfig {
             peers: None,
             rpc_bind: None,
             metrics_bind: None,
+            faucet_enabled: false,
+            faucet_amount: 1_000_000_000,
+            faucet_cooldown_secs: 300,
+            staking_min_stake: 100_000_000_000,
+            staking_unbonding_period: 43200,
+            staking_max_validators: 50,
+            consensus_fast_block_time_secs: 2,
+            consensus_zkp_block_time_secs: 30,
+            dag_retention_rounds: 10_000,
+            security_require_encrypted_keystore: true,
         }
     }
 }
@@ -86,6 +116,24 @@ impl NodeConfig {
                 }
                 _ => {}
             }
+        }
+
+        // R7 L-10: Validate operational safety bounds
+        if self.max_mempool_size == 0 {
+            errors.push(ConfigError::Custom("max_mempool_size must be > 0".into()));
+        }
+        if self.max_msg_size == 0 || self.max_msg_size > 16_777_216 {
+            errors.push(ConfigError::Custom(
+                "max_msg_size must be 1..16MiB".into(),
+            ));
+        }
+        if self.dag_retention_rounds == 0 {
+            errors.push(ConfigError::Custom(
+                "dag_retention_rounds must be > 0".into(),
+            ));
+        }
+        if self.max_block_txs == 0 {
+            errors.push(ConfigError::Custom("max_block_txs must be > 0".into()));
         }
 
         if errors.is_empty() {

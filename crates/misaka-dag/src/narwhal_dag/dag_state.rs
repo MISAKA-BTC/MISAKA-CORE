@@ -592,7 +592,7 @@ impl DagState {
 
     /// Get all blocks that reference a given block as ancestor.
     pub fn get_children(&self, block_ref: &BlockRef) -> Vec<BlockRef> {
-        let next_round = block_ref.round + 1;
+        let next_round = block_ref.round.saturating_add(1);
         let mut children = Vec::new();
         for block in self.get_blocks_at_round(next_round) {
             if block.ancestors().contains(block_ref) {

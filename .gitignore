@@ -13,6 +13,10 @@ node_modules/
 .idea/
 .vscode/
 
+# Environment files with secrets
+.env
+!.env.example
+
 # platform-specific cargo config (not committed)
 .cargo/config.toml
 .claude/

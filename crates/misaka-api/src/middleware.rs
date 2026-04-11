@@ -310,6 +310,9 @@ impl RateLimiter {
     }
 
     /// Create with a custom backend (e.g., Redis).
+    ///
+    /// SEC-FIX N-M3: Uses `effective_trust_proxy()` instead of raw
+    /// `read_trust_proxy()` to enforce the CIDR-required safety check.
     pub fn with_backend(
         backend: Arc<dyn RateLimiterBackend>,
         general: u32,
@@ -321,7 +324,7 @@ impl RateLimiter {
             general_limit: general,
             sensitive_limit: sensitive,
             window: Duration::from_secs(window_secs),
-            trust_proxy: read_trust_proxy(),
+            trust_proxy: Self::effective_trust_proxy(),
         }
     }
 
@@ -368,12 +371,14 @@ fn extract_ip(req: &Request<Body>, trust_proxy: bool) -> Option<IpAddr> {
         .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
         .map(|ci| ci.0.ip());
 
-    // SEC-FIX: When behind a trusted proxy, use X-Forwarded-For BUT only
-    // if the connecting socket IP is within trusted CIDR ranges.
+    // SEC-FIX N-M4: CIDR list is parsed once per call via a cached OnceCell.
+    // Previously `read_trusted_proxy_cidrs()` parsed env on every request.
+    use std::sync::OnceLock;
+    static CACHED_CIDRS: OnceLock<Vec<(IpAddr, u8)>> = OnceLock::new();
     if trust_proxy {
-        let trusted_cidrs = read_trusted_proxy_cidrs();
+        let trusted_cidrs = CACHED_CIDRS.get_or_init(read_trusted_proxy_cidrs);
         let socket_trusted = socket_ip
-            .map(|ip| ip_in_trusted_cidrs(ip, &trusted_cidrs))
+            .map(|ip| ip_in_trusted_cidrs(ip, trusted_cidrs))
             .unwrap_or(false);
 
         if socket_trusted {

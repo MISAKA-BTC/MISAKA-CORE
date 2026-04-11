@@ -1,5 +1,13 @@
 # MISAKA Testnet — Public Node
 
+この README は **stock public observer package** の使い方だけを扱います。
+
+- public observer package の入口: `start-public-node.sh` / `start-public-node.command` / `start-public-node.bat`
+- 公式 public testnet operator の入口: `scripts/testnet-deploy.sh`
+- 既存 operator へ self-host validator として参加する入口: `scripts/testnet-join.sh --genesis-path ... --index ...`
+- `scripts/start-node.sh` は generic source-build launcher であり、public package の入口ではありません
+- `config/self-host-seeds.txt` は self-host / rehearsal 用の補助ファイルで、`start-public-node.*` は読みません
+
 ## ワンクリック起動
 
 | OS | ファイル | 使い方 |
@@ -67,6 +75,9 @@ curl http://127.0.0.1:3001/api/get_chain_info
 | Windows SmartScreen | 「詳細情報」→「実行」 |
 | Linux: 権限エラー | `chmod +x start-public-node.sh misaka-node` |
 | `insufficient ancestors` / `peer_sig_verify_failed` ログ | v0.5.8 未満を使っている証拠です。v0.5.13 以降へアップグレードしてください |
+| launcher が `seeds.txt / seed-pubkeys.txt mismatch` で停止 | stock package の config が壊れています。2 つのファイルを同じ件数に揃えて再試行 |
+| `seeds.txt と seed-pubkeys.txt が空` で停止 | stock package の config が欠落しています。public observer package は official/public seed への join 専用で、solo self-host mode には入りません |
+| `validator.key が genesis validator と一致` で停止 | operator/shared validator key を public package に混ぜています。`misaka-data/validator.key` を削除して observer key を再生成してください |
 | `mode:"solo"` のまま | 運営 seed が到達不能、またはファイアウォールが 16110 を塞いでいる可能性 |
 
 ## セキュリティ
@@ -124,13 +135,21 @@ Get-FileHash misaka-public-node-windows-x86_64.zip -Algorithm SHA256
 
 `config/genesis_committee.toml` には運営の ML-DSA-65 公開鍵が焼き込まれています。`python3 -c "import hashlib; import re; ..."` で SHA3-256 fingerprint を計算し、GitHub Release の notes と照合することで、配布ミラーの改竄を検出できます。
 
-## 運営側 (operator) の起動手順
+## 別役割の入口
 
-自分で testnet operator を動かしたい場合:
+この README の対象は public observer package です。operator / self-host / source-build helper は別の入口を使ってください。
 
-1. `misaka-node --keygen-only --chain-id 2 --data-dir ...` で鍵を生成
-2. 生成された pubkey を抽出して `config/genesis_committee.toml` の `public_key` に書き込む
-3. `MISAKA_ACCEPT_OBSERVERS=1` / `MISAKA_RPC_AUTH_MODE=open` / `--advertise-addr <public-ip>:16110` 付きで起動
-4. systemd unit は `scripts/testnet-deploy.sh` を参照 (v0.5.13 以降、passphrase は `MISAKA_VALIDATOR_PASSPHRASE_FILE=/opt/misaka/.passphrase` で読み込めます)
+1. **公式 public testnet operator**
+   - 入口は `scripts/testnet-deploy.sh`
+   - `MISAKA_ACCEPT_OBSERVERS=1` と `--advertise-addr <public-ip>:16110` が前提です
+   - RPC は原則 `127.0.0.1:3001` のまま扱い、外へ開ける場合だけ reverse proxy + auth を前段で付与します
 
-詳細は `scripts/testnet-deploy.sh` の実装を参照してください。
+2. **既存 operator へ self-host validator として参加**
+   - 入口は `scripts/testnet-join.sh --genesis-path ... --index ...`
+   - operator から共有された `genesis_committee.toml` を使います
+   - `scripts/testnet-join.sh` は official `configs/testnet-seeds.txt` / `configs/testnet-seed-pubkeys.txt` を既定で読みます
+
+3. **generic source-build launcher / custom topology / private rehearsal**
+   - 入口は `scripts/start-node.sh`
+   - これは lower-level helper です。`GENESIS_PATH` が無いまま `VALIDATORS=1` で実行すると local single-node genesis を自動生成します
+   - public testnet へ join したいときの一次入口にはしないでください

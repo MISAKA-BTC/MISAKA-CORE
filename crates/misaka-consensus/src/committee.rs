@@ -16,6 +16,8 @@ pub fn verify_committee_votes(
     votes: &[CommitteeVote],
     expected_slot: u64,
     expected_bh: &[u8; 32],
+    expected_epoch: u64,
+    expected_chain_id: u32,
 ) -> Result<u128, MisakaError> {
     let mut seen = HashSet::new();
     let mut total: u128 = 0;
@@ -28,6 +30,18 @@ pub fn verify_committee_votes(
         if v.block_hash != *expected_bh {
             return Err(MisakaError::SignatureVerificationFailed(
                 "hash mismatch".into(),
+            ));
+        }
+        // R4-M10 FIX: Reject votes with mismatched epoch or chain_id to prevent
+        // aggregation of valid signatures from different epochs/chains.
+        if v.epoch != expected_epoch {
+            return Err(MisakaError::SignatureVerificationFailed(
+                "epoch mismatch".into(),
+            ));
+        }
+        if v.chain_id != expected_chain_id {
+            return Err(MisakaError::SignatureVerificationFailed(
+                "chain_id mismatch".into(),
             ));
         }
         if !seen.insert(v.voter) {
@@ -146,7 +160,9 @@ mod tests {
                 make_vote(&kps[0], ids[0], 1, bh)
             ],
             1,
-            &bh
+            &bh,
+            0,
+            0,
         )
         .is_err());
     }
@@ -163,7 +179,9 @@ mod tests {
                     make_vote(&kps[2], ids[2], 1, bh)
                 ],
                 1,
-                &bh
+                &bh,
+                0,
+                0,
             )
             .unwrap(),
             300

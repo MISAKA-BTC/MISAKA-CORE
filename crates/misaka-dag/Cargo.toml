@@ -3,7 +3,7 @@ name = "misaka-dag"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "MISAKA-CORE v2: Privacy BlockDAG — GhostDAG consensus + LogRing anonymity"
+description = "MISAKA-CORE: Transparent BlockDAG — Narwhal/Bullshark consensus with PQ signatures"
 
 [dependencies]
 misaka-types    = { path = "../misaka-types" }

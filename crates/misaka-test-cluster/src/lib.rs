@@ -142,6 +142,7 @@ impl TestClusterBuilder {
                     dag_config: DagStateConfig::default(),
                     checkpoint_interval: self.checkpoint_interval,
                     custom_verifier: Some(sig_verifier),
+                    retention_rounds: 0,
                 },
                 recover_on_start: false,
             };

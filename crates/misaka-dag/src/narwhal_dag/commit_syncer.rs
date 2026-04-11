@@ -97,21 +97,18 @@ impl CommitSyncer {
     }
 
     /// Compute the commit lag (highest peer index - our index).
+    /// Returns `None` if no peers have reported their commit index,
+    /// preventing a false "caught up" conclusion from an empty peer set.
     #[must_use]
-    pub fn commit_lag(&self) -> u64 {
-        let highest_peer = self
-            .peer_commit_indices
-            .values()
-            .copied()
-            .max()
-            .unwrap_or(0);
-        highest_peer.saturating_sub(self.local_commit_index)
+    pub fn commit_lag(&self) -> Option<u64> {
+        let highest_peer = self.peer_commit_indices.values().copied().max()?;
+        Some(highest_peer.saturating_sub(self.local_commit_index))
     }
 
     /// Check if we need to sync (lag > 0 and not already syncing everything).
     #[must_use]
     pub fn needs_sync(&self) -> bool {
-        self.commit_lag() > 0 && self.active_sessions.len() < self.max_sessions
+        self.commit_lag().unwrap_or(0) > 0 && self.active_sessions.len() < self.max_sessions
     }
 
     /// Generate sync requests for missing commits.
@@ -176,12 +173,44 @@ impl CommitSyncer {
     }
 
     /// Handle a successful sync response: store fetched commits.
+    ///
+    /// R3-M5 FIX: Validate each fetched commit before inserting to prevent
+    /// a malicious peer from injecting fabricated commit data.
     pub fn on_sync_response(&mut self, peer: AuthorityIndex, commits: Vec<FetchedCommit>) {
         // Remove active session for this peer
         self.active_sessions.retain(|s| s.peer != peer);
 
         for fetched in commits {
-            self.pending_commits.insert(fetched.commit.index, fetched);
+            let idx = fetched.commit.index;
+
+            // Reject commits we never requested
+            if !self.requested.contains(&idx) {
+                tracing::warn!(
+                    "commit_syncer: peer {} sent unrequested commit index {} — dropped",
+                    peer, idx
+                );
+                continue;
+            }
+
+            // Reject commits with empty block references
+            if fetched.commit.blocks.is_empty() {
+                tracing::warn!(
+                    "commit_syncer: peer {} sent commit {} with no block refs — dropped",
+                    peer, idx
+                );
+                continue;
+            }
+
+            // Reject if leader round is zero (invalid)
+            if fetched.commit.leader.round == 0 {
+                tracing::warn!(
+                    "commit_syncer: peer {} sent commit {} with leader round 0 — dropped",
+                    peer, idx
+                );
+                continue;
+            }
+
+            self.pending_commits.insert(idx, fetched);
         }
     }
 
@@ -244,9 +273,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_no_lag_no_sync() {
+    fn test_no_peers_no_sync() {
         let syncer = CommitSyncer::new(0);
-        assert_eq!(syncer.commit_lag(), 0);
+        assert_eq!(syncer.commit_lag(), None);
         assert!(!syncer.needs_sync());
     }
 
@@ -255,7 +284,7 @@ mod tests {
         let mut syncer = CommitSyncer::new(0);
         syncer.set_local_commit_index(5);
         syncer.update_peer_commit_index(1, 10);
-        assert_eq!(syncer.commit_lag(), 5);
+        assert_eq!(syncer.commit_lag(), Some(5));
         assert!(syncer.needs_sync());
     }
 

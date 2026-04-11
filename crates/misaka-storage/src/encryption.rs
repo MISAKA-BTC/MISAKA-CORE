@@ -19,6 +19,7 @@ use chacha20poly1305::{
 use parking_lot::RwLock;
 use sha3::Sha3_256;
 use std::collections::HashMap;
+use zeroize::Zeroize;
 
 /// Storage encryption configuration.
 #[derive(Debug, Clone)]
@@ -28,21 +29,46 @@ pub struct EncryptionConfig {
     pub key_rotation_interval: u64,
 }
 
+/// SEC-FIX N-M11: Default is now `enabled: true` (fail-closed). Operators
+/// who explicitly do NOT want encryption must set `enabled: false` in config.
 impl Default for EncryptionConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             algorithm: "chacha20-poly1305".to_string(),
             key_rotation_interval: 86400 * 30, // 30 days
         }
     }
 }
 
+impl EncryptionConfig {
+    /// R7 L-7: Validate algorithm field. Only chacha20-poly1305 is supported.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.enabled && self.algorithm != "chacha20-poly1305" {
+            return Err("unsupported encryption algorithm (only chacha20-poly1305 is supported)");
+        }
+        Ok(())
+    }
+}
+
 /// Transparent storage encryption layer.
+///
+/// SEC-FIX N-H1: `master_key` and all CF-derived keys are zeroized on drop
+/// to prevent key material from persisting in freed heap/stack memory.
 pub struct StorageEncryption {
     master_key: [u8; 32],
     cf_keys: RwLock<HashMap<String, [u8; 32]>>,
     enabled: bool,
+}
+
+impl Drop for StorageEncryption {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.master_key.zeroize();
+        for key in self.cf_keys.get_mut().values_mut() {
+            key.zeroize();
+        }
+    }
 }
 
 impl StorageEncryption {
@@ -80,24 +106,25 @@ impl StorageEncryption {
             return Ok(plaintext.to_vec());
         }
 
-        let cf_key = self.get_cf_key(cf_name);
+        let mut cf_key = self.get_cf_key(cf_name);
         let key = Key::from_slice(&cf_key);
         let cipher = ChaCha20Poly1305::new(key);
 
         // Generate random nonce
         let mut nonce_bytes = [0u8; 12];
-        rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut nonce_bytes);
+        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut nonce_bytes);
         let nonce = Nonce::from_slice(&nonce_bytes);
 
-        let ciphertext = cipher
+        let result = cipher
             .encrypt(nonce, plaintext)
-            .map_err(|e| EncryptionError::EncryptFailed(e.to_string()))?;
+            .map_err(|e| EncryptionError::EncryptFailed(e.to_string()));
+        cf_key.zeroize();
 
-        // Format: nonce (12 bytes) || ciphertext
-        let mut result = Vec::with_capacity(12 + ciphertext.len());
-        result.extend_from_slice(&nonce_bytes);
-        result.extend_from_slice(&ciphertext);
-        Ok(result)
+        let ciphertext = result?;
+        let mut out = Vec::with_capacity(12 + ciphertext.len());
+        out.extend_from_slice(&nonce_bytes);
+        out.extend_from_slice(&ciphertext);
+        Ok(out)
     }
 
     /// Decrypt a value from storage.
@@ -110,16 +137,18 @@ impl StorageEncryption {
             return Err(EncryptionError::DataTooShort(encrypted.len()));
         }
 
-        let cf_key = self.get_cf_key(cf_name);
+        let mut cf_key = self.get_cf_key(cf_name);
         let key = Key::from_slice(&cf_key);
         let cipher = ChaCha20Poly1305::new(key);
 
         let nonce = Nonce::from_slice(&encrypted[..12]);
         let ciphertext = &encrypted[12..];
 
-        cipher
+        let result = cipher
             .decrypt(nonce, ciphertext)
-            .map_err(|_| EncryptionError::DecryptFailed)
+            .map_err(|_| EncryptionError::DecryptFailed);
+        cf_key.zeroize();
+        result
     }
 
     pub fn is_enabled(&self) -> bool {

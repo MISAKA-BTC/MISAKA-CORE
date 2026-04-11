@@ -4,9 +4,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT_DIR"
 
-# Keep the RocksDB/bindgen path deterministic on this host unless the caller
-# already provided stricter values.
-export BINDGEN_EXTRA_CLANG_ARGS="${BINDGEN_EXTRA_CLANG_ARGS:--I/usr/lib/gcc/x86_64-linux-gnu/13/include}"
+source "$ROOT_DIR/scripts/lib/native_toolchain.sh"
+misaka_export_bindgen_env
 export CC="${CC:-gcc}"
 export CXX="${CXX:-g++}"
 

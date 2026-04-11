@@ -179,7 +179,11 @@ impl QuarantineStore {
             reason_display,
             offense_count
         );
-        self.entries.get(&key).unwrap()
+        // R7 M-10: Safe access — entry is guaranteed present after insert above.
+        // Using expect instead of unwrap for clarity on the invariant.
+        self.entries
+            .get(&key)
+            .expect("BUG: quarantine entry missing immediately after insert")
     }
 
     /// Is this id currently quarantined (any type)?
@@ -253,7 +257,10 @@ impl QuarantineStore {
             operator
         );
 
-        Ok(self.entries.get(&key).unwrap())
+        Ok(self
+            .entries
+            .get(&key)
+            .expect("BUG: quarantine entry missing immediately after get_mut"))
     }
 
     /// Get a specific entry.
@@ -326,7 +333,7 @@ impl QuarantineStore {
         count
     }
 
-    /// Flush entries to disk.
+    /// Flush entries to disk (atomic write + restrictive permissions).
     pub fn flush(&mut self) -> Result<(), QuarantineStoreError> {
         if !self.dirty {
             return Ok(());
@@ -335,7 +342,21 @@ impl QuarantineStore {
             entries: self.entries.values().cloned().collect(),
         };
         let data = serde_json::to_string_pretty(&snapshot)?;
-        fs::write(&self.store_path, data)?;
+
+        let tmp_path = self.store_path.with_extension("tmp");
+        {
+            let mut file = fs::File::create(&tmp_path)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                file.set_permissions(fs::Permissions::from_mode(0o600))?;
+            }
+            use std::io::Write;
+            file.write_all(data.as_bytes())?;
+            file.sync_all()?;
+        }
+        fs::rename(&tmp_path, &self.store_path)?;
+
         self.dirty = false;
         debug!("Quarantine store flushed: {} entries", self.entries.len());
         Ok(())

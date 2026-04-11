@@ -41,6 +41,7 @@ port = 3001
 [consensus]
 fast_block_time_secs = 2
 zkp_block_time_secs = 30
+retention_rounds = 10000
 
 [faucet]
 enabled = true
@@ -59,6 +60,30 @@ max_ring_size = 1024
 [bridge]
 enabled = false
 
+[staking]
+# Testnet uses lower staking requirements for easier validator onboarding.
+# 100 MISAKA = 100_000_000_000 base units (9 decimal places).
+min_stake = 100_000_000_000
+# Unbonding period in blocks (~1 day at 2s block time).
+unbonding_period = 43200
+# Maximum validators in the active set.
+max_validators = 50
+# Minimum delegation amount (in base units).
+# 10 MISAKA = 10_000_000_000 base units.
+min_delegation = 10_000_000_000
+
+[security]
+# Testnet does not require encrypted keystore for ease of development.
+# Mainnet (chain_id=1) enforces this regardless of config.
+require_encrypted_keystore = false
+
+[weak_subjectivity]
+# Testnet weak subjectivity checkpoint.
+# For a fresh testnet, epoch 0 with all-zero hash is acceptable since
+# the runtime only rejects all-zero checkpoints on chain_id=1 (mainnet).
+checkpoint = "0:0000000000000000000000000000000000000000000000000000000000000000"
+# Weak subjectivity period in epochs (shorter than mainnet for faster cycling).
+ws_period_epochs = 1440
 
 # ─── Shielded Module ────────────────────────────────────────────────────────
 # REMOVED: Shielded transfers have been deprecated.

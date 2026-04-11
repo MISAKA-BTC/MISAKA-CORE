@@ -246,6 +246,19 @@ impl PrometheusExporter {
             ConsensusMetrics::get(&m.store_checkpoints),
         );
 
+        // R2-T12: Also export metrics from the prometheus global registry
+        // (slo_metrics.rs Lazy statics register into this) so that all
+        // metrics are available from the single /api/metrics endpoint.
+        {
+            let encoder = prometheus::TextEncoder::new();
+            if let Ok(text) = encoder.encode_to_string(&prometheus::gather()) {
+                if !text.is_empty() {
+                    out.push('\n');
+                    out.push_str(&text);
+                }
+            }
+        }
+
         out
     }
 

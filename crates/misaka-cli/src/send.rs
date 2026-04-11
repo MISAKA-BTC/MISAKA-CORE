@@ -8,7 +8,7 @@
 //! Accepts human-readable decimals (e.g. `1.5` MISAKA) and converts to
 //! base units internally (9 decimal places: 1 MISAKA = 1,000,000,000 units).
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use std::io::{self, Write};
 
 /// MISAKA uses 9 decimal places.
@@ -44,6 +44,7 @@ pub struct SendArgs {
     pub rpc_url: String,
     pub chain_id: u32,
     pub skip_confirm: bool,
+    pub genesis_hash: Option<String>,
 }
 
 /// Convert human-readable amount (e.g. "1.5") to base units.
@@ -141,18 +142,65 @@ pub async fn run(args: SendArgs) -> Result<()> {
         return Ok(());
     }
 
+    // ── Resolve genesis hash ──
+    let genesis_hash = match &args.genesis_hash {
+        Some(hex) => {
+            let bytes = hex::decode(hex).context("--genesis-hash must be valid hex (64 chars)")?;
+            let mut arr = [0u8; 32];
+            if bytes.len() != 32 {
+                bail!("--genesis-hash must be exactly 32 bytes (64 hex chars)");
+            }
+            arr.copy_from_slice(&bytes);
+            arr
+        }
+        None => {
+            fetch_genesis_hash(&args.rpc_url).await.unwrap_or_else(|e| {
+                eprintln!("Warning: could not fetch genesis hash from node: {e}");
+                eprintln!("  Using zero hash — pass --genesis-hash explicitly if needed");
+                [0u8; 32]
+            })
+        }
+    };
+
     // ── Dispatch ──
-    // Phase 2c-A: default chain_id=2, genesis_hash=[0;32] for CLI
     crate::public_transfer::run(
         &args.wallet_path,
         &args.to,
         args.amount_base,
         args.fee_base,
         &args.rpc_url,
-        2,
-        [0u8; 32],
+        args.chain_id,
+        genesis_hash,
     )
     .await
+}
+
+/// Fetch genesis hash from the node, falling back to `[0u8; 32]` on failure.
+pub async fn fetch_genesis_hash_or_default(rpc_url: &str) -> [u8; 32] {
+    fetch_genesis_hash(rpc_url).await.unwrap_or_else(|e| {
+        eprintln!("Warning: could not fetch genesis hash from node: {e}");
+        [0u8; 32]
+    })
+}
+
+async fn fetch_genesis_hash(rpc_url: &str) -> Result<[u8; 32]> {
+    let url = format!("{}/api/get_chain_info", rpc_url.trim_end_matches('/'));
+    let resp: serde_json::Value = reqwest::get(&url)
+        .await
+        .context("failed to connect to node")?
+        .json()
+        .await
+        .context("invalid JSON from node")?;
+    let hex = resp
+        .get("genesisHash")
+        .and_then(|v| v.as_str())
+        .unwrap_or("0000000000000000000000000000000000000000000000000000000000000000");
+    let bytes = hex::decode(hex).context("invalid genesisHash hex from node")?;
+    let mut arr = [0u8; 32];
+    if bytes.len() == 32 {
+        arr.copy_from_slice(&bytes);
+    }
+    Ok(arr)
 }
 
 #[cfg(test)]

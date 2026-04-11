@@ -104,6 +104,33 @@ pub enum InboundNarwhalRelayEvent {
     },
 }
 
+fn effective_guard_config(config: &NarwhalRelayTransportConfig) -> misaka_p2p::GuardConfig {
+    let mut guard = config.guard_config.clone();
+    let all_peers_loopback = !config.peers.is_empty()
+        && config
+            .peers
+            .iter()
+            .all(|peer| peer.address.ip().is_loopback());
+
+    // Local multi-validator rehearsals often run every validator on the same
+    // host and advertise 127.0.0.1:<port> inside the generated genesis. The
+    // production inbound diversity guard is correct for public networks, but
+    // it rejects same-IP committee members in that topology and prevents the
+    // committee from fully meshing. Only relax the limits for explicit
+    // non-mainnet, loopback-only committee topologies.
+    if config.chain_id != MAINNET_CHAIN_ID && all_peers_loopback {
+        let peer_budget = config.peers.len().saturating_add(1);
+        guard.max_inbound_per_ip = guard.max_inbound_per_ip.max(peer_budget);
+        guard.max_inbound_per_subnet = guard.max_inbound_per_subnet.max(peer_budget);
+        guard.max_handshake_attempts_per_ip = guard
+            .max_handshake_attempts_per_ip
+            .max((peer_budget.saturating_mul(4)) as u32);
+        guard.max_half_open = guard.max_half_open.max(peer_budget.saturating_mul(4));
+    }
+
+    guard
+}
+
 fn derive_peer_id(pk: &ValidatorPqPublicKey, chain_id: u32) -> misaka_p2p::PeerId {
     misaka_p2p::PeerId::from_pubkey(&pk.to_bytes(), chain_id)
 }
@@ -113,6 +140,10 @@ fn reject_inbound_bogon_ip(ip: &IpAddr, chain_id: u32) -> bool {
         return false;
     }
     misaka_p2p::is_bogon_ip(ip)
+}
+
+fn bypass_inbound_guard(ip: &IpAddr, chain_id: u32) -> bool {
+    chain_id != MAINNET_CHAIN_ID && ip.is_loopback()
 }
 
 async fn read_fixed(stream: &mut TcpStream, n: usize, label: &str) -> Result<Vec<u8>, String> {
@@ -620,20 +651,16 @@ pub fn spawn_narwhal_block_relay_transport(
     config: NarwhalRelayTransportConfig,
     inbound_tx: mpsc::Sender<InboundNarwhalRelayEvent>,
     mut outbound_rx: mpsc::Receiver<OutboundNarwhalRelayEvent>,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        let listener = match TcpListener::bind(config.listen_addr).await {
-            Ok(listener) => listener,
-            Err(err) => {
-                error!("Narwhal relay bind {} failed: {}", config.listen_addr, err);
-                return;
-            }
-        };
-        info!(
-            "Narwhal relay transport listening on {} (authority={})",
-            config.listen_addr, config.authority_index
-        );
+) -> std::io::Result<tokio::task::JoinHandle<()>> {
+    let std_listener = std::net::TcpListener::bind(config.listen_addr)?;
+    std_listener.set_nonblocking(true)?;
+    let listener = TcpListener::from_std(std_listener)?;
+    info!(
+        "Narwhal relay transport listening on {} (authority={})",
+        config.listen_addr, config.authority_index
+    );
 
+    Ok(tokio::spawn(async move {
         let registry = Arc::new(RwLock::new(PeerRegistry::new()));
         let peer_by_pk: Arc<HashMap<Vec<u8>, RelayPeer>> = Arc::new(
             config
@@ -693,10 +720,25 @@ pub fn spawn_narwhal_block_relay_transport(
             });
         }
 
-        let conn_guard: Arc<tokio::sync::Mutex<misaka_p2p::ConnectionGuard>> =
-            Arc::new(tokio::sync::Mutex::new(
-                misaka_p2p::ConnectionGuard::with_config(config.guard_config.clone()),
-            ));
+        let guard_config = effective_guard_config(&config);
+        if guard_config.max_inbound_per_ip != config.guard_config.max_inbound_per_ip
+            || guard_config.max_inbound_per_subnet != config.guard_config.max_inbound_per_subnet
+            || guard_config.max_handshake_attempts_per_ip
+                != config.guard_config.max_handshake_attempts_per_ip
+            || guard_config.max_half_open != config.guard_config.max_half_open
+        {
+            info!(
+                "Narwhal relay local loopback topology detected; relaxing inbound guard \
+                 (per_ip={}, per_subnet={}, attempts_per_ip={}, half_open={})",
+                guard_config.max_inbound_per_ip,
+                guard_config.max_inbound_per_subnet,
+                guard_config.max_handshake_attempts_per_ip,
+                guard_config.max_half_open
+            );
+        }
+        let conn_guard: Arc<tokio::sync::Mutex<misaka_p2p::ConnectionGuard>> = Arc::new(
+            tokio::sync::Mutex::new(misaka_p2p::ConnectionGuard::with_config(guard_config)),
+        );
         {
             let guard = conn_guard.clone();
             tokio::spawn(async move {
@@ -719,12 +761,21 @@ pub fn spawn_narwhal_block_relay_transport(
                             drop(stream);
                             continue;
                         }
-                        match guard.check_inbound(remote_ip) {
-                            misaka_p2p::GuardDecision::Allow => guard.register_half_open(remote_ip),
-                            misaka_p2p::GuardDecision::Reject(reason) => {
-                                debug!("Rejecting Narwhal relay inbound {}: {}", address, reason);
-                                drop(stream);
-                                continue;
+                        if bypass_inbound_guard(&remote_ip, config.chain_id) {
+                            guard.register_half_open(remote_ip)
+                        } else {
+                            match guard.check_inbound(remote_ip) {
+                                misaka_p2p::GuardDecision::Allow => {
+                                    guard.register_half_open(remote_ip)
+                                }
+                                misaka_p2p::GuardDecision::Reject(reason) => {
+                                    debug!(
+                                        "Rejecting Narwhal relay inbound {}: {}",
+                                        address, reason
+                                    );
+                                    drop(stream);
+                                    continue;
+                                }
                             }
                         }
                     };
@@ -882,5 +933,108 @@ pub fn spawn_narwhal_block_relay_transport(
                 }
             }
         }
-    })
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn keypair() -> (ValidatorPqPublicKey, Arc<ValidatorPqSecretKey>) {
+        let kp = misaka_crypto::validator_sig::generate_validator_keypair();
+        (kp.public_key, Arc::new(kp.secret_key))
+    }
+
+    fn dummy_peer(authority_index: u32, port: u16) -> RelayPeer {
+        RelayPeer {
+            authority_index,
+            address: SocketAddr::from(([127, 0, 0, 1], port)),
+            public_key: keypair().0,
+        }
+    }
+
+    #[test]
+    fn local_loopback_topology_relaxes_inbound_guard() {
+        let (public_key, secret_key) = keypair();
+        let config = NarwhalRelayTransportConfig {
+            listen_addr: SocketAddr::from(([0, 0, 0, 0], 16110)),
+            chain_id: 2,
+            authority_index: 0,
+            public_key,
+            secret_key,
+            peers: (1..15).map(|i| dummy_peer(i, 16110 + i as u16)).collect(),
+            guard_config: misaka_p2p::GuardConfig::default(),
+            accept_observers: false,
+            observer_self: false,
+        };
+
+        let effective = effective_guard_config(&config);
+        assert!(effective.max_inbound_per_ip >= config.peers.len() + 1);
+        assert!(effective.max_inbound_per_subnet >= config.peers.len() + 1);
+        assert!(effective.max_handshake_attempts_per_ip >= ((config.peers.len() + 1) * 4) as u32);
+    }
+
+    #[test]
+    fn public_topology_keeps_default_guard() {
+        let (public_key, secret_key) = keypair();
+        let config = NarwhalRelayTransportConfig {
+            listen_addr: SocketAddr::from(([0, 0, 0, 0], 16110)),
+            chain_id: 2,
+            authority_index: 0,
+            public_key,
+            secret_key,
+            peers: vec![RelayPeer {
+                authority_index: 1,
+                address: "133.167.126.51:16110".parse().expect("addr"),
+                public_key: keypair().0,
+            }],
+            guard_config: misaka_p2p::GuardConfig::default(),
+            accept_observers: true,
+            observer_self: false,
+        };
+
+        let effective = effective_guard_config(&config);
+        assert_eq!(
+            effective.max_inbound_per_ip,
+            config.guard_config.max_inbound_per_ip
+        );
+        assert_eq!(
+            effective.max_inbound_per_subnet,
+            config.guard_config.max_inbound_per_subnet
+        );
+        assert_eq!(
+            effective.max_handshake_attempts_per_ip,
+            config.guard_config.max_handshake_attempts_per_ip
+        );
+    }
+
+    #[test]
+    fn non_mainnet_loopback_bypasses_inbound_guard() {
+        let loopback = IpAddr::from([127, 0, 0, 1]);
+        assert!(bypass_inbound_guard(&loopback, 2));
+        assert!(!bypass_inbound_guard(&loopback, MAINNET_CHAIN_ID));
+    }
+
+    #[test]
+    fn spawn_transport_returns_bind_error_when_port_in_use() {
+        let occupied = std::net::TcpListener::bind("127.0.0.1:0").expect("occupied listener");
+        let listen_addr = occupied.local_addr().expect("occupied addr");
+        let (public_key, secret_key) = keypair();
+        let (inbound_tx, _inbound_rx) = mpsc::channel(1);
+        let (_outbound_tx, outbound_rx) = mpsc::channel(1);
+        let config = NarwhalRelayTransportConfig {
+            listen_addr,
+            chain_id: 2,
+            authority_index: 0,
+            public_key,
+            secret_key,
+            peers: vec![],
+            guard_config: misaka_p2p::GuardConfig::default(),
+            accept_observers: false,
+            observer_self: false,
+        };
+
+        let result = spawn_narwhal_block_relay_transport(config, inbound_tx, outbound_rx);
+        assert!(result.is_err(), "expected bind conflict to return Err");
+    }
 }

@@ -1,5 +1,367 @@
-openapi: "3.0.0"
+openapi: "3.0.3"
 info:
   title: MISAKA API
   version: "1.0.0"
-paths: {}
+  description: |
+    MISAKA Network REST API. Proxied via misaka-api to the misaka-node RPC backend.
+    All endpoints accept JSON and return JSON unless noted otherwise.
+
+servers:
+  - url: http://localhost:3001
+    description: Local node RPC
+
+paths:
+  /health:
+    get:
+      summary: Health check
+      description: Returns node health status including block height, peer count, and sync state. Returns 503 if unhealthy.
+      tags: [System]
+      responses:
+        "200":
+          description: Node is healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+        "503":
+          description: Node is degraded (no peers or stale blocks)
+
+  /api/health:
+    get:
+      summary: Health check (alias)
+      description: Same as /health.
+      tags: [System]
+      responses:
+        "200":
+          description: Node is healthy
+
+  /v1/chain/info:
+    get:
+      summary: Get chain information
+      tags: [Chain]
+      responses:
+        "200":
+          description: Chain metadata
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChainInfo"
+
+  /v1/chain/fees:
+    get:
+      summary: Get current fee estimates
+      tags: [Chain]
+      responses:
+        "200":
+          description: Fee estimation
+
+  /v1/chain/mempool:
+    get:
+      summary: Get mempool summary
+      tags: [Chain]
+      responses:
+        "200":
+          description: Mempool info (size, bytes, min fee rate)
+
+  /v1/dag/info:
+    get:
+      summary: Get DAG consensus info
+      tags: [DAG]
+      responses:
+        "200":
+          description: DAG state (tips, depth, round)
+
+  /v1/dag/tips:
+    get:
+      summary: Get current DAG tips
+      tags: [DAG]
+      responses:
+        "200":
+          description: Array of tip block hashes
+
+  /v1/dag/block/{hash}:
+    get:
+      summary: Get DAG block by hash
+      tags: [DAG]
+      parameters:
+        - name: hash
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Block details
+        "404":
+          description: Block not found
+
+  /v1/wallet/{address}:
+    get:
+      summary: Get wallet summary for address
+      tags: [Wallet]
+      parameters:
+        - name: address
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Wallet info (balance, UTXO count)
+
+  /v1/wallet/{address}/utxos:
+    get:
+      summary: Get UTXOs for address
+      tags: [Wallet]
+      parameters:
+        - name: address
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Array of UTXOs
+
+  /v1/wallet/{address}/history:
+    get:
+      summary: Get transaction history for address
+      tags: [Wallet]
+      parameters:
+        - name: address
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Transaction history
+
+  /v1/decoys:
+    get:
+      summary: Get anonymity set decoys
+      tags: [Wallet]
+      responses:
+        "200":
+          description: Decoy UTXOs for ring signature construction
+
+  /v1/tx/submit:
+    post:
+      summary: Submit a signed transaction
+      tags: [Transaction]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SubmitTxRequest"
+      responses:
+        "200":
+          description: Transaction accepted
+        "400":
+          description: Invalid transaction
+        "401":
+          description: Authentication required
+
+  /v1/tx/{hash}:
+    get:
+      summary: Get transaction by hash
+      tags: [Transaction]
+      parameters:
+        - name: hash
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Transaction details
+        "404":
+          description: Transaction not found
+
+  /api/v1/explorer/blocks:
+    get:
+      summary: Get recent blocks
+      tags: [Explorer]
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+      responses:
+        "200":
+          description: Paginated block list
+
+  /api/v1/explorer/block/{hash_or_height}:
+    get:
+      summary: Get block by hash or height
+      tags: [Explorer]
+      parameters:
+        - name: hash_or_height
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Block details
+        "404":
+          description: Block not found
+
+  /api/v1/explorer/search/{query}:
+    get:
+      summary: Universal search (blocks, txs, addresses)
+      tags: [Explorer]
+      parameters:
+        - name: query
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Search results
+
+  /api/v1/explorer/stats:
+    get:
+      summary: Get chain statistics
+      tags: [Explorer]
+      responses:
+        "200":
+          description: Chain statistics (block count, tx count, etc.)
+
+  /api/v1/address/{address}/balance:
+    get:
+      summary: Get address balance
+      tags: [Explorer]
+      parameters:
+        - name: address
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Address balance
+
+  /api/v1/address/{address}/utxos:
+    get:
+      summary: Get address UTXOs
+      tags: [Explorer]
+      parameters:
+        - name: address
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: UTXO list
+
+  /api/v1/address/{address}/history:
+    get:
+      summary: Get address transaction history
+      tags: [Explorer]
+      parameters:
+        - name: address
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Transaction history
+
+  /api/v1/tx/{hash}/status:
+    get:
+      summary: Get transaction lifecycle status
+      tags: [Explorer]
+      parameters:
+        - name: hash
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: TX status (pending, confirmed, finalized)
+
+  /api/faucet:
+    post:
+      summary: Request testnet tokens
+      description: Only available on testnet (chain_id != 1). Rate-limited per address.
+      tags: [Faucet]
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [address, spendingPubkey]
+              properties:
+                address:
+                  type: string
+                  description: "Bech32 address (misaka1... or msk1...)"
+                spendingPubkey:
+                  type: string
+                  description: "Hex-encoded ML-DSA-65 spending public key"
+      responses:
+        "200":
+          description: Faucet request accepted
+        "429":
+          description: Rate limited
+        "504":
+          description: Request timed out
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: API key set via MISAKA_RPC_API_KEY environment variable
+
+  schemas:
+    HealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [ok, degraded]
+        block_height:
+          type: integer
+        peer_count:
+          type: integer
+        last_block_age_secs:
+          type: integer
+
+    ChainInfo:
+      type: object
+      properties:
+        chain_id:
+          type: integer
+        chain_name:
+          type: string
+        block_height:
+          type: integer
+        version:
+          type: string
+        privacy_backend:
+          type: string
+
+    SubmitTxRequest:
+      type: object
+      required: [tx]
+      properties:
+        tx:
+          type: string
+          description: Hex-encoded signed transaction

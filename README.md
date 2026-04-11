@@ -44,9 +44,8 @@ MISAKA-CORE/
 │   ├── misaka-dag/          # GhostDAG consensus, block production, virtual state
 │   ├── misaka-node/         # Full node: P2P, RPC, block producer, validator
 │   ├── misaka-cli/          # Command-line wallet and tools
-│   ├── misaka-pqc/          # PQ primitives: ML-DSA-65, ML-KEM-768
 │   ├── misaka-storage/      # UTXO set, persistent storage
-│   ├── misaka-mempool/      # Transaction mempool with nullifier tracking
+│   ├── misaka-mempool/      # Transaction mempool with fee-rate priority
 │   ├── misaka-mining/       # Block template construction
 │   ├── misaka-consensus/    # Staking registry, validator lifecycle
 │   ├── misaka-rpc/          # RPC types and handlers
@@ -62,7 +61,8 @@ MISAKA-CORE/
 │       ├── misaka-bridge/   # Anchor: lock/unlock SPL tokens
 │       └── misaka-staking/  # Anchor: validator staking (deployed)
 ├── relayer/                 # Solana ↔ MISAKA bridge relayer
-└── wallet/                  # Wallet core library
+├── wallet/core/             # Wallet core library
+└── docs/                    # Testnet deploy, validator guide
 ```
 
 ## Quick Start
@@ -210,10 +210,14 @@ Staking program: `solana-bridge/programs/misaka-staking/`
 
 - **Post-Quantum**: ML-DSA-65 (NIST FIPS 204) for all signatures
 - **P2P Encryption**: ML-KEM-768 key exchange + ChaCha20-Poly1305
-- **Shielded Pool**: SHA3-256 Merkle proofs (quantum-resistant)
 - **Bridge**: M-of-N Ed25519 committee signatures with replay protection
 - **Signature Verification**: All transparent TX inputs verified at admission
+- **Supply Cap**: Hard-enforced MAX_TOTAL_SUPPLY at consensus execution layer
+
+## Testnet Deployment
+
+See [docs/TESTNET_DEPLOY_GUIDE.md](docs/TESTNET_DEPLOY_GUIDE.md) for full testnet setup and operation instructions, and [docs/VALIDATOR_GUIDE.md](docs/VALIDATOR_GUIDE.md) for validator participation.
 
 ## License
 
-MIT
+Apache-2.0

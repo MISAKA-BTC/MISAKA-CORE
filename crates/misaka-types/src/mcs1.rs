@@ -89,9 +89,19 @@ pub fn read_u128(data: &[u8], offset: &mut usize) -> Result<u128, MisakaError> {
     Ok(v)
 }
 
+/// R7 M-3: Global MCS-1 blob size cap (256 KiB) to prevent allocation
+/// DoS when decoding attacker-controlled data.
+pub const MAX_MCS1_BLOB: usize = 262_144;
+
 pub fn read_bytes(data: &[u8], offset: &mut usize) -> Result<Vec<u8>, MisakaError> {
     let len = read_u32(data, offset)? as usize;
-    if *offset + len > data.len() {
+    if len > MAX_MCS1_BLOB {
+        return Err(MisakaError::DeserializationError(format!(
+            "MCS-1 blob too large: {} > MAX_MCS1_BLOB {}",
+            len, MAX_MCS1_BLOB
+        )));
+    }
+    if len > data.len().saturating_sub(*offset) {
         return Err(MisakaError::DeserializationError(
             "EOF reading bytes".into(),
         ));

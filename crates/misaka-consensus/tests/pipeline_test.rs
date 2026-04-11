@@ -58,6 +58,7 @@ fn test_header_processor_genesis() {
         target_time_per_block_ms: 1000,
         max_block_level: 255,
         skip_proposer_validation: true, // GhostDAG-layer test
+        chain_id: 0, // test chain
     };
 
     let processor = HeaderProcessor::new(
@@ -132,6 +133,7 @@ fn test_header_processor_chain() {
             target_time_per_block_ms: 1000,
             max_block_level: 255,
             skip_proposer_validation: true,
+            chain_id: 0,
         },
         db.clone(),
         ghostdag_store.clone(),

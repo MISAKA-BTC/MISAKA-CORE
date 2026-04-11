@@ -61,7 +61,7 @@ pub enum StorageError {
     Json(#[from] serde_json::Error),
     #[error("invalid magic: expected '{expected}', got '{got}'")]
     InvalidMagic { expected: String, got: String },
-    #[error("checksum mismatch: expected {expected}, computed {computed}")]
+    #[error("checksum mismatch: wallet file is corrupted or was modified externally")]
     ChecksumMismatch { expected: String, computed: String },
     #[error("unsupported version: {version} (max supported: {max})")]
     UnsupportedVersion { version: u32, max: u32 },
@@ -139,10 +139,19 @@ fn atomic_write(path: &Path, data: &[u8]) -> Result<(), StorageError> {
 
     std::fs::write(&tmp_path, data)?;
 
-    // File fsync — ensure data hits disk
-    if let Ok(file) = std::fs::File::open(&tmp_path) {
-        let _ = file.sync_all();
+    // R4-M7 FIX: Set restrictive permissions before fsync/rename
+    // to prevent wallet state from being world-readable.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o600);
+        std::fs::set_permissions(&tmp_path, perms)?;
     }
+
+    // R7 L-6: Always open for fsync — propagate errors.
+    // Previously, a failed open silently dropped durability guarantees.
+    let file = std::fs::File::open(&tmp_path)?;
+    file.sync_all()?;
 
     std::fs::rename(&tmp_path, path)?;
 

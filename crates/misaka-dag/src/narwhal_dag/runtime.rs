@@ -106,6 +106,9 @@ pub struct RuntimeConfig {
     pub checkpoint_interval: u64,
     /// Optional custom verifier (for tests). If None, uses MlDsa65Verifier.
     pub custom_verifier: Option<Arc<dyn SignatureVerifier>>,
+    /// Number of past rounds to retain in the store. Older blocks are GC'd.
+    /// Default: 10_000. Set to 0 to disable pruning.
+    pub retention_rounds: u64,
 }
 
 /// The async consensus runtime.
@@ -200,7 +203,21 @@ impl ConsensusRuntime {
                 config.leader_round_wave,
             ),
             linearizer: Linearizer::new(),
-            commit_finalizer: CommitFinalizer::new(),
+            commit_finalizer: {
+                let mut cf = CommitFinalizer::new();
+                if let Some(ref s) = store {
+                    if let Ok(commits) = s.read_all_commits() {
+                        if let Some(max_idx) = commits.iter().map(|c| c.index).max() {
+                            info!(
+                                "CommitFinalizer recovery: restoring last_finalized_index={}",
+                                max_idx
+                            );
+                            cf.set_last_finalized_index(max_idx);
+                        }
+                    }
+                }
+                cf
+            },
             threshold_clock: ThresholdClock::new(committee.clone()),
             timeout: TimeoutBackoff::new(config.timeout_base_ms, config.timeout_max_ms),
             committee,
@@ -483,13 +500,30 @@ impl ConsensusRuntime {
         (block, post_propose)
     }
 
-    /// Flush pending writes to store.
+    /// Flush pending writes to store and prune old rounds.
     fn flush_to_store(&mut self) {
         if let Some(store) = &self.store {
             let batch = self.dag_state.take_write_batch();
             if !batch.is_empty() {
                 if let Err(e) = store.write_batch(&batch) {
                     error!("Failed to flush to store: {}", e);
+                }
+            }
+
+            let retention = self.config.retention_rounds;
+            if retention > 0 {
+                let current = self.core.current_round() as u64;
+                if current > retention {
+                    let gc_below = (current - retention) as u32;
+                    match store.gc_below_round(gc_below) {
+                        Ok(0) => {}
+                        Ok(n) => {
+                            info!("DAG GC: pruned {} blocks below round {}", n, gc_below);
+                        }
+                        Err(e) => {
+                            error!("DAG GC failed: {}", e);
+                        }
+                    }
                 }
             }
         }
@@ -626,6 +660,7 @@ mod tests {
             checkpoint_interval: 100,
             // Use MlDsa65Verifier in tests (production verification path)
             custom_verifier: Some(Arc::new(MlDsa65Verifier)),
+            retention_rounds: 0,
         }
     }
 

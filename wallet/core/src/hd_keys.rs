@@ -130,7 +130,7 @@ impl HdSeed {
     /// Create from CSPRNG.
     pub fn generate() -> Self {
         let mut seed = [0u8; 32];
-        rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut seed);
+        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut seed);
         Self { seed }
     }
 

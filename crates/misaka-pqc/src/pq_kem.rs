@@ -40,9 +40,12 @@ pub trait PqKemBackend {
     /// Generate a fresh KEM keypair.
     fn keygen() -> Result<(Self::SecretKey, Self::PublicKey), CryptoError>;
 
-    /// SEC-FIX NM-12: This method is NOT actually deterministic with the
-    /// current pqcrypto-mlkem backend. The seed parameter is ignored.
-    /// Use `encapsulate()` instead. Retained for API compatibility only.
+    /// Deterministic encapsulation (seed-based).
+    ///
+    /// SEC-FIX N-M6: Deprecated. `pqcrypto-mlkem` does not support seeded
+    /// encapsulation, making this inherently misleading. Callers should use
+    /// `encapsulate()` (randomized) directly.
+    #[deprecated(note = "pqcrypto-mlkem ignores seed — use encapsulate() instead")]
     fn encapsulate_deterministic(
         pk: &Self::PublicKey,
         seed32: &[u8; 32],
@@ -95,22 +98,27 @@ impl std::fmt::Debug for MlKemPublicKey {
 }
 
 /// ML-KEM-768 secret key (2400 bytes). Zeroized on drop.
-pub struct MlKemSecretKey(Vec<u8>);
+///
+/// SEC-FIX N-L3: Uses `Box<[u8; ML_KEM_SK_LEN]>` instead of `Vec<u8>`
+/// to prevent reallocation-induced key copies in freed heap memory.
+pub struct MlKemSecretKey(Box<[u8; ML_KEM_SK_LEN]>);
 
 impl MlKemSecretKey {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, CryptoError> {
         if bytes.len() != ML_KEM_SK_LEN {
             return Err(CryptoError::MlKemInvalidSkLen(bytes.len()));
         }
-        Ok(Self(bytes.to_vec()))
+        let mut buf = Box::new([0u8; ML_KEM_SK_LEN]);
+        buf.copy_from_slice(bytes);
+        Ok(Self(buf))
     }
 
     pub fn as_bytes(&self) -> &[u8] {
-        &self.0
+        &*self.0
     }
 
     fn to_pqcrypto(&self) -> Result<mlkem768::SecretKey, CryptoError> {
-        mlkem768::SecretKey::from_bytes(&self.0).map_err(|_| CryptoError::MlKemDecapsulateFailed)
+        mlkem768::SecretKey::from_bytes(&*self.0).map_err(|_| CryptoError::MlKemDecapsulateFailed)
     }
 }
 
@@ -168,7 +176,6 @@ impl std::fmt::Debug for MlKemCiphertext {
 /// material leaks information via timing. Use `ct_eq_32` if comparison
 /// is ever needed.  The inner field is `pub(crate)` to prevent external
 /// code from constructing or pattern-matching the value.
-#[derive(Clone)]
 pub struct MlKemSharedSecret(pub(crate) [u8; 32]);
 
 impl MlKemSharedSecret {
@@ -221,24 +228,23 @@ impl PqKemBackend for MlKem768Backend {
 
     fn keygen() -> Result<(Self::SecretKey, Self::PublicKey), CryptoError> {
         let (pk, sk) = mlkem768::keypair();
+        let sk_bytes = sk.as_bytes();
+        let mut sk_buf = Box::new([0u8; ML_KEM_SK_LEN]);
+        sk_buf.copy_from_slice(sk_bytes);
         Ok((
-            MlKemSecretKey(sk.as_bytes().to_vec()),
+            MlKemSecretKey(sk_buf),
             MlKemPublicKey(pk.as_bytes().to_vec()),
         ))
     }
 
-    /// SEC-FIX NM-12: NOT deterministic — seed is IGNORED by pqcrypto-mlkem.
-    /// Use `encapsulate()` instead. This delegates to randomized encapsulation.
+    /// SEC-FIX N-M6: NOT deterministic — seed is IGNORED by pqcrypto-mlkem.
+    /// This method always panics. Use `encapsulate()` instead.
     #[allow(deprecated)]
     fn encapsulate_deterministic(
-        pk: &Self::PublicKey,
+        _pk: &Self::PublicKey,
         _seed32: &[u8; 32],
     ) -> Result<(Self::Ciphertext, Self::SharedSecret), CryptoError> {
-        #[cfg(debug_assertions)]
-        eprintln!(
-            "[SEC-WARN] encapsulate_deterministic: seed ignored — pqcrypto-mlkem uses system RNG"
-        );
-        Self::encapsulate(pk)
+        Err(CryptoError::MlKemEncapsulateFailed)
     }
 
     fn encapsulate(

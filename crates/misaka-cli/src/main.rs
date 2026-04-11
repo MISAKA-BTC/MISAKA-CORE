@@ -77,6 +77,10 @@ enum Commands {
         /// Skip confirmation prompt
         #[arg(short = 'y', long)]
         yes: bool,
+
+        /// Genesis hash (64 hex chars). If omitted, fetched from the node automatically.
+        #[arg(long)]
+        genesis_hash: Option<String>,
     },
 
     // ═══════════════════════════════════════════════════════
@@ -246,6 +250,7 @@ async fn main() -> Result<()> {
             chain_id,
             rpc,
             yes,
+            genesis_hash,
         } => {
             let amount_base = send::parse_amount(amount)?;
             let fee_base = send::parse_amount(fee)?;
@@ -261,6 +266,7 @@ async fn main() -> Result<()> {
                 rpc_url: rpc,
                 chain_id,
                 skip_confirm: yes,
+                genesis_hash,
             })
             .await?
         }
@@ -322,10 +328,8 @@ async fn main() -> Result<()> {
                 "⚠  `transfer` is deprecated. Use: misaka-cli send {} {}",
                 to, amount
             );
-            // Run as transparent transfer instead
-            // Phase 2b: default chain_id=2 (testnet); mainnet will require explicit --chain-id
-            // Phase 2c-A: genesis_hash [0;32] default for CLI — user should pass --genesis-hash
-            public_transfer::run(&from, &to, amount, fee, &rpc, 2, [0u8; 32]).await?
+            let genesis_hash = send::fetch_genesis_hash_or_default(&rpc).await;
+            public_transfer::run(&from, &to, amount, fee, &rpc, 2, genesis_hash).await?
         }
 
         // REMOVED: CtTransfer command — confidential transfers deprecated.
@@ -340,9 +344,8 @@ async fn main() -> Result<()> {
                 "⚠  `public-transfer` is deprecated. Use: misaka-cli send {} {} -w {}",
                 to, amount, from
             );
-            // Phase 2b: default chain_id=2 (testnet); mainnet will require explicit --chain-id
-            // Phase 2c-A: genesis_hash [0;32] default for CLI — user should pass --genesis-hash
-            public_transfer::run(&from, &to, amount, fee, &rpc, 2, [0u8; 32]).await?
+            let genesis_hash = send::fetch_genesis_hash_or_default(&rpc).await;
+            public_transfer::run(&from, &to, amount, fee, &rpc, 2, genesis_hash).await?
         }
 
         // ── Validator staking ──

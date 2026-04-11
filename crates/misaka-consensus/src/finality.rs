@@ -5,7 +5,20 @@ use misaka_types::validator::{DagCheckpointFinalityProof, FinalityProof};
 
 pub fn verify_finality(vs: &ValidatorSet, proof: &FinalityProof) -> Result<(), MisakaError> {
     let quorum = vs.quorum_threshold();
-    let weight = verify_committee_votes(vs, &proof.commits, proof.slot, &proof.block_hash)?;
+    // R4-M10: Extract epoch/chain_id from the first vote and enforce consistency
+    let (expected_epoch, expected_chain_id) = proof
+        .commits
+        .first()
+        .map(|v| (v.epoch, v.chain_id))
+        .unwrap_or((0, 0));
+    let weight = verify_committee_votes(
+        vs,
+        &proof.commits,
+        proof.slot,
+        &proof.block_hash,
+        expected_epoch,
+        expected_chain_id,
+    )?;
     if weight < quorum {
         return Err(MisakaError::QuorumNotReached {
             got: weight as u64,

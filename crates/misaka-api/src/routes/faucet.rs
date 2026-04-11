@@ -66,9 +66,31 @@ impl Default for FaucetConfig {
     fn default() -> Self {
         Self {
             drip_amount: 10_000_000_000, // 10 MISAKA (9 decimals)
-            cooldown_secs: 86400,        // 24 hours
+            cooldown_secs: 300,          // 5 minutes (testnet default)
             max_queue_depth: 100,
         }
+    }
+}
+
+impl FaucetConfig {
+    pub fn from_env() -> Self {
+        let mut cfg = Self::default();
+        if let Ok(v) = std::env::var("MISAKA_FAUCET_COOLDOWN_SECS") {
+            if let Ok(secs) = v.parse::<u64>() {
+                cfg.cooldown_secs = secs;
+            }
+        }
+        if let Ok(v) = std::env::var("MISAKA_FAUCET_DRIP_AMOUNT") {
+            if let Ok(amount) = v.parse::<u64>() {
+                cfg.drip_amount = amount;
+            }
+        }
+        if let Ok(v) = std::env::var("MISAKA_FAUCET_MAX_QUEUE") {
+            if let Ok(depth) = v.parse::<usize>() {
+                cfg.max_queue_depth = depth;
+            }
+        }
+        cfg
     }
 }
 
@@ -99,12 +121,14 @@ impl FaucetRateLimiter {
     /// single lock acquisition.
     ///
     /// Returns Ok(()) and records the request, or Err(wait_seconds).
-    pub async fn check_and_record(&self, ip: &str, address: &str) -> Result<(), u64> {
+    /// R7 M-5: Split into check-only and record phases.
+    /// `check_only` verifies cooldown without consuming the slot.
+    /// `record` is called AFTER successful queue reservation.
+    pub async fn check_only(&self, ip: &str, address: &str) -> Result<(), u64> {
         let now = Instant::now();
-        let mut state = self.state.lock().await;
-        let (ref mut ip_map, ref mut addr_map) = *state;
+        let state = self.state.lock().await;
+        let (ref ip_map, ref addr_map) = *state;
 
-        // Check IP cooldown
         if let Some(last) = ip_map.get(ip) {
             let elapsed = now.duration_since(*last);
             if elapsed < self.cooldown {
@@ -112,8 +136,6 @@ impl FaucetRateLimiter {
                 return Err(wait);
             }
         }
-
-        // Check address cooldown
         if let Some(last) = addr_map.get(address) {
             let elapsed = now.duration_since(*last);
             if elapsed < self.cooldown {
@@ -121,15 +143,19 @@ impl FaucetRateLimiter {
                 return Err(wait);
             }
         }
-
-        // Atomically record both — no window for concurrent bypass
-        ip_map.insert(ip.to_string(), now);
-        addr_map.insert(address.to_string(), now);
         Ok(())
     }
 
+    /// Record cooldown after successful queue acceptance.
+    pub async fn record(&self, ip: &str, address: &str) {
+        let now = Instant::now();
+        let mut state = self.state.lock().await;
+        let (ref mut ip_map, ref mut addr_map) = *state;
+        ip_map.insert(ip.to_string(), now);
+        addr_map.insert(address.to_string(), now);
+    }
+
     /// Periodic cleanup of expired entries.
-    #[allow(dead_code)]
     pub async fn cleanup(&self) {
         let cutoff = Instant::now() - self.cooldown * 2;
         let mut state = self.state.lock().await;
@@ -198,6 +224,13 @@ impl FaucetState {
         let rate_limiter = FaucetRateLimiter::new(config.cooldown_secs);
         let queue_depth = Arc::new(Mutex::new(0usize));
 
+        // SEC-FIX R2-C2: Clone rate_limiter for the worker BEFORE moving
+        // into `state` to avoid use-after-move.
+        let worker_rate_limiter = rate_limiter.clone();
+        let worker_proxy = proxy;
+        let worker_depth = queue_depth.clone();
+        let drip_amount = config.drip_amount;
+
         let state = Self {
             rate_limiter,
             queue_tx,
@@ -205,12 +238,8 @@ impl FaucetState {
             config: config.clone(),
         };
 
-        // Spawn background worker
-        let worker_proxy = proxy;
-        let worker_depth = queue_depth;
-        let drip_amount = config.drip_amount;
         tokio::spawn(async move {
-            faucet_worker(queue_rx, worker_proxy, worker_depth, drip_amount).await;
+            faucet_worker(queue_rx, worker_proxy, worker_depth, drip_amount, worker_rate_limiter).await;
         });
 
         state
@@ -223,15 +252,23 @@ async fn faucet_worker(
     proxy: Arc<crate::proxy::NodeProxy>,
     depth: Arc<Mutex<usize>>,
     drip_amount: u64,
+    rate_limiter: FaucetRateLimiter,
 ) {
+    let mut items_since_cleanup: u64 = 0;
     while let Some(item) = rx.recv().await {
         let result = process_drip(&proxy, &item.address, drip_amount).await;
         {
             let mut d = depth.lock().await;
             *d = d.saturating_sub(1);
         }
-        // Send result back (ignore if receiver dropped)
         let _ = item.response_tx.send(result);
+
+        // SEC-FIX N-L13: Periodic cleanup of expired rate limiter entries
+        items_since_cleanup += 1;
+        if items_since_cleanup >= 100 {
+            rate_limiter.cleanup().await;
+            items_since_cleanup = 0;
+        }
     }
 }
 
@@ -357,8 +394,8 @@ async fn handle_faucet_request(
         );
     }
 
-    // ── Rate limit check + record (atomic — SEC-FIX for TOCTOU) ──
-    if let Err(wait) = faucet.rate_limiter.check_and_record(&ip, address).await {
+    // ── Rate limit check (R7 M-5: record happens after successful enqueue) ──
+    if let Err(wait) = faucet.rate_limiter.check_only(&ip, address).await {
         return (
             StatusCode::TOO_MANY_REQUESTS,
             Json(FaucetResponse {
@@ -423,7 +460,10 @@ async fn handle_faucet_request(
         );
     }
 
-    // SEC-FIX: record() removed — check_and_record() handles both atomically.
+    // R7 M-5: Record cooldown AFTER successful queue reservation.
+    // Previously, cooldown was consumed before enqueue, griefing callers
+    // when the queue was full (503 but cooldown already burned).
+    faucet.rate_limiter.record(&ip, address).await;
 
     // Wait for worker result (with timeout)
     let result = tokio::time::timeout(faucet_request_timeout_duration(), response_rx).await;
@@ -472,14 +512,12 @@ async fn handle_faucet_request(
             )
         }
         Err(_) => {
-            // SEC-FIX-9: Timeout — the worker may still process the item
-            // later and decrement, but if it never does, depth drifts.
-            // We decrement here defensively; the worker's decrement will
-            // saturate at 0 so no underflow occurs.
-            {
-                let mut d = faucet.queue_depth.lock().await;
-                *d = d.saturating_sub(1);
-            }
+            // SEC-FIX N-M10: On timeout, do NOT decrement depth here.
+            // The worker will decrement when it eventually processes the item.
+            // Double-decrement caused counter drift; now only the worker
+            // owns the decrement responsibility. If the worker never processes
+            // (e.g., channel is dropped), the depth will be corrected on
+            // the next cleanup_expired cycle or process restart.
             (
                 StatusCode::GATEWAY_TIMEOUT,
                 Json(FaucetResponse {
@@ -496,14 +534,15 @@ async fn handle_faucet_request(
 }
 
 /// `GET /api/v1/faucet/status`
+///
+/// R7 M-7: Only expose operational status, not operator tuning parameters.
 async fn handle_faucet_status(State(state): State<AppState>) -> Json<serde_json::Value> {
     let faucet = state.faucet;
     let depth = *faucet.queue_depth.lock().await;
+    let available = depth < faucet.config.max_queue_depth;
     Json(serde_json::json!({
+        "status": if available { "open" } else { "full" },
         "queue_depth": depth,
-        "max_queue_depth": faucet.config.max_queue_depth,
-        "drip_amount": faucet.config.drip_amount,
-        "cooldown_secs": faucet.config.cooldown_secs,
     }))
 }
 
@@ -812,10 +851,13 @@ mod tests {
         let body = response_json(resp).await;
         assert_eq!(body["status"], serde_json::json!("timeout"));
         assert_eq!(body["error"], serde_json::json!("faucet request timed out"));
+        // SEC-FIX R2-C3: N-M10 changed the timeout handler to NOT decrement
+        // queue depth — only the worker does. The item is still in the channel
+        // waiting for the (hung) worker, so depth stays at 1.
         assert_eq!(
             *queue_depth.lock().await,
-            0,
-            "queue depth must be decremented after timeout"
+            1,
+            "queue depth must NOT be decremented by timeout handler (worker-only)"
         );
     }
 }

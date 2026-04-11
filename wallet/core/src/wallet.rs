@@ -186,7 +186,11 @@ impl Wallet {
             .utxos
             .get(&account_id)
             .map_or(&[] as &[OwnedUtxo], |v| v.as_slice());
-        let total: u64 = utxos.iter().filter(|u| !u.spent).map(|u| u.amount).sum();
+        // R7 M-8: Use saturating_add to prevent wrapping overflow
+        let total: u64 = utxos
+            .iter()
+            .filter(|u| !u.spent)
+            .fold(0u64, |acc, u| acc.saturating_add(u.amount));
         let utxo_count = utxos.iter().filter(|u| !u.spent).count();
         WalletBalance {
             total,
@@ -200,8 +204,7 @@ impl Wallet {
     pub fn total_balance(&self) -> u64 {
         self.accounts
             .keys()
-            .map(|id| self.get_balance(*id).total)
-            .sum()
+            .fold(0u64, |acc, id| acc.saturating_add(self.get_balance(*id).total))
     }
 
     /// Register a newly discovered UTXO.
@@ -242,10 +245,10 @@ impl Wallet {
     }
 }
 
-fn generate_random_seed() -> Vec<u8> {
+fn generate_random_seed() -> zeroize::Zeroizing<Vec<u8>> {
     let mut seed = vec![0u8; 64];
-    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut seed);
-    seed
+    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut seed);
+    zeroize::Zeroizing::new(seed)
 }
 
 #[derive(Debug, thiserror::Error)]

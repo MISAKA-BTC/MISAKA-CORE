@@ -69,6 +69,8 @@ hex = { workspace = true }
 thiserror = { workspace = true }
 chrono = { workspace = true }
 zeroize = { workspace = true }
+secrecy = { workspace = true }
+misaka-security = { path = "../misaka-security" }
 axum = { workspace = true }
 tower-http = { workspace = true }
 tower = { workspace = true, features = ["util"] }

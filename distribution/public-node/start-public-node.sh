@@ -67,6 +67,18 @@ if [ ! -f "$GENESIS" ]; then
     printf "${RED}✗ genesis_committee.toml が見つかりません${RESET}\n"
     exit 1
 fi
+VALIDATOR_SLOTS="$(grep -c '^\[\[committee\.validators\]\]' "$GENESIS" 2>/dev/null || printf '0')"
+if [ "$VALIDATOR_SLOTS" -ne 1 ]; then
+    printf "${RED}✗ public observer package は single-operator genesis 専用です (validators=%s)${RESET}\n" \
+        "$VALIDATOR_SLOTS"
+    printf "${DIM}  multi-validator / committee genesis ではこの package を使わず、operator か self-host validator 用の導線を使ってください。${RESET}\n"
+    exit 1
+fi
+GENESIS_VALIDATOR_PK="$(awk -F'"' '/^[[:space:]]*public_key[[:space:]]*=/{print $2; exit}' "$GENESIS" 2>/dev/null || echo "")"
+if [ -z "$GENESIS_VALIDATOR_PK" ]; then
+    printf "${RED}✗ genesis_committee.toml から validator public_key を取得できません${RESET}\n"
+    exit 1
+fi
 
 # --- macOS: strip Gatekeeper quarantine --------------------------
 if [ "$(uname -s)" = "Darwin" ] && command -v xattr >/dev/null 2>&1; then
@@ -88,13 +100,26 @@ mkdir -p "$DATA_DIR"
 if [ ! -f "$DATA_DIR/validator.key" ]; then
     printf "${DIM}初回起動: ephemeral observer key を生成します (validator.key)${RESET}\n"
 fi
+LOCAL_VALIDATOR_PK="$("$BINARY" --emit-validator-pubkey --data-dir "$DATA_DIR" --chain-id 2 2>/dev/null | awk '/^0x/ { key=$0 } END { print key }')"
+if [ -z "$LOCAL_VALIDATOR_PK" ]; then
+    printf "${RED}✗ validator.key の公開鍵を取得できませんでした${RESET}\n"
+    printf "${DIM}  misaka-data/validator.key を確認し、必要なら削除して再生成してください。${RESET}\n"
+    exit 1
+fi
+if [ "$LOCAL_VALIDATOR_PK" = "$GENESIS_VALIDATOR_PK" ]; then
+    printf "${RED}✗ misaka-data/validator.key が genesis validator と一致しています${RESET}\n"
+    printf "${RED}  public observer package は observer-only です。operator/shared validator key は使えません。${RESET}\n"
+    printf "${DIM}  $DATA_DIR/validator.key を削除して再起動し、ephemeral observer key を再生成してください。${RESET}\n"
+    exit 1
+fi
 
 # --- Read seeds + pubkeys (both required or both skipped) --------
 #
 # Narwhal relay のハンドシェイクは ML-DSA-65 PK-pinning 必須です (TOFU なし)。
 # node は `--seeds` だけ渡されて `--seed-pubkeys` が空だと FATAL で落ちます。
-# このスクリプトは両方揃っているときだけ両方を渡し、片方だけ/不一致/空の
-# ときは seed を一切渡さず solo mode で起動します (起動自体は継続)。
+# stock public-node package では `seeds.txt` と `seed-pubkeys.txt` は
+# 必ず 1:1 で揃っている前提です。 mismatch を warning で握りつぶすと
+# 利用者が joined のつもりで solo 起動してしまうため、fail-closed にします。
 read_csv() {
     local file="$1" out=""
     if [ -f "$file" ]; then
@@ -130,17 +155,20 @@ PUBKEYS_COUNT="$(count_csv "$SEED_PUBKEYS")"
 
 SEEDS_ARG=()
 SEED_STATUS_TEXT=""
-if [ "$SEEDS_COUNT" -eq 0 ] && [ "$PUBKEYS_COUNT" -eq 0 ]; then
-    SEED_STATUS_TEXT="${YELLOW}(none — solo self-host mode)${RESET}"
-elif [ "$SEEDS_COUNT" -eq "$PUBKEYS_COUNT" ] && [ "$SEEDS_COUNT" -gt 0 ]; then
+if [ "$SEEDS_COUNT" -eq "$PUBKEYS_COUNT" ] && [ "$SEEDS_COUNT" -gt 0 ]; then
     SEEDS_ARG=(--seeds "$SEEDS" --seed-pubkeys "$SEED_PUBKEYS")
     SEED_STATUS_TEXT="$SEEDS  ${DIM}(with $PUBKEYS_COUNT pinned pubkey$([ "$PUBKEYS_COUNT" -gt 1 ] && echo s))${RESET}"
+elif [ "$SEEDS_COUNT" -eq 0 ] && [ "$PUBKEYS_COUNT" -eq 0 ]; then
+    printf "${RED}ERROR: seeds.txt と seed-pubkeys.txt が空です。${RESET}\n"
+    printf "${RED}  public observer package は official/public seed への join 専用です。solo self-host mode には入りません。${RESET}\n"
+    printf "${DIM}  stock package の config を復元して再試行してください。${RESET}\n"
+    exit 1
 else
-    printf "${YELLOW}⚠ seeds.txt (%s entries) と seed-pubkeys.txt (%s entries) が揃いません。${RESET}\n" \
+    printf "${RED}ERROR: seeds.txt (%s entries) と seed-pubkeys.txt (%s entries) が揃いません。${RESET}\n" \
         "$SEEDS_COUNT" "$PUBKEYS_COUNT"
-    printf "${YELLOW}  Narwhal relay は PK-pinning 必須のため、seed 接続を skip して solo mode で起動します。${RESET}\n"
-    printf "${DIM}  config/seed-pubkeys.txt に同じ数の ML-DSA-65 公開鍵を追加すると接続を試みます。${RESET}\n"
-    SEED_STATUS_TEXT="${YELLOW}(mismatch — skipping, solo mode)${RESET}"
+    printf "${RED}  stock package の current truth が壊れています。solo fallback せず停止します。${RESET}\n"
+    printf "${DIM}  config/seeds.txt と config/seed-pubkeys.txt を同じ件数に揃えて再試行してください。${RESET}\n"
+    exit 1
 fi
 
 # v0.5.11 audit Mid #9: extract the real Narwhal relay port from

@@ -72,7 +72,7 @@ async fn get_chain_info(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     state
         .proxy
-        .post("/api/get_chain_info", &serde_json::json!({}))
+        .get("/api/get_chain_info")
         .await
         .map(Json)
         .map_err(|e| {
@@ -166,7 +166,7 @@ async fn get_dag_block(
 }
 
 async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
-    match state.proxy.get("/health").await {
+    match state.proxy.get("/api/health").await {
         Ok(mut data) => {
             data["apiProxy"] = serde_json::json!("ok");
             data["upstream"] = serde_json::json!("ok");
@@ -178,7 +178,7 @@ async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
 
 /// Deep health check — verifies upstream liveness AND data freshness.
 async fn deep_health(State(state): State<AppState>) -> (StatusCode, Json<serde_json::Value>) {
-    match state.proxy.get("/health").await {
+    match state.proxy.get("/api/health").await {
         Ok(mut data) => {
             data["apiProxy"] = serde_json::json!("ok");
             data["upstream"] = serde_json::json!("ok");
@@ -237,7 +237,7 @@ mod tests {
     #[tokio::test]
     async fn test_health_redacts_upstream_failure_details() {
         let upstream = Router::new().route(
-            "/health",
+            "/api/health",
             get(|| async {
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -272,7 +272,7 @@ mod tests {
     #[tokio::test]
     async fn test_deep_health_returns_summary_only_on_failure() {
         let upstream = Router::new().route(
-            "/health",
+            "/api/health",
             get(|| async {
                 (
                     StatusCode::BAD_GATEWAY,

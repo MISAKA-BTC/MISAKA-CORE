@@ -43,6 +43,28 @@ if not exist "%GENESIS%" (
     exit /b 1
 )
 
+set /a VALIDATOR_SLOTS=0
+for /f %%a in ('find /c "[[committee.validators]]" ^< "%GENESIS%"') do set "VALIDATOR_SLOTS=%%a"
+if not "%VALIDATOR_SLOTS%"=="1" (
+    echo [ERROR] public observer package は single-operator genesis 専用です ^(validators=%VALIDATOR_SLOTS%^)
+    echo         multi-validator / committee genesis では operator / self-host validator 用の導線を使ってください。
+    pause
+    exit /b 1
+)
+set "GENESIS_VALIDATOR_PK="
+for /f "tokens=2 delims==" %%a in ('findstr /c:"public_key" "%GENESIS%"') do (
+    if not defined GENESIS_VALIDATOR_PK (
+        set "RAW=%%a"
+        set "GENESIS_VALIDATOR_PK=!RAW:"=!"
+        set "GENESIS_VALIDATOR_PK=!GENESIS_VALIDATOR_PK: =!"
+    )
+)
+if not defined GENESIS_VALIDATOR_PK (
+    echo [ERROR] genesis_committee.toml から validator public_key を取得できません
+    pause
+    exit /b 1
+)
+
 REM --- First-run setup -------------------------------------------
 REM v0.5.7: bundled-validator.key has been REMOVED. Each install now
 REM generates a fresh ephemeral validator.key on first run and runs in
@@ -51,11 +73,29 @@ if not exist "%DATA_DIR%" mkdir "%DATA_DIR%"
 if not exist "%DATA_DIR%\validator.key" (
     echo 初回起動: ephemeral observer key を生成します (validator.key)
 )
+set "LOCAL_VALIDATOR_PK="
+for /f %%a in ('"%BINARY%" --emit-validator-pubkey --data-dir "%DATA_DIR%" --chain-id 2 2^>nul') do (
+    if not defined LOCAL_VALIDATOR_PK set "LOCAL_VALIDATOR_PK=%%a"
+)
+if not defined LOCAL_VALIDATOR_PK (
+    echo [ERROR] validator.key の公開鍵を取得できませんでした
+    echo         misaka-data\validator.key を確認し、必要なら削除して再生成してください。
+    pause
+    exit /b 1
+)
+if /I "%LOCAL_VALIDATOR_PK%"=="%GENESIS_VALIDATOR_PK%" (
+    echo [ERROR] misaka-data\validator.key が genesis validator と一致しています
+    echo         public observer package は observer-only です。operator/shared validator key は使えません。
+    echo         misaka-data\validator.key を削除して再起動し、ephemeral observer key を再生成してください。
+    pause
+    exit /b 1
+)
 
 REM --- Read seeds + pubkeys (both required or both skipped) ------
-REM Narwhal relay は ML-DSA-65 PK-pinning 必須。両方揃っているときだけ
-REM --seeds + --seed-pubkeys を渡します。揃わないときは seed を一切渡さず
-REM solo mode で起動します (FATAL で落ちないように)。
+REM Narwhal relay は ML-DSA-65 PK-pinning 必須。stock public-node package
+REM では seeds.txt と seed-pubkeys.txt は 1:1 で揃っている前提です。
+REM mismatch を warning で握りつぶすと joined のつもりで solo 起動して
+REM しまうので、ここでは fail-closed にします。
 set "SEEDS="
 set /a SEEDS_COUNT=0
 if exist "%SEEDS_FILE%" (
@@ -89,13 +129,25 @@ if exist "%SEED_PUBKEYS_FILE%" (
 )
 
 set "USE_SEEDS=0"
-if !SEEDS_COUNT! GTR 0 (
+if !SEEDS_COUNT! EQU 0 (
+    if !PUBKEYS_COUNT! EQU 0 (
+        echo [ERROR] seeds.txt と seed-pubkeys.txt が空です。
+        echo [ERROR] public observer package は official/public seed への join 専用です。solo self-host mode には入りません。
+        echo         stock package の config を復元して再試行してください。
+        exit /b 1
+    ) else (
+        echo [ERROR] seeds.txt ^(0 entries^) と seed-pubkeys.txt ^(!PUBKEYS_COUNT! entries^) が揃いません。
+        echo [ERROR] stock package の current truth が壊れているため、solo fallback せず停止します。
+        exit /b 1
+    )
+) else (
     if !SEEDS_COUNT! EQU !PUBKEYS_COUNT! (
         set "USE_SEEDS=1"
     ) else (
-        echo [WARN] seeds.txt (!SEEDS_COUNT! entries) と seed-pubkeys.txt (!PUBKEYS_COUNT! entries) が揃いません。
-        echo [WARN] Narwhal relay は PK-pinning 必須のため、seed 接続を skip して solo mode で起動します。
-        echo        config\seed-pubkeys.txt に同じ数の ML-DSA-65 公開鍵を追加すると接続を試みます。
+        echo [ERROR] seeds.txt (!SEEDS_COUNT! entries) と seed-pubkeys.txt (!PUBKEYS_COUNT! entries) が揃いません。
+        echo [ERROR] stock package の current truth が壊れているため、solo fallback せず停止します。
+        echo         config\seeds.txt と config\seed-pubkeys.txt を同じ件数に揃えて再試行してください。
+        exit /b 1
     )
 )
 
@@ -117,8 +169,6 @@ echo   Config : %CONFIG%
 echo   Genesis: %GENESIS%
 if "!USE_SEEDS!"=="1" (
     echo   Seeds  : !SEEDS! (with !PUBKEYS_COUNT! pinned pubkey^(s^))
-) else (
-    echo   Seeds  : (none — solo self-host mode^)
 )
 echo   Data   : %DATA_DIR%
 echo   RPC    : http://localhost:3001

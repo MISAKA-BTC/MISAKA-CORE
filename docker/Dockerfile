@@ -15,16 +15,21 @@ RUN apt-get update && \
     apt-get install -y ca-certificates curl && \
     rm -rf /var/lib/apt/lists/*
 
+RUN addgroup --system misaka && \
+    adduser --system --ingroup misaka --home /home/misaka misaka
+
 COPY --from=builder /build/target/release/misaka-node /usr/local/bin/
 COPY distribution/public-node/config/ /etc/misaka/
 
-RUN mkdir -p /data
+RUN mkdir -p /data && chown misaka:misaka /data
 
-ENV MISAKA_RPC_AUTH_MODE=open
+ENV MISAKA_RPC_AUTH_MODE=required
 
-EXPOSE 6690 6691 3001
+EXPOSE 6690 6691 3001 16110
 
 VOLUME ["/data"]
+
+USER misaka
 
 ENTRYPOINT ["misaka-node"]
 CMD ["--config", "/etc/misaka/public-node.toml", "--data-dir", "/data", "--chain-id", "2"]

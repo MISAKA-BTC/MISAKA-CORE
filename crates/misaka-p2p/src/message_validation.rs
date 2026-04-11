@@ -21,9 +21,6 @@ pub const MAX_TX_MESSAGE_SIZE: usize = 1 * 1024 * 1024;
 /// Maximum address list size.
 pub const MAX_ADDR_COUNT: usize = 1000;
 
-/// Maximum headers in a single message.
-pub const MAX_HEADERS_COUNT: usize = 2000;
-
 /// Maximum inv items per message.
 ///
 /// SEC-FIX M-17: Reduced from 50,000 to 5,000 to limit memory amplification.
@@ -33,17 +30,23 @@ pub const MAX_HEADERS_COUNT: usize = 2000;
 pub const MAX_INV_COUNT: usize = 5_000;
 
 /// Message type rate limits (max per minute).
+///
+/// R4-M2 FIX: Keys must match the `Debug` output of `MisakaPayloadType`
+/// (e.g. `"Addresses"` not `"addr"`), since `router.rs` uses
+/// `format!("{:?}", msg_type)` as the rate-limit key.
 pub fn message_rate_limits() -> HashMap<&'static str, u32> {
     let mut limits = HashMap::new();
-    limits.insert("block", 120);
-    limits.insert("tx", 5000);
-    limits.insert("inv", 500);
-    limits.insert("getblocks", 30);
-    limits.insert("getheaders", 30);
-    limits.insert("getdata", 200);
-    limits.insert("addr", 10);
-    limits.insert("ping", 60);
-    limits.insert("version", 1);
+    limits.insert("RelayBlock", 120);
+    limits.insert("Transaction", 5000);
+    limits.insert("InvRelayBlock", 500);
+    limits.insert("InvTransactions", 500);
+    limits.insert("RequestRelayBlocks", 30);
+    limits.insert("RequestHeaders", 30);
+    limits.insert("RequestTransactions", 200);
+    limits.insert("Addresses", 10);
+    limits.insert("RequestAddresses", 10);
+    limits.insert("Ping", 60);
+    limits.insert("Hello", 1);
     limits
 }
 
@@ -113,7 +116,8 @@ impl MessageRateTracker {
 
     /// Record a message and check if rate limit is exceeded.
     pub fn check_rate(&mut self, msg_type: &str) -> RateCheckResult {
-        let limit = self.limits.get(msg_type).copied().unwrap_or(300);
+        // R7 L-5: Conservative default for unknown message types (was 300)
+        let limit = self.limits.get(msg_type).copied().unwrap_or(60);
         let now = Instant::now();
         let cutoff = now - self.window;
 
@@ -172,6 +176,19 @@ impl NonceTracker {
         if self.seen.len() >= self.max_entries {
             let cutoff = now - self.max_age;
             self.seen.retain(|_, t| *t > cutoff);
+        }
+        // R7 M-4: Hard cap — if retain didn't free enough, evict oldest
+        while self.seen.len() >= self.max_entries {
+            let oldest_key = self
+                .seen
+                .iter()
+                .min_by_key(|(_, t)| *t)
+                .map(|(k, _)| *k);
+            if let Some(k) = oldest_key {
+                self.seen.remove(&k);
+            } else {
+                break;
+            }
         }
 
         if self.seen.contains_key(&nonce) {

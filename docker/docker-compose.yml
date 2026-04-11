@@ -1,5 +1,9 @@
 version: "3.8"
 
+# SEC-FIX N-H2: RPC auth mode is now parameterised via .env (default: required).
+# For local development, copy .env.example and set MISAKA_RPC_AUTH_MODE=open.
+# Production deployments MUST set MISAKA_RPC_API_KEY.
+
 services:
   misaka-node:
     build:
@@ -7,12 +11,14 @@ services:
       dockerfile: docker/Dockerfile
     container_name: misaka-public-node
     ports:
-      - "6691:6691"
-      - "3001:3001"
+      - "${MISAKA_P2P_PORT:-6691}:6691"
+      - "${MISAKA_NARWHAL_PORT:-16110}:16110"
+      - "127.0.0.1:${MISAKA_RPC_PORT:-3001}:3001"
     volumes:
       - misaka-data:/data
     environment:
-      - MISAKA_RPC_AUTH_MODE=open
+      - MISAKA_RPC_AUTH_MODE=${MISAKA_RPC_AUTH_MODE:-required}
+      - MISAKA_RPC_API_KEY=${MISAKA_RPC_API_KEY:-}
     restart: unless-stopped
 
 volumes:

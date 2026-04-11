@@ -98,7 +98,9 @@ impl NarwhalConsensusAdapter {
 #[derive(Clone)]
 pub struct NarwhalMempoolIngress {
     mempool: Arc<Mutex<UtxoMempool>>,
-    utxo_set: Arc<UtxoSet>,
+    /// R7 C-2: Shared canonical UtxoSet — same instance used by the
+    /// executor so admission checks see committed state.
+    utxo_set: Arc<tokio::sync::RwLock<UtxoSet>>,
     /// Audit #26: AppId for IntentMessage signature verification at admission.
     app_id: misaka_types::intent::AppId,
 }
@@ -115,9 +117,15 @@ impl NarwhalMempoolIngress {
         mempool.set_narwhal_relay(relay_tx);
         Self {
             mempool: Arc::new(Mutex::new(mempool)),
-            utxo_set: Arc::new(utxo_set),
+            utxo_set: Arc::new(tokio::sync::RwLock::new(utxo_set)),
             app_id,
         }
+    }
+
+    /// R7 C-2: Access the shared UtxoSet handle so the executor can
+    /// clone the Arc and keep both sides in sync.
+    pub fn utxo_set(&self) -> Arc<tokio::sync::RwLock<UtxoSet>> {
+        self.utxo_set.clone()
     }
 
     pub async fn submit_tx(&self, body: &[u8]) -> serde_json::Value {
@@ -160,7 +168,7 @@ impl NarwhalMempoolIngress {
         // Previously, submit_tx admitted transactions with NO signature check,
         // allowing garbage txs to flood mempool/DAG/consensus for free.
         if tx.tx_type == misaka_types::utxo::TxType::TransparentTransfer {
-            if let Err(e) = self.verify_tx_signatures(&tx) {
+            if let Err(e) = self.verify_tx_signatures(&tx).await {
                 return serde_json::json!({
                     "txHash": tx_hash,
                     "accepted": false,
@@ -170,8 +178,9 @@ impl NarwhalMempoolIngress {
         }
 
         let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+        let utxo_guard = self.utxo_set.read().await;
         let mut mempool = self.mempool.lock().await;
-        match mempool.admit(tx, &self.utxo_set, now_ms) {
+        match mempool.admit(tx, &utxo_guard, now_ms) {
             Ok(_) => serde_json::json!({
                 "txHash": tx_hash,
                 "accepted": true,
@@ -190,7 +199,7 @@ impl NarwhalMempoolIngress {
     /// Audit #26: Verify ML-DSA-65 signatures via IntentMessage before mempool admission.
     /// This is the same verification logic as utxo_executor::validate_transparent_transfer
     /// but performed at the RPC ingress point to prevent garbage tx flooding.
-    fn verify_tx_signatures(&self, tx: &UtxoTransaction) -> Result<(), String> {
+    async fn verify_tx_signatures(&self, tx: &UtxoTransaction) -> Result<(), String> {
         use misaka_pqc::pq_sign::{ml_dsa_verify_raw, MlDsaPublicKey, MlDsaSignature};
         use misaka_types::intent::{IntentMessage, IntentScope};
         use misaka_types::tx_signable::TxSignablePayload;
@@ -203,13 +212,13 @@ impl NarwhalMempoolIngress {
         );
         let signing_digest = intent.signing_digest();
 
+        let utxo_guard = self.utxo_set.read().await;
         for (i, input) in tx.inputs.iter().enumerate() {
             if input.utxo_refs.is_empty() {
                 return Err(format!("input {} has no UTXO refs", i));
             }
             let outref = &input.utxo_refs[0];
-            let pk_bytes = self
-                .utxo_set
+            let pk_bytes = utxo_guard
                 .get_spending_key(outref)
                 .ok_or_else(|| format!("spending key not found for input {}", i))?;
 
@@ -226,11 +235,17 @@ impl NarwhalMempoolIngress {
 
     pub async fn mempool_info(&self) -> serde_json::Value {
         let mempool = self.mempool.lock().await;
+        let utxo_guard = self.utxo_set.read().await;
         serde_json::json!({
             "mempoolSize": mempool.len(),
             "maxSize": mempool.max_size(),
-            "utxoSetSize": self.utxo_set.len(),
+            "utxoSetSize": utxo_guard.len(),
         })
+    }
+
+    pub async fn contains_tx(&self, tx_hash: &[u8; 32]) -> bool {
+        let mempool = self.mempool.lock().await;
+        mempool.contains_tx(tx_hash)
     }
 }
 

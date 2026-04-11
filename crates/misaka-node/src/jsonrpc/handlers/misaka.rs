@@ -1,7 +1,10 @@
 use super::HandlerResult;
 use crate::dag_rpc::DagRpcState;
 use crate::jsonrpc::error::*;
+use misaka_dag::compute_epoch;
 use serde_json::{json, Value};
+
+const ZERO_HASH_BYTES: [u8; 32] = [0u8; 32];
 
 // ═══════════════════════════════════════════════════════════════
 //  DAG Info / Tips / Block
@@ -9,11 +12,36 @@ use serde_json::{json, Value};
 
 /// `misaka_getDagInfo` — comprehensive DAG metrics.
 pub async fn get_dag_info(rpc: &DagRpcState) -> HandlerResult {
-    let s = rpc.node.read().await;
+    let guard = rpc.node.read().await;
+    let s = &*guard;
+    crate::dag_rpc::sync_runtime_recovery_from_shadow_state(s, rpc.runtime_recovery.as_ref()).await;
+    let (current_checkpoint_votes, vote_pool) = crate::dag_rpc::checkpoint_vote_pool_json(s);
+    let runtime_recovery =
+        crate::dag_rpc::dag_runtime_recovery_json(rpc.runtime_recovery.as_ref()).await;
+    let validator_lifecycle_recovery =
+        crate::dag_rpc::validator_lifecycle_recovery_json(rpc.runtime_recovery.as_ref()).await;
+    let consensus_architecture = crate::dag_rpc::dag_consensus_architecture_json();
+    let tx_dissemination =
+        crate::dag_rpc::dag_tx_dissemination_json(s, rpc.narwhal_dissemination.as_ref());
+    let ordering_contract =
+        crate::dag_rpc::dag_ordering_contract_json(s, rpc.narwhal_dissemination.as_ref());
+    let sr21_committee = crate::dag_rpc::dag_sr21_committee_json(s);
+    let authority_switch_readiness = crate::dag_rpc::dag_authority_switch_readiness_json(
+        &consensus_architecture,
+        &ordering_contract,
+        &sr21_committee,
+        &runtime_recovery,
+    );
+    let validator_attestation =
+        crate::dag_rpc::dag_validator_attestation_json(s, current_checkpoint_votes, vote_pool);
+    let consumer_surfaces = crate::dag_rpc::dag_consumer_surfaces_json(s);
     let snapshot = s.dag_store.snapshot();
     let tips = snapshot.get_tips();
 
     Ok(json!({
+        "consensusArchitecture": consensus_architecture,
+        "txDissemination": tx_dissemination,
+        "orderingContract": ordering_contract,
         "ghostdagK": s.ghostdag.k,
         "genesisHash": hex::encode(s.genesis_hash),
         "maxBlueScore": s.dag_store.max_blue_score(),
@@ -29,14 +57,13 @@ pub async fn get_dag_info(rpc: &DagRpcState) -> HandlerResult {
             "totalFees": s.state_manager.stats.total_fees,
         },
         "validatorCount": s.validator_count,
-        "latestCheckpoint": s.latest_checkpoint.as_ref().map(|cp| json!({
-            "blockHash": hex::encode(cp.block_hash),
-            "blueScore": cp.blue_score,
-            "utxoRoot": hex::encode(cp.utxo_root),
-            "totalSpentCount": cp.total_spent_count,
-            "totalAppliedTxs": cp.total_applied_txs,
-            "timestampMs": cp.timestamp_ms,
-        })),
+        "validatorAttestation": validator_attestation,
+        "sr21Committee": sr21_committee,
+        "authoritySwitchReadiness": authority_switch_readiness,
+        "latestCheckpoint": s.latest_checkpoint.as_ref().map(crate::dag_rpc::latest_checkpoint_json),
+        "runtimeRecovery": runtime_recovery,
+        "validatorLifecycleRecovery": validator_lifecycle_recovery,
+        "consumerSurfaces": consumer_surfaces,
     }))
 }
 
@@ -152,11 +179,11 @@ pub async fn get_virtual_chain(rpc: &DagRpcState, params: &Value) -> HandlerResu
         if Some(current) == start_hash {
             break;
         }
-        if current == s.genesis_hash || current == misaka_dag::ZERO_HASH {
+        if current == s.genesis_hash || current == ZERO_HASH_BYTES {
             break;
         }
         match snapshot.get_ghostdag_data(&current) {
-            Some(data) if data.selected_parent != misaka_dag::ZERO_HASH => {
+            Some(data) if data.selected_parent != ZERO_HASH_BYTES => {
                 current = data.selected_parent;
             }
             _ => break,
@@ -240,7 +267,7 @@ pub async fn get_checkpoint(rpc: &DagRpcState) -> HandlerResult {
 pub async fn get_protocol_version(rpc: &DagRpcState) -> HandlerResult {
     let s = rpc.node.read().await;
     Ok(json!({
-        "node_version": "0.1.0",
+        "node_version": env!("CARGO_PKG_VERSION"),
         "protocol_version": 1,
         "chain_id": s.chain_id,
     }))
@@ -250,7 +277,7 @@ pub async fn get_protocol_version(rpc: &DagRpcState) -> HandlerResult {
 pub async fn get_epoch_info(rpc: &DagRpcState) -> HandlerResult {
     let s = rpc.node.read().await;
     let blue_score = s.dag_store.max_blue_score();
-    let current_epoch = misaka_dag::DaaScore(blue_score).epoch();
+    let current_epoch = compute_epoch(blue_score);
 
     Ok(json!({
         "currentEpoch": current_epoch,
@@ -282,6 +309,7 @@ pub async fn get_validator_set(rpc: &DagRpcState) -> HandlerResult {
     Ok(json!({
         "validatorCount": s.validator_count,
         "validators": validators,
+        "sr21Committee": crate::dag_rpc::dag_sr21_committee_json(&s),
     }))
 }
 
@@ -469,7 +497,7 @@ pub async fn get_blocks_range(rpc: &DagRpcState, params: &Value) -> HandlerResul
                 }
             }
             // Continue walking if we haven't reached the start of the range
-            if data.blue_score > from_score && data.selected_parent != misaka_dag::ZERO_HASH {
+            if data.blue_score > from_score && data.selected_parent != ZERO_HASH_BYTES {
                 queue.push(data.selected_parent);
                 for blue in &data.mergeset_blues {
                     queue.push(*blue);
@@ -527,7 +555,7 @@ pub async fn get_txs_range(rpc: &DagRpcState, params: &Value) -> HandlerResult {
                     }));
                 }
             }
-            if data.blue_score > from_score && data.selected_parent != misaka_dag::ZERO_HASH {
+            if data.blue_score > from_score && data.selected_parent != ZERO_HASH_BYTES {
                 queue.push(data.selected_parent);
                 for blue in &data.mergeset_blues {
                     queue.push(*blue);

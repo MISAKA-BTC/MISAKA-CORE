@@ -95,13 +95,22 @@ pub struct SigningContext {
 #[deprecated(
     note = "SEC-FIX: Use IntentMessage::signing_digest() for executor-compatible signatures"
 )]
-pub fn compute_sig_hash(
+pub(crate) fn compute_sig_hash(
     ctx: &SigningContext,
     inputs: &[InputForSigning],
     outputs: &[OutputForSigning],
     input_index: usize,
     hash_type: SigHashType,
 ) -> [u8; 32] {
+    // R4-H4 FIX: Bounds check to prevent panic on invalid input_index.
+    if input_index >= inputs.len() {
+        tracing::error!(
+            "compute_sig_hash: input_index {} out of bounds (inputs.len()={})",
+            input_index,
+            inputs.len()
+        );
+        return [0u8; 32];
+    }
     let mut h = Sha3_256::new();
     h.update(b"MISAKA:tx:sighash:v2:");
     h.update(&ctx.chain_id);
@@ -275,18 +284,67 @@ pub fn verify_input_signature(
     }
 }
 
-// SEC-FIX: sign_transaction() has been removed. It used the deprecated
-// compute_sig_hash() (v2 sighash domain) which is incompatible with the
-// executor's IntentMessage::signing_digest(). Any code using this function
-// would produce signatures that fail verification in the DAG executor.
-//
-// For correct transaction signing, use:
-//   let payload = TxSignablePayload::from(&tx);
-//   let intent = IntentMessage::wrap(IntentScope::TransparentTransfer, app_id, &payload);
-//   let digest = intent.signing_digest();
-//   ml_dsa_sign_raw(&sk, &digest)
-//
-// See: crates/misaka-cli/src/public_transfer.rs for the canonical signing path.
+/// Compute the executor-compatible signing digest for a transaction.
+///
+/// This produces the same 32-byte digest that the DAG executor's
+/// `UtxoExecutor` verifies against: `SHA3-256("MISAKA-INTENT:v1:" || borsh(IntentMessage))`.
+///
+/// Use this instead of `compute_sig_hash()` for all on-chain transactions.
+pub fn compute_intent_signing_digest(
+    tx: &misaka_types::utxo::UtxoTransaction,
+    chain_id: u32,
+    genesis_hash: [u8; 32],
+) -> [u8; 32] {
+    use misaka_types::intent::{AppId, IntentMessage, IntentScope};
+    use misaka_types::tx_signable::TxSignablePayload;
+
+    let payload = TxSignablePayload::from(tx);
+    let app_id = AppId::new(chain_id, genesis_hash);
+    let intent = IntentMessage::wrap(IntentScope::TransparentTransfer, app_id, &payload);
+    intent.signing_digest()
+}
+
+/// Sign a transaction input using the executor-compatible IntentMessage digest.
+///
+/// Produces a raw 3309-byte ML-DSA-65 signature (no trailing hash_type byte),
+/// compatible with the on-chain verifier.
+pub fn sign_input_intent(
+    signing_digest: &[u8; 32],
+    signing_key: &[u8],
+) -> Result<Vec<u8>, SigningError> {
+    if signing_key.is_empty() {
+        return Err(SigningError::EmptyKey);
+    }
+
+    let sk = misaka_pqc::pq_sign::MlDsaSecretKey::from_bytes(signing_key)
+        .map_err(|e| SigningError::Failed(format!("invalid secret key: {}", e)))?;
+    let pq_sig = misaka_pqc::pq_sign::ml_dsa_sign_raw(&sk, signing_digest)
+        .map_err(|e| SigningError::Failed(format!("ML-DSA-65 signing failed: {}", e)))?;
+
+    Ok(pq_sig.0)
+}
+
+/// Verify a transaction input signature using the executor-compatible IntentMessage digest.
+///
+/// Accepts only raw 3309-byte ML-DSA-65 signatures (no hash_type byte).
+pub fn verify_input_signature_intent(
+    signing_digest: &[u8; 32],
+    public_key: &[u8],
+    signature: &[u8],
+) -> Result<bool, SigningError> {
+    if public_key.is_empty() || signature.len() != 3309 {
+        return Ok(false);
+    }
+
+    let pk = misaka_pqc::pq_sign::MlDsaPublicKey::from_bytes(public_key)
+        .map_err(|e| SigningError::VerificationFailed(format!("invalid public key: {}", e)))?;
+    let pq_sig = misaka_pqc::pq_sign::MlDsaSignature::from_bytes(signature)
+        .map_err(|e| SigningError::VerificationFailed(format!("invalid signature: {}", e)))?;
+    match misaka_pqc::pq_sign::ml_dsa_verify_raw(&pk, signing_digest, &pq_sig) {
+        Ok(()) => Ok(true),
+        Err(_) => Ok(false),
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum SigningError {

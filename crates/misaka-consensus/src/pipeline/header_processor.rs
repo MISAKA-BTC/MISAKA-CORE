@@ -25,7 +25,11 @@ pub struct HeaderProcessorConfig {
     /// MUST be false in production. Only true for GhostDAG-layer tests
     /// that don't exercise the ML-DSA-65 signature pipeline.
     /// Production code MUST set this to false.
+    /// R3-M9 FIX: Automatically forced to false on mainnet (chain_id == 1).
     pub skip_proposer_validation: bool,
+    /// Network chain ID. Used to enforce that `skip_proposer_validation`
+    /// cannot be enabled on mainnet (chain_id == 1).
+    pub chain_id: u64,
 }
 
 /// Errors during header processing.
@@ -136,7 +140,9 @@ impl HeaderProcessor {
         // verification. Only genesis is exempt.
         let is_genesis = header.hash == self.config.genesis_hash;
 
-        if !is_genesis && !self.config.skip_proposer_validation && header.proposer_pk.is_empty() {
+        // R3-M9 FIX: Never honor skip_proposer_validation on mainnet (chain_id == 1)
+        let skip_validation = self.config.skip_proposer_validation && self.config.chain_id != 1;
+        if !is_genesis && !skip_validation && header.proposer_pk.is_empty() {
             return Err(HeaderProcessingError::MissingProposerPk);
         }
 

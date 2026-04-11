@@ -239,7 +239,8 @@ impl DagP2pEventLoop {
     ) {
         let (inbound_tx, inbound_rx) = mpsc::channel(INBOUND_CHANNEL_SIZE);
         let (outbound_tx, outbound_rx) = mpsc::channel(OUTBOUND_CHANNEL_SIZE);
-        let observation = Arc::new(RwLock::new(DagP2pObservationState::default()));
+        let observation: Arc<RwLock<DagP2pObservationState>> =
+            Arc::new(RwLock::new(DagP2pObservationState::default()));
 
         let event_loop = Self {
             peer_syncs: HashMap::new(),
@@ -1258,7 +1259,7 @@ impl DagP2pEventLoop {
     #[allow(clippy::unwrap_used)] // get_mut follows unconditional insert above
     async fn get_or_create_sync(&mut self, peer_id: &misaka_p2p::PeerId) -> &mut DagSyncManager {
         if !self.peer_syncs.contains_key(peer_id) {
-            let mut sync = DagSyncManager::new();
+            let mut sync: DagSyncManager = DagSyncManager::new();
             let guard = self.state.read().await;
             let snapshot = guard.dag_store.snapshot();
 

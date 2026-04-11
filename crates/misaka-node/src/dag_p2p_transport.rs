@@ -997,6 +997,17 @@ impl PeerRegistry {
             }
         }
     }
+
+    /// R4-M4 FIX: Snapshot peer senders so callers can drop the lock before sending.
+    fn snapshot_senders(
+        &self,
+        target: Option<&misaka_p2p::PeerId>,
+    ) -> Vec<mpsc::Sender<Vec<u8>>> {
+        match target {
+            Some(id) => self.peers.get(id).cloned().into_iter().collect(),
+            None => self.peers.values().cloned().collect(),
+        }
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -1601,6 +1612,7 @@ async fn send_initial_dag_hello(
 // ═══════════════════════════════════════════════════════════════
 
 #[cfg(feature = "dag")]
+/// `parsed_seeds` carries the explicit seed/pubkey pinning list for the relay handshake.
 pub async fn run_dag_p2p_transport(
     listen_addr: SocketAddr,
     our_pk: ValidatorPqPublicKey,
@@ -1612,7 +1624,6 @@ pub async fn run_dag_p2p_transport(
     node_mode: NodeMode,
     state: Arc<RwLock<DagNodeState>>,
     seed_addrs: Vec<SocketAddr>,
-    /// Phase 2b' (M7'): Parsed seed entries with pinned ML-DSA-65 public keys.
     parsed_seeds: Vec<misaka_types::seed_entry::SeedEntry>,
     observation: Arc<RwLock<crate::dag_p2p_surface::DagP2pObservationState>>,
     guard_config: misaka_p2p::GuardConfig,
@@ -1756,11 +1767,16 @@ pub async fn run_dag_p2p_transport(
     }
 
     // Outbound router
+    // R4-M4 FIX: Snapshot peer senders under read lock, drop lock before sending
+    // to prevent writer starvation during slow broadcasts.
     let reg2 = reg.clone();
     tokio::spawn(async move {
         while let Some(ev) = outbound_rx.recv().await {
             if let Ok(j) = serde_json::to_vec(&ev.message) {
-                reg2.read().await.send(ev.peer_id.as_ref(), &j).await;
+                let senders = reg2.read().await.snapshot_senders(ev.peer_id.as_ref());
+                for tx in senders {
+                    let _ = tx.send(j.clone()).await;
+                }
             }
         }
     });
@@ -1783,9 +1799,13 @@ pub async fn run_dag_p2p_transport(
                 ticker.tick().await;
 
                 // 1. Broadcast GetPeers to all connected peers
+                // R4-M4 FIX: Snapshot senders, drop lock before sending
                 let get_peers_msg = misaka_dag::dag_p2p::DagP2pMessage::GetPeers;
                 if let Ok(j) = serde_json::to_vec(&get_peers_msg) {
-                    disc_reg.read().await.send(None, &j).await;
+                    let senders = disc_reg.read().await.snapshot_senders(None);
+                    for tx in senders {
+                        let _ = tx.send(j.clone()).await;
+                    }
                 }
 
                 // 2. Drain discovered peer addresses from observation state

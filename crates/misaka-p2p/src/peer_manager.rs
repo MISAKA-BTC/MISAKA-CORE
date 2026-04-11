@@ -127,23 +127,36 @@ impl PeerManagerRuntime {
         }
     }
 
+    /// SEC-FIX N-L7: Maximum data payload size per entry.
+    const MAX_ENTRY_DATA_SIZE: usize = 64 * 1024; // 64 KiB
+
     /// Create a new entry.
+    ///
+    /// SEC-FIX N-M5: Uses a single write-lock for both capacity check and insert,
+    /// eliminating the TOCTOU race where concurrent threads could exceed max_entries.
     pub fn create_entry(&self, data: Vec<u8>) -> Result<u64, PeerManagerError> {
-        let entries = self.entries.read();
+        if data.len() > Self::MAX_ENTRY_DATA_SIZE {
+            return Err(PeerManagerError::Internal(format!(
+                "entry data too large: {} > {}",
+                data.len(),
+                Self::MAX_ENTRY_DATA_SIZE
+            )));
+        }
+
+        let mut entries = self.entries.write();
         if entries.len() >= self.config.max_entries {
             return Err(PeerManagerError::CapacityExceeded {
                 current: entries.len(),
                 max: self.config.max_entries,
             });
         }
-        drop(entries);
 
         let id = self
             .next_id
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let now = now_secs();
 
-        self.entries.write().insert(
+        entries.insert(
             id,
             PeerManagerEntry {
                 id,
@@ -155,6 +168,7 @@ impl PeerManagerRuntime {
                 metadata: HashMap::new(),
             },
         );
+        drop(entries);
 
         self.stats
             .total_created
@@ -185,9 +199,15 @@ impl PeerManagerRuntime {
         self.stats
             .total_completed
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // SEC-FIX N-L8: saturating decrement prevents underflow to u64::MAX
         self.stats
             .active_count
-            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            .fetch_update(
+                std::sync::atomic::Ordering::Relaxed,
+                std::sync::atomic::Ordering::Relaxed,
+                |v| Some(v.saturating_sub(1)),
+            )
+            .ok();
         self.stats
             .total_processing_ms
             .fetch_add(duration, std::sync::atomic::Ordering::Relaxed);
@@ -212,9 +232,15 @@ impl PeerManagerRuntime {
             self.stats
                 .total_failed
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            // SEC-FIX N-L8: saturating decrement prevents underflow
             self.stats
                 .active_count
-                .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                .fetch_update(
+                    std::sync::atomic::Ordering::Relaxed,
+                    std::sync::atomic::Ordering::Relaxed,
+                    |v| Some(v.saturating_sub(1)),
+                )
+                .ok();
             self.emit_event(PeerManagerEvent::EntryFailed { id, reason });
             Ok(false) // No more retries
         } else {
@@ -262,9 +288,15 @@ impl PeerManagerRuntime {
                 self.stats
                     .total_expired
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                // SEC-FIX N-L8: saturating decrement prevents underflow
                 self.stats
                     .active_count
-                    .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                    .fetch_update(
+                        std::sync::atomic::Ordering::Relaxed,
+                        std::sync::atomic::Ordering::Relaxed,
+                        |v| Some(v.saturating_sub(1)),
+                    )
+                    .ok();
             }
         }
 

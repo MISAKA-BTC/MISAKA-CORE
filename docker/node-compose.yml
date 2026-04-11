@@ -34,29 +34,33 @@ services:
       NODE_DAG_MEMPOOL_SIZE: ${NODE_DAG_MEMPOOL_SIZE:-10000}
       NODE_DAG_RPC_PEERS: ${NODE_DAG_RPC_PEERS:-}
       NODE_EXPERIMENTAL_ZK_PATH: ${NODE_EXPERIMENTAL_ZK_PATH:-false}
-      MISAKA_VALIDATOR_PASSPHRASE: ${MISAKA_VALIDATOR_PASSPHRASE:-}
-      # v0.5.12 audit Docker doc fix: v0.5.7+ defaults RPC auth to
-      # fail-closed on all chains. Without an explicit mode or API
-      # key the node refuses to start. For compose-based dev setups
-      # default to `open`; override with MISAKA_RPC_AUTH_MODE=require
-      # and MISAKA_RPC_API_KEY=<key> in the .env file for a locked
-      # deployment.
-      MISAKA_RPC_AUTH_MODE: ${MISAKA_RPC_AUTH_MODE:-open}
+      # SEC-FIX R2-H2: Default to `required` (fail-closed). To run with
+      # open auth for local development, set MISAKA_RPC_AUTH_MODE=open
+      # and MISAKA_RPC_API_KEY=<key> in the .env file.
+      MISAKA_RPC_AUTH_MODE: ${MISAKA_RPC_AUTH_MODE:-required}
       MISAKA_RPC_API_KEY: ${MISAKA_RPC_API_KEY:-}
     ports:
-      - "${NODE_RPC_PORT:-3001}:${NODE_RPC_PORT:-3001}"
+      # R7 H-2: RPC bound to loopback only; override with 0.0.0.0 in .env if remote access needed
+      - "127.0.0.1:${NODE_RPC_PORT:-3001}:${NODE_RPC_PORT:-3001}"
       - "${NODE_P2P_PORT:-6690}:${NODE_P2P_PORT:-6690}"
+      - "${NODE_NARWHAL_PORT:-16110}:${NODE_NARWHAL_PORT:-16110}"
+    secrets:
+      - validator_passphrase
     volumes:
       - misaka-node-data:/var/lib/misaka
     healthcheck:
       test:
         - CMD-SHELL
-        - curl -fsS http://127.0.0.1:$${NODE_RPC_PORT:-3001}/health >/dev/null
+        - curl -fsS http://127.0.0.1:$${NODE_RPC_PORT:-3001}/api/health >/dev/null
       interval: 30s
       timeout: 5s
       retries: 5
       start_period: 30s
     stop_grace_period: 2m
+
+secrets:
+  validator_passphrase:
+    file: ./secrets/validator_passphrase.txt
 
 volumes:
   misaka-node-data:

@@ -149,6 +149,12 @@ impl Linearizer {
                         }
                     }
                 }
+            } else {
+                tracing::warn!(
+                    "Linearizer: block round={} author={} not found in DAG, skipping",
+                    block_ref.round,
+                    block_ref.author,
+                );
             }
         }
 
@@ -220,24 +226,35 @@ impl CommitFinalizer {
     pub fn submit(&mut self, output: LinearizedOutput) {
         self.pending_finalization
             .insert(output.commit_index, output);
-        // GC old entries
+        // R3-M1 FIX: Only GC entries that have already been finalized.
+        // Previously pop_first() could discard unfinalized commits,
+        // permanently losing their transactions.
         while self.pending_finalization.len() > self.max_pending {
-            self.pending_finalization.pop_first();
+            if let Some(&oldest_key) = self.pending_finalization.keys().next() {
+                let is_finalized = self
+                    .last_finalized_index
+                    .map_or(false, |last| oldest_key <= last);
+                if is_finalized {
+                    self.pending_finalization.remove(&oldest_key);
+                } else {
+                    break;
+                }
+            } else {
+                break;
+            }
         }
     }
 
     /// Finalize the next commit in sequence.
     ///
-    /// First commit ever: finalize the lowest available index.
-    /// Subsequent: finalize `last_finalized_index + 1`.
+    /// R4-H1 FIX: Always require sequential ordering starting from index 0.
+    /// Previously, the first finalization took the lowest pending key,
+    /// which could permanently skip earlier commits (e.g. finalizing
+    /// commit 2 when commit 1 hasn't arrived yet).
     pub fn try_finalize(&mut self) -> Option<LinearizedOutput> {
         let next = match self.last_finalized_index {
-            None => {
-                // First finalization: take the lowest pending index
-                let &first_key = self.pending_finalization.keys().next()?;
-                first_key
-            }
-            Some(last) => last + 1,
+            None => 0,
+            Some(last) => last.saturating_add(1),
         };
 
         if let Some(output) = self.pending_finalization.remove(&next) {
@@ -355,7 +372,8 @@ mod tests {
         let mut finalizer = CommitFinalizer::new();
         assert!(finalizer.last_finalized_index().is_none());
 
-        // Submit out of order: 2 before 1
+        // R4-H1: Submit out of order: 2 before 1.
+        // Finalizer must NOT finalize 2 until 0 and 1 are available.
         finalizer.submit(LinearizedOutput {
             commit_index: 2,
             leader: BlockRef {
@@ -369,16 +387,12 @@ mod tests {
             overflow_carryover: vec![],
             leader_state_root: None,
         });
-        // First finalization: takes lowest available = 2 (since 1 is missing)
-        // But we want sequential: 1 must come before 2
-        // Actually, first finalization takes the lowest key (2), but then next expected is 3
-        // So submit 1 after and test again
-        let f = finalizer.try_finalize().unwrap(); // first ever: takes lowest = 2
-        assert_eq!(f.commit_index, 2);
+        // Cannot finalize: index 0 is required first
+        assert!(finalizer.try_finalize().is_none());
 
-        // Now last_finalized = 2, next expected = 3
+        // Submit index 0
         finalizer.submit(LinearizedOutput {
-            commit_index: 3,
+            commit_index: 0,
             leader: BlockRef {
                 round: 0,
                 author: 0,
@@ -390,8 +404,30 @@ mod tests {
             overflow_carryover: vec![],
             leader_state_root: None,
         });
-        let f3 = finalizer.try_finalize().unwrap();
-        assert_eq!(f3.commit_index, 3);
+        let f0 = finalizer.try_finalize().unwrap();
+        assert_eq!(f0.commit_index, 0);
+
+        // Index 1 still missing — cannot finalize 2 yet
+        assert!(finalizer.try_finalize().is_none());
+
+        // Submit index 1, now 1 and 2 should finalize in order
+        finalizer.submit(LinearizedOutput {
+            commit_index: 1,
+            leader: BlockRef {
+                round: 0,
+                author: 0,
+                digest: BlockDigest([0; 32]),
+            },
+            transactions: vec![],
+            blocks: vec![],
+            timestamp_ms: 0,
+            overflow_carryover: vec![],
+            leader_state_root: None,
+        });
+        let f1 = finalizer.try_finalize().unwrap();
+        assert_eq!(f1.commit_index, 1);
+        let f2 = finalizer.try_finalize().unwrap();
+        assert_eq!(f2.commit_index, 2);
     }
 
     #[test]

@@ -661,7 +661,7 @@ mod tests {
     async fn test_validator_api_write_route_requires_api_key() {
         let state = test_state();
         let auth = ApiKeyState {
-            required_key: Some("validator-secret".into()),
+            required_key: Some(secrecy::SecretString::new("validator-secret".into())),
             write_ip_allowlist: vec![],
             auth_required: false,
         };
@@ -710,7 +710,7 @@ mod tests {
     async fn test_validator_api_control_plane_mutation_routes_require_api_key() {
         let state = test_state();
         let auth = ApiKeyState {
-            required_key: Some("validator-secret".into()),
+            required_key: Some(secrecy::SecretString::new("validator-secret".into())),
             write_ip_allowlist: vec![],
             auth_required: false,
         };
@@ -1056,7 +1056,7 @@ mod tests {
     ) {
         let state = test_state();
         let auth = ApiKeyState {
-            required_key: Some("validator-secret".into()),
+            required_key: Some(secrecy::SecretString::new("validator-secret".into())),
             write_ip_allowlist: vec!["127.0.0.1".parse().expect("loopback ip")],
             auth_required: false,
         };
@@ -1094,7 +1094,7 @@ mod tests {
     async fn test_validator_api_write_route_rejects_disallowed_ip_with_valid_bearer() {
         let state = test_state();
         let auth = ApiKeyState {
-            required_key: Some("validator-secret".into()),
+            required_key: Some(secrecy::SecretString::new("validator-secret".into())),
             write_ip_allowlist: vec!["127.0.0.1".parse().expect("loopback ip")],
             auth_required: false,
         };

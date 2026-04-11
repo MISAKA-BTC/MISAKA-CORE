@@ -34,20 +34,18 @@ const DST_PUBPARAM: &[u8] = b"MISAKA-LRS:a-param:v1";
 
 // 笏笏笏 Zeroize helpers (inlined from deleted `secret` module) 笏笏
 
-/// Zeroize polynomial coefficients in-place (volatile write).
+/// Zeroize polynomial coefficients in-place.
+/// SEC-FIX N-L4: Uses `zeroize` crate instead of hand-rolled `unsafe` volatile writes.
 fn zeroize_poly_coeffs(coeffs: &mut [i32; N]) {
-    for c in coeffs.iter_mut() {
-        unsafe { std::ptr::write_volatile(c, 0) };
-    }
-    std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
+    use zeroize::Zeroize;
+    coeffs.zeroize();
 }
 
-/// Zeroize byte slice in-place (volatile write).
+/// Zeroize byte slice in-place.
+/// SEC-FIX N-L4: Uses `zeroize` crate instead of hand-rolled `unsafe` volatile writes.
 fn zeroize_bytes(buf: &mut [u8]) {
-    for b in buf.iter_mut() {
-        unsafe { std::ptr::write_volatile(b, 0) };
-    }
-    std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
+    use zeroize::Zeroize;
+    buf.zeroize();
 }
 
 // 笏笏笏 Polynomial Type 笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏
@@ -439,19 +437,6 @@ mod tests {
 
     fn shared_a() -> Poly {
         derive_public_param(&DEFAULT_A_SEED)
-    }
-
-    fn make_ring(size: usize) -> (Poly, Vec<Poly>, usize, SpendingKeypair) {
-        let a = shared_a();
-        let mut wallets: Vec<SpendingKeypair> = (0..size)
-            .map(|_| SpendingKeypair::from_ml_dsa(MlDsaKeypair::generate().secret_key).unwrap())
-            .collect();
-
-        let ring_pks: Vec<Poly> = wallets.iter().map(|w| w.public_poly.clone()).collect();
-        let signer_idx = 0;
-        let signer = wallets.swap_remove(signer_idx);
-
-        (a, ring_pks, signer_idx, signer)
     }
 
     #[test]

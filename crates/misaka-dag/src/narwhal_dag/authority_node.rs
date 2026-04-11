@@ -286,6 +286,7 @@ mod tests {
                 dag_config: DagStateConfig::default(),
                 checkpoint_interval: 100,
                 custom_verifier: Some(ctx.sig_verifier.clone()),
+                retention_rounds: 0,
             },
             recover_on_start: false,
         };
@@ -312,6 +313,7 @@ mod tests {
                 dag_config: DagStateConfig::default(),
                 checkpoint_interval: 100,
                 custom_verifier: Some(ctx_epoch0.sig_verifier.clone()),
+                retention_rounds: 0,
             },
             recover_on_start: false,
         };
@@ -345,6 +347,7 @@ mod tests {
                 dag_config: DagStateConfig::default(),
                 checkpoint_interval: 100,
                 custom_verifier: Some(ctx.sig_verifier.clone()),
+                retention_rounds: 0,
             },
             recover_on_start: false,
         };

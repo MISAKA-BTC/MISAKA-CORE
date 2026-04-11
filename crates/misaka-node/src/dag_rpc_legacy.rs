@@ -54,12 +54,14 @@ fn uniform_stake_quorum_threshold(validator_count: usize) -> u128 {
     n - f
 }
 use misaka_dag::{
+    compute_epoch,
     save_runtime_snapshot,
-    DaaScore,
     DagCheckpoint,
     DagNodeState,
     DagStore, // trait — for snapshot.get_tips() etc.
 };
+
+const ZERO_HASH_BYTES: [u8; 32] = [0u8; 32];
 
 #[derive(Deserialize)]
 struct DagTxQuery {
@@ -253,7 +255,7 @@ impl DagRuntimeRecoveryObservation {
     }
 }
 
-async fn sync_runtime_recovery_from_shadow_state(
+pub(crate) async fn sync_runtime_recovery_from_shadow_state(
     state: &DagNodeState,
     observation: Option<&Arc<RwLock<DagRuntimeRecoveryObservation>>>,
 ) {
@@ -323,7 +325,7 @@ async fn dag_p2p_observation_json(
     }))
 }
 
-async fn dag_runtime_recovery_json(
+pub(crate) async fn dag_runtime_recovery_json(
     observation: Option<&Arc<RwLock<DagRuntimeRecoveryObservation>>>,
 ) -> serde_json::Value {
     let Some(observation) = observation else {
@@ -375,7 +377,7 @@ async fn dag_runtime_recovery_json(
     })
 }
 
-async fn validator_lifecycle_recovery_json(
+pub(crate) async fn validator_lifecycle_recovery_json(
     observation: Option<&Arc<RwLock<DagRuntimeRecoveryObservation>>>,
 ) -> serde_json::Value {
     let Some(observation) = observation else {
@@ -536,7 +538,7 @@ fn verify_dag_pre_admission(
     Ok(admission_path)
 }
 
-fn latest_checkpoint_json(checkpoint: &DagCheckpoint) -> serde_json::Value {
+pub(crate) fn latest_checkpoint_json(checkpoint: &DagCheckpoint) -> serde_json::Value {
     let target = checkpoint.validator_target();
     serde_json::json!({
         "blockHash": hex::encode(checkpoint.block_hash),
@@ -555,7 +557,7 @@ fn latest_checkpoint_json(checkpoint: &DagCheckpoint) -> serde_json::Value {
     })
 }
 
-fn validator_identity_json(identity: &ValidatorIdentity) -> serde_json::Value {
+pub(crate) fn validator_identity_json(identity: &ValidatorIdentity) -> serde_json::Value {
     serde_json::json!({
         "validatorId": hex::encode(identity.validator_id),
         "stakeWeight": identity.stake_weight.to_string(),
@@ -565,10 +567,15 @@ fn validator_identity_json(identity: &ValidatorIdentity) -> serde_json::Value {
     })
 }
 
-fn dag_sr21_committee_json(state: &DagNodeState) -> serde_json::Value {
+pub(crate) fn dag_sr21_committee_json(state: &DagNodeState) -> serde_json::Value {
     let blue_score = state.dag_store.max_blue_score();
-    let current_epoch = DaaScore(blue_score).epoch();
-    let election_result = sr21_election::run_election(&state.known_validators, current_epoch);
+    let current_epoch = compute_epoch(blue_score);
+    let effective_min_stake = sr21_election::effective_min_sr_stake(state.chain_id);
+    let election_result = sr21_election::run_election_for_chain(
+        &state.known_validators,
+        state.chain_id,
+        current_epoch,
+    );
     let preview_active_validator_ids: Vec<[u8; 32]> = election_result
         .active_srs
         .iter()
@@ -577,9 +584,7 @@ fn dag_sr21_committee_json(state: &DagNodeState) -> serde_json::Value {
     let eligible_validator_count = state
         .known_validators
         .iter()
-        .filter(|validator| {
-            validator.is_active && validator.stake_weight >= sr21_election::MIN_SR_STAKE
-        })
+        .filter(|validator| validator.is_active && validator.stake_weight >= effective_min_stake)
         .count();
     let configured_active_count = state.num_active_srs.max(1);
     let preview_active_count = election_result.num_active;
@@ -609,7 +614,7 @@ fn dag_sr21_committee_json(state: &DagNodeState) -> serde_json::Value {
         "currentRuntimeCommittee": "validatorBreadth",
         "completionTargetCommittee": "superRepresentative21",
         "committeeSizeCap": sr21_election::MAX_SR_COUNT,
-        "minimumStake": sr21_election::MIN_SR_STAKE.to_string(),
+        "minimumStake": effective_min_stake.to_string(),
         "knownValidatorCount": state.known_validators.len(),
         "eligibleValidatorCount": eligible_validator_count,
         "activeCount": preview_active_count,
@@ -668,6 +673,13 @@ fn checkpoint_vote_json(vote: &DagCheckpointVote) -> serde_json::Value {
     })
 }
 
+fn tx_apply_status_label(status: &misaka_dag::TxApplyStatus) -> &'static str {
+    match status {
+        misaka_dag::TxApplyStatus::Applied => "applied",
+        _ => "failed",
+    }
+}
+
 fn checkpoint_finality_json(proof: &DagCheckpointFinalityProof) -> serde_json::Value {
     serde_json::json!({
         "target": {
@@ -694,7 +706,7 @@ fn checkpoint_target_json(
     })
 }
 
-fn checkpoint_vote_pool_json(
+pub(crate) fn checkpoint_vote_pool_json(
     state: &DagNodeState,
 ) -> (Option<serde_json::Value>, Vec<serde_json::Value>) {
     let quorum_threshold = uniform_stake_quorum_threshold(state.validator_count);
@@ -783,7 +795,25 @@ fn current_checkpoint_consumer_status(state: &DagNodeState) -> serde_json::Value
     })
 }
 
-fn dag_consumer_surfaces_json(state: &DagNodeState) -> serde_json::Value {
+pub(crate) fn dag_validator_attestation_json(
+    state: &DagNodeState,
+    current_checkpoint_votes: Option<serde_json::Value>,
+    vote_pool: Vec<serde_json::Value>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "validatorCount": state.validator_count,
+        "attestationRpcPeers": state.attestation_rpc_peers,
+        "knownValidators": state.known_validators.iter().map(validator_identity_json).collect::<Vec<_>>(),
+        "localValidator": state.local_validator.as_ref().map(|v| validator_identity_json(&v.identity)),
+        "latestCheckpointVote": state.latest_checkpoint_vote.as_ref().map(checkpoint_vote_json),
+        "latestCheckpointFinality": state.latest_checkpoint_finality.as_ref().map(checkpoint_finality_json),
+        "currentCheckpointVotes": current_checkpoint_votes,
+        "votePool": vote_pool,
+        "currentCheckpointStatus": current_checkpoint_consumer_status(state),
+    })
+}
+
+pub(crate) fn dag_consumer_surfaces_json(state: &DagNodeState) -> serde_json::Value {
     let current = current_checkpoint_consumer_status(state);
     let checkpoint_present = current["checkpointPresent"].as_bool().unwrap_or(false);
     let checkpoint_finalized = current["currentCheckpointFinalized"]
@@ -845,7 +875,7 @@ fn dag_privacy_path_surface_json(runtime_path: &str) -> serde_json::Value {
     })
 }
 
-fn dag_consensus_architecture_json() -> serde_json::Value {
+pub(crate) fn dag_consensus_architecture_json() -> serde_json::Value {
     serde_json::to_value(misaka_consensus::consensus_architecture_summary()).unwrap_or(
         serde_json::json!({
             "currentRuntime": {
@@ -952,7 +982,7 @@ fn dag_ordering_orchestration_json(
     })
 }
 
-fn dag_ordering_contract_json(
+pub(crate) fn dag_ordering_contract_json(
     state: &DagNodeState,
     narwhal_dissemination: Option<&Arc<DagNarwhalDisseminationService>>,
 ) -> serde_json::Value {
@@ -967,7 +997,7 @@ fn dag_ordering_contract_json(
     value
 }
 
-fn dag_authority_switch_readiness_json(
+pub(crate) fn dag_authority_switch_readiness_json(
     consensus_architecture: &serde_json::Value,
     ordering_contract: &serde_json::Value,
     sr21_committee: &serde_json::Value,
@@ -1261,7 +1291,7 @@ fn dag_tx_dissemination_orchestration_json(
     })
 }
 
-fn dag_tx_dissemination_json(
+pub(crate) fn dag_tx_dissemination_json(
     state: &DagNodeState,
     narwhal_dissemination: Option<&Arc<DagNarwhalDisseminationService>>,
 ) -> serde_json::Value {
@@ -1626,17 +1656,11 @@ async fn dag_get_chain_info(State(rpc): State<DagRpcState>) -> Json<serde_json::
             "coinbase": s.state_manager.stats.txs_coinbase,
             "totalFees": s.state_manager.stats.total_fees,
         },
-        "validatorAttestation": {
-            "validatorCount": s.validator_count,
-            "attestationRpcPeers": s.attestation_rpc_peers,
-            "knownValidators": s.known_validators.iter().map(validator_identity_json).collect::<Vec<_>>(),
-            "localValidator": s.local_validator.as_ref().map(|v| validator_identity_json(&v.identity)),
-            "latestCheckpointVote": s.latest_checkpoint_vote.as_ref().map(checkpoint_vote_json),
-            "latestCheckpointFinality": s.latest_checkpoint_finality.as_ref().map(checkpoint_finality_json),
-            "currentCheckpointVotes": current_checkpoint_votes,
-            "votePool": vote_pool,
-            "currentCheckpointStatus": current_checkpoint_consumer_status(s),
-        },
+        "validatorAttestation": dag_validator_attestation_json(
+            s,
+            current_checkpoint_votes,
+            vote_pool,
+        ),
         "sr21Committee": sr21_committee,
         "authoritySwitchReadiness": authority_switch_readiness,
         "latestCheckpoint": s.latest_checkpoint.as_ref().map(latest_checkpoint_json),
@@ -1802,7 +1826,7 @@ async fn dag_submit_checkpoint_vote(
                 .get(&target)
                 .map(|votes| votes.len())
                 .unwrap_or(0);
-            if let Err(e) = save_runtime_snapshot(
+            let snap_result = save_runtime_snapshot(
                 &state.snapshot_path,
                 &state.dag_store,
                 &state.utxo_set,
@@ -1813,13 +1837,22 @@ async fn dag_submit_checkpoint_vote(
                 state.latest_checkpoint_vote.as_ref(),
                 state.latest_checkpoint_finality.as_ref(),
                 &state.checkpoint_vote_pool,
-            ) {
+            );
+            let finalized_blue_score = state
+                .latest_checkpoint_finality
+                .as_ref()
+                .map(|proof| proof.target.blue_score);
+            let known_validator_count = state.known_validators.len();
+            let validator_count = state.validator_count;
+            let quorum_reached = state.latest_checkpoint_finality.as_ref().map(|proof| proof.target == target).unwrap_or(false);
+
+            // R3-H3 FIX: Drop node write lock BEFORE acquiring runtime_recovery
+            // write lock to prevent potential deadlock from nested lock ordering.
+            drop(guard);
+
+            if let Err(e) = snap_result {
                 warn!("Failed to persist DAG attestation snapshot: {}", e);
             } else if let Some(runtime_recovery) = rpc.runtime_recovery.as_ref() {
-                let finalized_blue_score = state
-                    .latest_checkpoint_finality
-                    .as_ref()
-                    .map(|proof| proof.target.blue_score);
                 let mut recovery = runtime_recovery.write().await;
                 recovery.mark_checkpoint_persisted(target.blue_score, target.block_hash);
                 recovery.mark_checkpoint_finality(finalized_blue_score);
@@ -1828,19 +1861,22 @@ async fn dag_submit_checkpoint_vote(
                 "accepted": true,
                 "voter": hex::encode(req.vote.voter),
                 "target": checkpoint_target_json(&target),
-                "knownValidatorCount": state.known_validators.len(),
+                "knownValidatorCount": known_validator_count,
                 "voteCount": vote_count,
-                "quorumThreshold": uniform_stake_quorum_threshold(state.validator_count).to_string(),
-                "quorumReached": state.latest_checkpoint_finality.as_ref().map(|proof| proof.target == target).unwrap_or(false),
+                "quorumThreshold": uniform_stake_quorum_threshold(validator_count).to_string(),
+                "quorumReached": quorum_reached,
                 "error": null,
             }))
         }
-        Err(e) => Json(serde_json::json!({
-            "accepted": false,
-            "voter": hex::encode(req.vote.voter),
-            "target": checkpoint_target_json(&req.vote.target),
-            "error": e.to_string(),
-        })),
+        Err(e) => {
+            drop(guard);
+            Json(serde_json::json!({
+                "accepted": false,
+                "voter": hex::encode(req.vote.voter),
+                "target": checkpoint_target_json(&req.vote.target),
+                "error": e.to_string(),
+            }))
+        }
     }
 }
 
@@ -1911,17 +1947,11 @@ async fn dag_get_dag_info(State(rpc): State<DagRpcState>) -> Json<serde_json::Va
             "coinbase": s.state_manager.stats.txs_coinbase,
             "totalFees": s.state_manager.stats.total_fees,
         },
-        "validatorAttestation": {
-            "validatorCount": s.validator_count,
-            "attestationRpcPeers": s.attestation_rpc_peers,
-            "knownValidators": s.known_validators.iter().map(validator_identity_json).collect::<Vec<_>>(),
-            "localValidator": s.local_validator.as_ref().map(|v| validator_identity_json(&v.identity)),
-            "latestCheckpointVote": s.latest_checkpoint_vote.as_ref().map(checkpoint_vote_json),
-            "latestCheckpointFinality": s.latest_checkpoint_finality.as_ref().map(checkpoint_finality_json),
-            "currentCheckpointVotes": current_checkpoint_votes,
-            "votePool": vote_pool,
-            "currentCheckpointStatus": current_checkpoint_consumer_status(s),
-        },
+        "validatorAttestation": dag_validator_attestation_json(
+            s,
+            current_checkpoint_votes,
+            vote_pool,
+        ),
         "sr21Committee": sr21_committee,
         "authoritySwitchReadiness": authority_switch_readiness,
         "latestCheckpoint": s.latest_checkpoint.as_ref().map(latest_checkpoint_json),
@@ -2168,11 +2198,11 @@ async fn dag_get_virtual_chain(
         if Some(current) == start_hash {
             break;
         }
-        if current == s.genesis_hash || current == misaka_dag::ZERO_HASH {
+        if current == s.genesis_hash || current == ZERO_HASH_BYTES {
             break;
         }
         match snapshot.get_ghostdag_data(&current) {
-            Some(data) if data.selected_parent != misaka_dag::ZERO_HASH => {
+            Some(data) if data.selected_parent != ZERO_HASH_BYTES => {
                 current = data.selected_parent;
             }
             _ => break,
@@ -2683,7 +2713,10 @@ async fn dag_faucet(
     //
     // Note: We use s.faucet_cooldowns (a HashMap added to DagNodeState)
     // which is protected by the RwLock<DagNodeState> already held above.
-    let cooldown_ms: u64 = 60_000; // 1 minute for testnet (24h for public testnet)
+    let cooldown_ms: u64 = std::env::var("NODE_FAUCET_COOLDOWN_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(300_000); // 5 minutes — matches CLI default and testnet.toml
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -4084,7 +4117,7 @@ mod tests {
     #[tokio::test]
     async fn test_dag_rpc_write_routes_and_checkpoint_vote_gossip_require_api_key() {
         let app = make_test_dag_app(crate::rpc_auth::ApiKeyState {
-            required_key: Some("dag-secret".into()),
+            required_key: Some(secrecy::SecretString::new("dag-secret".into())),
             write_ip_allowlist: vec![],
             auth_required: false,
         });

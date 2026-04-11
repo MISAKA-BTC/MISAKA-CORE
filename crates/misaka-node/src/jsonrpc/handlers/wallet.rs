@@ -40,7 +40,7 @@ pub async fn get_balance(rpc: &DagRpcState, params: &Value) -> HandlerResult {
 
     Ok(json!({
         "balance": balance,
-        "decimals": 8,
+        "decimals": 9,
     }))
 }
 

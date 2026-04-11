@@ -34,11 +34,14 @@ const EMISSION_MATURITY: u64 = 300;
 /// This is the hard cap enforced at the consensus execution layer.
 /// Previously only per-block emission cap existed (PHASE2_MAX_COINBASE_PER_BLOCK)
 /// but total supply was uncapped — SupplyTracker existed but was not connected.
-/// Hard cap: 21 billion MISAKA with 8 decimal places = 21 × 10^8 × 10^8.
-/// 2_100_000_000_000_000_000 < u64::MAX (18.4 × 10^18), so this fits in u64.
+/// Hard cap: 21 billion MISAKA with 9 decimal places (base units).
+/// NOTE: The u64 representation here uses a truncated precision to fit u64::MAX.
+/// The canonical decimals (9) are defined in misaka_types::constants::DECIMALS.
 const MAX_TOTAL_SUPPLY: u64 = 2_100_000_000_000_000_000; // 21B × 10^8 base units
 
 /// §5.5 Fee distribution — proposer receives 50%.
+/// NOTE: Not yet enforced in execution; fees are summed in CommitExecutionResult
+/// and distribution is deferred to the staking/treasury module (Phase 3+).
 pub const PROPOSER_FEE_SHARE_BPS: u64 = 5000;
 /// §5.5 Fee distribution — treasury receives 10%.
 pub const TREASURY_FEE_SHARE_BPS: u64 = 1000;
@@ -92,6 +95,10 @@ pub struct CommitExecutionResult {
     pub txs_rejected: usize,
     pub total_fees: u64,
     pub utxos_created: usize,
+    /// R7 C-4: true when this batch already contained a SystemEmission tx.
+    /// The caller MUST skip `generate_block_reward` when this is set to
+    /// prevent double emission.
+    pub had_system_emission: bool,
 }
 
 /// New UTXO execution layer (Phase 2b).
@@ -167,6 +174,9 @@ impl UtxoExecutor {
         }
 
         self.height += 1;
+        // R7 C-3: Keep UtxoSet.height in sync so that add_output stamps
+        // outputs with the correct created_at and MuHash elements match.
+        self.utxo_set.height = self.height;
         let mut delta = BlockDelta::new(self.height);
         let mut accepted = 0usize;
         let mut rejected = 0usize;
@@ -198,6 +208,7 @@ impl UtxoExecutor {
             txs_rejected: rejected,
             total_fees,
             utxos_created: delta.created.len(),
+            had_system_emission: emission_count > 0,
         }
     }
 
@@ -337,7 +348,7 @@ impl UtxoExecutor {
                 }
 
                 // §4.4: 300-block maturity for emission outputs
-                if utxo_entry.is_emission && self.height < utxo_entry.created_at + EMISSION_MATURITY
+                if utxo_entry.is_emission && self.height < utxo_entry.created_at.saturating_add(EMISSION_MATURITY)
                 {
                     return Err(TxExecutionError::EmissionNotMature {
                         created_at: utxo_entry.created_at,

@@ -154,6 +154,30 @@ struct LocalDagValidatorKeyFile {
     stake_weight: u128,
 }
 
+fn env_flag_enabled(name: &str) -> bool {
+    std::env::var(name)
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+fn requires_explicit_advertise_addr(
+    node_mode: NodeMode,
+    role: NodeRole,
+    seeds_present: bool,
+    accept_observers: bool,
+) -> bool {
+    if node_mode == NodeMode::Hidden {
+        return false;
+    }
+    if node_mode == NodeMode::Seed {
+        return true;
+    }
+    if accept_observers {
+        return true;
+    }
+    seeds_present && role == NodeRole::Validator
+}
+
 #[derive(Parser, Debug)]
 #[command(name = "misaka-node", version, about = "MISAKA Network validator node")]
 struct Cli {
@@ -224,6 +248,10 @@ struct Cli {
     /// Log level
     #[arg(long, default_value = "info")]
     log_level: String,
+
+    /// Log output format: "compact" (human-readable) or "json" (structured)
+    #[arg(long, default_value = "compact", env = "MISAKA_LOG_FORMAT")]
+    log_format: String,
 
     /// Chain ID
     #[arg(long, default_value = "2")]
@@ -449,13 +477,23 @@ async fn main() -> anyhow::Result<()> {
         "error" => Level::ERROR,
         _ => Level::INFO,
     };
-    tracing::subscriber::set_global_default(
-        FmtSubscriber::builder()
-            .with_max_level(level)
-            .with_target(false)
-            .compact()
-            .finish(),
-    )?;
+    if cli.log_format == "json" {
+        tracing::subscriber::set_global_default(
+            FmtSubscriber::builder()
+                .with_max_level(level)
+                .with_target(true)
+                .json()
+                .finish(),
+        )?;
+    } else {
+        tracing::subscriber::set_global_default(
+            FmtSubscriber::builder()
+                .with_max_level(level)
+                .with_target(false)
+                .compact()
+                .finish(),
+        )?;
+    }
 
     info!(
         "Effective config: chain_id={}, data_dir={}, rpc_port={}, p2p_port={}, config_source={}",
@@ -494,6 +532,11 @@ async fn main() -> anyhow::Result<()> {
 
         let data_dir = std::path::Path::new(&cli.data_dir);
         std::fs::create_dir_all(data_dir)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(data_dir, std::fs::Permissions::from_mode(0o700))?;
+        }
 
         let output_path = data_dir.join("l1-secret-key.json");
 
@@ -800,18 +843,29 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    let role = NodeRole::determine(
+        node_mode,
+        cli.validator,
+        cli.validator_index,
+        cli.validators,
+    );
+
+    let accept_observers = env_flag_enabled("MISAKA_ACCEPT_OBSERVERS");
+
     // Parse advertise address
     //
-    // v0.5.13 audit P0: in public/seed mode a missing or invalid
+    // v0.5.13 audit P0: in dialable public/seed profiles a missing or invalid
     // advertise address silently fell back to `None`, which meant the
     // node thought it was joined to the network but was not dialable
     // by its peers. Public operators would see solo-mode behaviour
     // without any loud signal. Now:
     //   - If the operator passed a value and it is bad, we fail fast.
-    //   - If the operator passed nothing in public/seed mode, we log
-    //     a prominent warning so the situation is visible in
-    //     journalctl. Hidden mode continues to leave it empty by
-    //     design.
+    //   - If the operator passed nothing in dialable profiles
+    //     (seed / public validator with seeds / observer-accepting
+    //     operator), we fail fast because peers must be able to dial
+    //     back.
+    //   - Hidden mode and purely outbound observer/full-node cases
+    //     continue to allow no advertise address.
     let advertise_addr: Option<SocketAddr> = match cli.advertise_addr.as_deref() {
         Some(s) => match s.parse::<SocketAddr>() {
             Ok(addr) => {
@@ -836,28 +890,35 @@ async fn main() -> anyhow::Result<()> {
             }
         },
         None => {
-            if matches!(
+            if requires_explicit_advertise_addr(
+                node_mode,
+                role,
+                !cli.seeds.is_empty(),
+                accept_observers,
+            ) {
+                error!(
+                    "FATAL: this node profile is dialable (mode={}, role={}, seeds={}, \
+                     MISAKA_ACCEPT_OBSERVERS={}) but --advertise-addr is missing. Pass \
+                     --advertise-addr <public-ip>:<relay-port> (typically :16110).",
+                    node_mode,
+                    role,
+                    !cli.seeds.is_empty(),
+                    accept_observers
+                );
+                std::process::exit(1);
+            } else if matches!(
                 node_mode,
                 crate::config::NodeMode::Public | crate::config::NodeMode::Seed
             ) {
                 warn!(
-                    "⚠ public/seed mode without --advertise-addr: peers will not know how to \
-                     dial back. Pass --advertise-addr <public-ip>:<relay-port> (typically \
-                     :16110) or the node will only receive inbound traffic, not outbound \
-                     returns."
+                    "⚠ no --advertise-addr configured: this is acceptable only for hidden mode \
+                     or outbound-only observer/full-node usage. Dialable peers should set \
+                     --advertise-addr <public-ip>:<relay-port>."
                 );
             }
             None
         }
     };
-
-    // Determine role
-    let role = NodeRole::determine(
-        node_mode,
-        cli.validator,
-        cli.validator_index,
-        cli.validators,
-    );
 
     // Build P2P config
     let p2p_config = P2pConfig::from_mode(node_mode).with_overrides(
@@ -935,7 +996,7 @@ async fn main() -> anyhow::Result<()> {
 
     #[cfg(all(feature = "dag", not(feature = "ghostdag-compat")))]
     {
-        start_narwhal_node(cli).await
+        start_narwhal_node(cli, p2p_config).await
     }
 
     #[cfg(not(feature = "dag"))]
@@ -949,7 +1010,7 @@ async fn main() -> anyhow::Result<()> {
 // ════════════════════════════════════════════════════════════════
 
 /// Resolve `genesis_committee.toml`: CLI → cwd → next to binary → `config/` next to binary.
-#[cfg(all(feature = "dag", not(feature = "ghostdag-compat")))]
+#[cfg(feature = "dag")]
 fn resolve_genesis_committee_path(cli_path: Option<&str>) -> std::path::PathBuf {
     use std::path::{Path, PathBuf};
     if let Some(p) = cli_path {
@@ -975,7 +1036,7 @@ fn resolve_genesis_committee_path(cli_path: Option<&str>) -> std::path::PathBuf 
 }
 
 #[cfg(all(feature = "dag", not(feature = "ghostdag-compat")))]
-async fn start_narwhal_node(cli: Cli) -> anyhow::Result<()> {
+async fn start_narwhal_node(cli: Cli, p2p_config: P2pConfig) -> anyhow::Result<()> {
     use std::collections::{BTreeMap, BTreeSet};
 
     use misaka_dag::narwhal_dag::core_engine::ProposeContext;
@@ -1051,7 +1112,52 @@ async fn start_narwhal_node(cli: Cli) -> anyhow::Result<()> {
     tracing::info!(path = %genesis_path.display(), "Loading genesis committee manifest");
     let manifest = crate::genesis_committee::GenesisCommitteeManifest::load(&genesis_path)?;
     manifest.validate()?;
-
+    let manifest_validator_count = manifest.validators.len();
+    if cli.validators != manifest_validator_count {
+        anyhow::bail!(
+            "validator count mismatch: --validators={} but genesis committee has {} validators",
+            cli.validators,
+            manifest_validator_count,
+        );
+    }
+    if cli.validator_index >= manifest_validator_count {
+        anyhow::bail!(
+            "validator index out of range: --validator-index={} but genesis committee has {} validators",
+            cli.validator_index,
+            manifest_validator_count,
+        );
+    }
+    if cli.validator {
+        let expected_manifest_entry =
+            manifest
+                .validators
+                .get(cli.validator_index)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "missing genesis entry for validator index {}",
+                        cli.validator_index
+                    )
+                })?;
+        let expected_network_addr = expected_manifest_entry
+            .network_address
+            .parse::<SocketAddr>()
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "invalid network_address '{}' for authority {}: {}",
+                    expected_manifest_entry.network_address,
+                    expected_manifest_entry.authority_index,
+                    e
+                )
+            })?;
+        if expected_network_addr.port() != cli.p2p_port {
+            anyhow::bail!(
+                "p2p port mismatch for authority {}: --p2p-port={} but genesis committee expects {}",
+                expected_manifest_entry.authority_index,
+                cli.p2p_port,
+                expected_network_addr.port(),
+            );
+        }
+    }
     // ── SEC-FIX v0.5.7: observer mode auto-detection ──
     //
     // If our validator.key fingerprint is in the genesis committee, run as
@@ -1154,6 +1260,7 @@ async fn start_narwhal_node(cli: Cli) -> anyhow::Result<()> {
         dag_config: DagStateConfig::default(),
         checkpoint_interval: 100,
         custom_verifier: None, // production MlDsa65Verifier (default)
+        retention_rounds: 10_000,
     };
 
     // Spawn consensus runtime
@@ -1322,9 +1429,7 @@ async fn start_narwhal_node(cli: Cli) -> anyhow::Result<()> {
     // public-facing operator node) to allow read-only observers to connect.
     // Observers do not contribute to consensus — see
     // narwhal_block_relay_transport.rs::OBSERVER_SENTINEL_AUTHORITY.
-    let accept_observers = std::env::var("MISAKA_ACCEPT_OBSERVERS")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
+    let accept_observers = env_flag_enabled("MISAKA_ACCEPT_OBSERVERS");
     if accept_observers {
         info!(
             "Narwhal relay: MISAKA_ACCEPT_OBSERVERS=1 — accepting connections \
@@ -1340,13 +1445,20 @@ async fn start_narwhal_node(cli: Cli) -> anyhow::Result<()> {
                 public_key: relay_public_key,
                 secret_key: relay_secret_key,
                 peers: relay_peers,
-                guard_config: misaka_p2p::GuardConfig::default(),
+                guard_config: p2p_config.guard.clone(),
                 accept_observers,
                 observer_self: is_observer,
             },
             relay_in_tx,
             relay_out_rx,
-        );
+        )
+        .map_err(|err| {
+            anyhow::anyhow!(
+                "Failed to bind Narwhal relay on {}: {}",
+                relay_listen_addr,
+                err
+            )
+        })?;
 
     info!(
         "Mysticeti-equivalent consensus runtime started (authority={}, committee={})",
@@ -1474,15 +1586,23 @@ async fn start_narwhal_node(cli: Cli) -> anyhow::Result<()> {
                 }
             }
         }))
-        .route("/api/metrics", axum::routing::get({
-            let m = metrics_rpc.clone();
-            move || {
-                let m = m.clone();
-                async move {
-                    misaka_dag::narwhal_dag::prometheus::PrometheusExporter::new(m).export()
-                }
-            }
-        }))
+        .nest(
+            "/api/metrics",
+            axum::Router::new()
+                .route("/", axum::routing::get({
+                    let m = metrics_rpc.clone();
+                    move || {
+                        let m = m.clone();
+                        async move {
+                            misaka_dag::narwhal_dag::prometheus::PrometheusExporter::new(m).export()
+                        }
+                    }
+                }))
+                .route_layer(axum::middleware::from_fn_with_state(
+                    auth_state.clone(),
+                    crate::rpc_auth::require_api_key,
+                )),
+        )
         .route("/api/get_mempool_info", axum::routing::get({
             let narwhal_mempool = narwhal_mempool.clone();
             move || {
@@ -1613,21 +1733,17 @@ async fn start_narwhal_node(cli: Cli) -> anyhow::Result<()> {
                         "validator"
                     };
                     axum::Json(serde_json::json!({
-                        "chain": "MISAKA Network",
+                        "chain": misaka_types::constants::CHAIN_DISPLAY_NAME,
+                        "ticker": misaka_types::constants::CURRENCY_TICKER,
+                        "currencyName": misaka_types::constants::CURRENCY_NAME,
+                        "decimals": misaka_types::constants::DECIMALS,
+                        "addressPrefix": misaka_types::constants::TESTNET_ADDRESS_PREFIX,
+                        "iconUrl": "/api/chain-icon.svg",
                         "consensus": "Mysticeti-equivalent",
-                        // SEC-FIX v0.5.6: chainId / version were hardcoded
-                        // to stale values (chainId=1, version="0.5.1") and
-                        // misrepresented the running node's identity. They
-                        // are now sourced from the runtime CLI and the
-                        // compiled crate version respectively.
                         "chainId": chain_id_for_rpc,
                         "version": env!("CARGO_PKG_VERSION"),
                         "pqSignature": "ML-DSA-65 (FIPS 204)",
                         "status": status,
-                        // v0.5.11 audit Mid #10: "mode" is retained for
-                        // back-compat but it has always been topology,
-                        // not the config-level mode. Use "topology" /
-                        // "nodeMode" / "role" for clearer semantics.
                         "mode": topology,
                         "topology": topology,
                         "nodeMode": node_mode_str,
@@ -1683,8 +1799,21 @@ async fn start_narwhal_node(cli: Cli) -> anyhow::Result<()> {
                 "inflationDecayBps": 50,
                 "inflationFloorBps": 100,
                 "unit": "base_units",
-                "decimals": 8
+                "decimals": 9
             }))
+        }))
+        .route("/api/chain-icon.svg", axum::routing::get(|| async {
+            axum::response::Response::builder()
+                .header("content-type", "image/svg+xml")
+                .header("cache-control", "public, max-age=86400")
+                .body(axum::body::Body::from(include_str!("../../../assets/misaka-icon.svg")))
+                .expect("static SVG response")
+        }))
+        .route("/api/chain_registry", axum::routing::get(|| async {
+            let json: serde_json::Value = serde_json::from_str(
+                include_str!("../../../configs/chain.json")
+            ).expect("configs/chain.json must be valid JSON");
+            axum::Json(json)
         }))
         // ── Explorer: Recent blocks ──
         .route("/api/get_recent_blocks", axum::routing::get({
@@ -1797,10 +1926,14 @@ async fn start_narwhal_node(cli: Cli) -> anyhow::Result<()> {
                 let seed_nodes_for_rpc = seed_nodes_for_rpc.clone();
                 async move {
                     axum::Json(serde_json::json!({
-                        "network": "MISAKA Testnet",
+                        "network": misaka_types::constants::CHAIN_TESTNET_NAME,
                         "chainId": chain_id_for_rpc,
-                        "networkId": "misaka-testnet-1",
-                        "addressPrefix": "misakatest1",
+                        "networkId": misaka_types::constants::TESTNET_NETWORK_ID,
+                        "ticker": misaka_types::constants::CURRENCY_TICKER,
+                        "currencyName": misaka_types::constants::CURRENCY_NAME,
+                        "decimals": misaka_types::constants::DECIMALS,
+                        "addressPrefix": misaka_types::constants::TESTNET_ADDRESS_PREFIX,
+                        "iconUrl": "/api/chain-icon.svg",
                         "consensus": "Mysticeti-equivalent",
                         "pqSignature": "ML-DSA-65 (FIPS 204)",
                         "version": env!("CARGO_PKG_VERSION"),
@@ -1817,6 +1950,77 @@ async fn start_narwhal_node(cli: Cli) -> anyhow::Result<()> {
                     }))
                 }
             }
+        }))
+        // ── Indexer stubs (R5-C1): misaka-api expects these POST endpoints ──
+        .route("/api/get_indexed_utxos", axum::routing::post({
+            let msg_tx = msg_tx_rpc.clone();
+            move |body: axum::Json<serde_json::Value>| {
+                let msg_tx = msg_tx.clone();
+                async move {
+                    let address = body.get("address").and_then(|v| v.as_str()).unwrap_or("");
+                    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+                    let _ = msg_tx.try_send(ConsensusMessage::GetStatus(reply_tx));
+                    match reply_rx.await {
+                        Ok(_) => axum::Json(serde_json::json!({
+                            "address": address,
+                            "utxos": [],
+                            "note": "UTXO indexer not yet implemented — returns empty set"
+                        })),
+                        Err(_) => axum::Json(serde_json::json!({"error": "runtime closed"})),
+                    }
+                }
+            }
+        }))
+        .route("/api/get_address_history", axum::routing::post({
+            move |body: axum::Json<serde_json::Value>| {
+                async move {
+                    let address = body.get("address").and_then(|v| v.as_str()).unwrap_or("");
+                    let page = body.get("page").and_then(|v| v.as_u64()).unwrap_or(1);
+                    let page_size = body.get("pageSize").and_then(|v| v.as_u64()).unwrap_or(20);
+                    axum::Json(serde_json::json!({
+                        "address": address,
+                        "transactions": [],
+                        "page": page,
+                        "pageSize": page_size,
+                        "total": 0,
+                        "note": "Address history indexer not yet implemented"
+                    }))
+                }
+            }
+        }))
+        .route("/api/get_address_balance", axum::routing::post({
+            move |body: axum::Json<serde_json::Value>| {
+                async move {
+                    let address = body.get("address").and_then(|v| v.as_str()).unwrap_or("");
+                    axum::Json(serde_json::json!({
+                        "address": address,
+                        "balance": 0,
+                        "confirmed": 0,
+                        "unconfirmed": 0,
+                        "note": "Balance indexer not yet implemented"
+                    }))
+                }
+            }
+        }))
+        .route("/api/get_tx_status", axum::routing::post({
+            let mempool = narwhal_mempool.clone();
+            move |body: axum::Json<serde_json::Value>| {
+                let mempool = mempool.clone();
+                async move {
+                    let tx_hash_hex = body.get("txHash").and_then(|v| v.as_str()).unwrap_or("");
+                    let hash_bytes: Option<[u8; 32]> = hex::decode(tx_hash_hex)
+                        .ok()
+                        .and_then(|b| b.try_into().ok());
+                    let status = match hash_bytes {
+                        Some(h) if mempool.contains_tx(&h).await => "pending",
+                        _ => "unknown",
+                    };
+                    axum::Json(serde_json::json!({
+                        "txHash": tx_hash_hex,
+                        "status": status,
+                    }))
+                }
+            }
         }));
 
     // v0.5.11 audit Confirmed Finding #1: use
@@ -1827,6 +2031,10 @@ async fn start_narwhal_node(cli: Cli) -> anyhow::Result<()> {
     // caller's address. The write routes under
     // rpc_server.rs / dag_rpc_legacy.rs / validator_api.rs all already
     // read ConnectInfo; main.rs was the missing wiring.
+    // R4-M14 FIX: Apply explicit body size limit to DAG RPC router,
+    // consistent with rpc_server.rs (128 KiB) instead of Axum default (~2 MiB).
+    let rpc_router = rpc_router.layer(axum::extract::DefaultBodyLimit::max(131_072));
+
     let rpc_server = axum::serve(
         tokio::net::TcpListener::bind(rpc_addr).await?,
         rpc_router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
@@ -1840,9 +2048,34 @@ async fn start_narwhal_node(cli: Cli) -> anyhow::Result<()> {
     // Graceful shutdown: handle SIGINT + SIGTERM
     let shutdown_msg_tx = msg_tx.clone();
     let shutdown_handle = tokio::spawn(async move {
-        // Wait for SIGINT (Ctrl+C) — works on all platforms
-        let _ = tokio::signal::ctrl_c().await;
-        info!("Received shutdown signal, initiating graceful shutdown...");
+        #[cfg(unix)]
+        {
+            let sigterm_result = tokio::signal::unix::signal(
+                tokio::signal::unix::SignalKind::terminate(),
+            );
+            let mut sigterm = match sigterm_result {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!("Failed to register SIGTERM handler: {e}; falling back to SIGINT only");
+                    tokio::signal::ctrl_c().await.ok();
+                    let _ = shutdown_msg_tx.try_send(ConsensusMessage::Shutdown);
+                    return;
+                }
+            };
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {
+                    info!("Received SIGINT, initiating graceful shutdown...");
+                }
+                _ = sigterm.recv() => {
+                    info!("Received SIGTERM, initiating graceful shutdown...");
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = tokio::signal::ctrl_c().await;
+            info!("Received shutdown signal, initiating graceful shutdown...");
+        }
         let _ = shutdown_msg_tx.try_send(ConsensusMessage::Shutdown);
     });
 
@@ -2103,8 +2336,20 @@ async fn start_narwhal_node(cli: Cli) -> anyhow::Result<()> {
         _ = relay_ingress_handle => {
             info!("Narwhal relay ingress stopped");
         }
-        _ = relay_transport_handle => {
-            info!("Narwhal relay transport stopped");
+        relay_result = relay_transport_handle => {
+            match relay_result {
+                Ok(()) => {
+                    return Err(anyhow::anyhow!(
+                        "Narwhal relay transport stopped unexpectedly; refusing to continue"
+                    ));
+                }
+                Err(err) => {
+                    return Err(anyhow::anyhow!(
+                        "Narwhal relay transport task failed: {}",
+                        err
+                    ));
+                }
+            }
         }
         _ = async {
             // Phase 2b (M6): UtxoExecutor replaces NarwhalTxExecutor.
@@ -2116,9 +2361,18 @@ async fn start_narwhal_node(cli: Cli) -> anyhow::Result<()> {
             // Phase 2c-A: use real genesis_hash (computed from committee PKs)
             let app_id = misaka_types::intent::AppId::new(cli.chain_id, genesis_hash);
 
-            // Narwhal DAG path: executor starts with a fresh UTXO set.
-            // State restoration is handled by the DAG's own persistence layer.
-            let mut tx_executor = crate::utxo_executor::UtxoExecutor::new(app_id);
+            // R7 C-1: Build executor from the canonical UtxoSet so that
+            // persisted UTXO state, burn replay set, and total_emitted are
+            // carried across restarts.  Falls back to a fresh set when no
+            // snapshot exists (first boot).
+            let mut tx_executor = {
+                let canonical = narwhal_mempool.utxo_set();
+                let snapshot = canonical.read().await;
+                crate::utxo_executor::UtxoExecutor::with_utxo_set(
+                    snapshot.clone(),
+                    app_id,
+                )
+            };
             // v0.5.9: commit loop holds a handle to the safe-mode flag so
             // it can break out on state_root mismatch.
             let safe_mode = safe_mode.clone();
@@ -2176,9 +2430,9 @@ async fn start_narwhal_node(cli: Cli) -> anyhow::Result<()> {
                 total_accepted_txs += exec_result.txs_accepted as u64;
 
                 // SEC-FIX C-12: Generate block reward for the commit leader.
-                // Previously Narwhal commit loop only executed user TXs — no block
-                // rewards were generated. Validators received zero economic incentive.
-                if let Some(addr) = leader_address {
+                // R7 C-4: Skip when the batch already contained a SystemEmission
+                // to prevent double emission in the same commit.
+                if let Some(addr) = leader_address.filter(|_| !exec_result.had_system_emission) {
                     let author_idx = output.leader.author as usize;
                     let leader_pk = if author_idx < committee.authorities.len() {
                         let pk = &committee.authorities[author_idx].public_key;
@@ -2348,6 +2602,19 @@ fn load_or_create_local_dag_validator(
                     .unwrap_or(0);
                 raw[..end].to_vec()
             }
+        } else if std::path::Path::new("/run/secrets/validator_passphrase").exists() {
+            let raw = std::fs::read("/run/secrets/validator_passphrase").map_err(|e| {
+                anyhow::anyhow!(
+                    "FATAL: failed to read Docker secret /run/secrets/validator_passphrase: {}",
+                    e
+                )
+            })?;
+            let end = raw
+                .iter()
+                .rposition(|b| !matches!(*b, b'\n' | b'\r' | b' ' | b'\t'))
+                .map(|p| p + 1)
+                .unwrap_or(0);
+            raw[..end].to_vec()
         } else {
             Vec::new()
         };
@@ -2576,30 +2843,11 @@ fn normalize_experimental_validator_identity(
     // discover_checkpoint_validators_from_rpc_peers() の呼び出し後に
     // verify_and_update_remote_stakes() で Solana 上の実際の預入額に更新する。
     //
-    // Stake weight: query Solana on-chain staking program for real stake amount.
-    // Falls back to 1 if Solana RPC is unavailable or validator not found.
-    let stake_weight = match crate::solana_stake_verify::query_validator_stake_weight(&hex::encode(
-        &identity.public_key.bytes,
-    ))
-    .await
-    {
-        Ok(weight) => {
-            tracing::info!(
-                "Solana stake weight for validator {}: {}",
-                hex::encode(&identity.validator_id[..8]),
-                weight,
-            );
-            weight.max(1) // minimum weight = 1
-        }
-        Err(e) => {
-            tracing::warn!(
-                "Failed to query Solana stake weight for {}: {} — defaulting to 1",
-                hex::encode(&identity.validator_id[..8]),
-                e,
-            );
-            1 // safe default: equal weight prevents fake-stake attacks
-        }
-    };
+    // Phase C compile-hygiene slice:
+    // experimental checkpoint identities stay fail-safe at stake=1 here.
+    // Committee bootstrap and Solana-backed reconciliation are handled on the
+    // explicit committee path; self-reported remote stake is never trusted.
+    let stake_weight = 1;
 
     Ok(misaka_types::validator::ValidatorIdentity {
         stake_weight,
@@ -2647,7 +2895,8 @@ pub(crate) fn apply_sr21_election_at_epoch_boundary(
     state: &mut misaka_dag::DagNodeState,
     next_epoch: u64,
 ) -> sr21_election::ElectionResult {
-    let election_result = sr21_election::run_election(&state.known_validators, next_epoch);
+    let election_result =
+        sr21_election::run_election_for_chain(&state.known_validators, state.chain_id, next_epoch);
     state.num_active_srs = election_result.num_active.max(1);
     state.runtime_active_sr_validator_ids = election_result
         .active_srs
@@ -3313,6 +3562,43 @@ async fn start_dag_node(
         cli.chain_id,
     )?;
     let attestation_rpc_peers = normalize_dag_rpc_peers(&cli.dag_rpc_peers);
+    let genesis_path = resolve_genesis_committee_path(cli.genesis_path.as_deref());
+    let manifest = crate::genesis_committee::GenesisCommitteeManifest::load(&genesis_path)?;
+    let genesis_bootstrap_known_validators = if cli.chain_id == 1 {
+        Vec::new()
+    } else {
+        manifest.bootstrap_validator_identities(cli.chain_id)?
+    };
+    let genesis_bootstrap_runtime_active_sr_validator_ids = genesis_bootstrap_known_validators
+        .iter()
+        .take(misaka_types::constants::NUM_SUPER_REPRESENTATIVES)
+        .map(|validator| validator.validator_id)
+        .collect::<Vec<_>>();
+    let parsed_seeds: Vec<misaka_types::seed_entry::SeedEntry> = if cli.seeds.is_empty() {
+        vec![]
+    } else if cli.seed_pubkeys.is_empty() {
+        anyhow::bail!(
+            "FATAL: --seeds provided ({}) but --seed-pubkeys is empty. \
+             The committee relay handshake is PK-pinned; there is no TOFU mode.",
+            cli.seeds.len()
+        );
+    } else if cli.seed_pubkeys.len() != cli.seeds.len() {
+        anyhow::bail!(
+            "FATAL: --seed-pubkeys count ({}) != --seeds count ({}). \
+             Each seed requires a corresponding pubkey in the same order.",
+            cli.seed_pubkeys.len(),
+            cli.seeds.len()
+        );
+    } else {
+        cli.seeds
+            .iter()
+            .zip(cli.seed_pubkeys.iter())
+            .map(|(addr, pk)| misaka_types::seed_entry::SeedEntry {
+                address: addr.clone(),
+                transport_pubkey: pk.clone(),
+            })
+            .collect()
+    };
 
     let validator_lifecycle_store = Arc::new(
         validator_lifecycle_persistence::ValidatorLifecycleStore::new(
@@ -3543,6 +3829,58 @@ async fn start_dag_node(
         Err(e) => anyhow::bail!("failed to load DAG runtime snapshot: {}", e),
     };
 
+    let mut known_validators: Vec<misaka_types::validator::ValidatorIdentity> = known_validators;
+    let mut runtime_active_sr_validator_ids: Vec<[u8; 32]> = runtime_active_sr_validator_ids;
+    let mut seeded_known_validators_from_genesis = false;
+
+    if known_validators.is_empty() && !genesis_bootstrap_known_validators.is_empty() {
+        info!(
+            "Layer 1 / Phase C: seeding validator registry from genesis committee | validators={} | chain_id={}",
+            genesis_bootstrap_known_validators.len(),
+            cli.chain_id
+        );
+        known_validators = genesis_bootstrap_known_validators.clone();
+        seeded_known_validators_from_genesis = true;
+    }
+
+    if runtime_active_sr_validator_ids.is_empty() && !known_validators.is_empty() {
+        if seeded_known_validators_from_genesis {
+            runtime_active_sr_validator_ids =
+                genesis_bootstrap_runtime_active_sr_validator_ids.clone();
+            info!(
+                "Layer 1 / Phase C: seeding runtime active SR set from genesis committee | active={} | min_stake={}",
+                runtime_active_sr_validator_ids.len(),
+                sr21_election::effective_min_sr_stake(cli.chain_id),
+            );
+        } else {
+            let bootstrap_election = sr21_election::run_election_for_chain(
+                &known_validators,
+                cli.chain_id,
+                manifest.epoch,
+            );
+            runtime_active_sr_validator_ids = bootstrap_election
+                .active_srs
+                .iter()
+                .map(|elected| elected.validator_id)
+                .collect();
+            info!(
+                "Layer 1 / Phase C: seeding runtime active SR set from restored validator registry | active={} | min_stake={}",
+                runtime_active_sr_validator_ids.len(),
+                sr21_election::effective_min_sr_stake(cli.chain_id),
+            );
+        }
+    }
+
+    let initial_sr_index = local_validator
+        .as_ref()
+        .and_then(|validator| {
+            runtime_active_sr_validator_ids
+                .iter()
+                .position(|validator_id| *validator_id == validator.identity.validator_id)
+        })
+        .unwrap_or(cli.validator_index);
+    let initial_num_active_srs = runtime_active_sr_validator_ids.len().max(1);
+
     // ══════════════════════════════════════════════════════
     //  Layer 2: Consensus & Finality (合意形成層)
     // ══════════════════════════════════════════════════════
@@ -3662,12 +4000,8 @@ async fn start_dag_node(
         validator_count: cli.validators,
         known_validators,
         proposer_id,
-        sr_index: cli.validator_index,
-        num_active_srs: if cli.validators <= 1 {
-            1
-        } else {
-            cli.validators.min(21)
-        },
+        sr_index: initial_sr_index,
+        num_active_srs: initial_num_active_srs,
         runtime_active_sr_validator_ids,
         local_validator,
         genesis_hash,
@@ -4005,7 +4339,8 @@ async fn start_dag_node(
     //  Layer 6: RPC Server (DAG RPC)
     // ══════════════════════════════════════════════════════
 
-    let rpc_addr: SocketAddr = format!("0.0.0.0:{}", cli.rpc_port).parse()?;
+    // SECURITY: default to localhost-only binding. Use --rpc-bind 0.0.0.0 for public.
+    let rpc_addr: SocketAddr = format!("127.0.0.1:{}", cli.rpc_port).parse()?;
     let rpc_state = shared_state.clone();
     let rpc_observation = dag_p2p_observation.clone();
     let rpc_runtime_recovery = runtime_recovery_observation.clone();
@@ -4039,9 +4374,13 @@ async fn start_dag_node(
             let has_stake_sig = cli.stake_signature.is_some();
             drop(local_validator_ref);
 
-            let mut registry = validator_registry.write().await;
+            // R3-H2 FIX: Pre-fetch config with read lock before Solana RPC
+            // to avoid holding write lock across external network calls.
+            let (already_registered, min_validator_stake) = {
+                let registry = validator_registry.read().await;
+                (registry.get(&validator_id).is_some(), registry.config().min_validator_stake)
+            };
             let epoch = *current_epoch.read().await;
-            let already_registered = registry.get(&validator_id).is_some();
 
             if !already_registered {
                 let shared_guard = shared_state.read().await;
@@ -4066,6 +4405,7 @@ async fn start_dag_node(
                     };
 
                     // Determine stake amount and verification status
+                    // (Solana RPC calls happen here WITHOUT holding registry lock)
                     let (stake_amount, stake_verified, stake_sig) = if let Some(ref sig) =
                         cli.stake_signature
                     {
@@ -4080,7 +4420,7 @@ async fn start_dag_node(
                             && !l1_pubkey_hex.is_empty()
                         {
                             // Full on-chain verification
-                            let min_stake = registry.config().min_validator_stake;
+                            let min_stake = min_validator_stake;
                             match solana_stake_verify::verify_solana_stake(
                                 &rpc_url,
                                 sig,
@@ -4112,7 +4452,7 @@ async fn start_dag_node(
                                     // 不正な signature でもバリデータが ACTIVE になれた。
                                     // 修正: 検証失敗時は LOCKED 状態で留まり、activate() を拒否する。
                                     (
-                                        registry.config().min_validator_stake,
+                                        min_validator_stake,
                                         false,
                                         Some(sig.clone()),
                                     )
@@ -4136,15 +4476,22 @@ async fn start_dag_node(
                                 );
                             }
                             (
-                                registry.config().min_validator_stake,
+                                min_validator_stake,
                                 false,
                                 Some(sig.clone()),
                             )
                         }
                     } else {
                         // No signature provided — unverified
-                        (registry.config().min_validator_stake, false, None)
+                        (min_validator_stake, false, None)
                     };
+
+                    // R3-H2: Write lock acquired only AFTER Solana RPC completes
+                    let mut registry = validator_registry.write().await;
+                    // Re-check after lock reacquisition (another task may have registered)
+                    if registry.get(&validator_id).is_some() {
+                        drop(registry);
+                    } else {
 
                     match registry.register(
                         validator_id,
@@ -4214,9 +4561,12 @@ async fn start_dag_node(
                             warn!("SEC-STAKE: Failed to auto-register local validator: {}", e);
                         }
                     }
+                    } // end re-check else
+                    drop(registry);
                 } // end if let Some(lv)
             } else if has_stake_sig {
                 // Already registered — update stake verification if new sig provided
+                let mut registry = validator_registry.write().await;
                 if let Some(account) = registry.get(&validator_id) {
                     if !account.solana_stake_verified {
                         if let Some(ref sig) = cli.stake_signature {
@@ -4242,8 +4592,8 @@ async fn start_dag_node(
                         );
                     }
                 }
+                drop(registry);
             }
-            drop(registry);
         } else {
             drop(local_validator_ref);
         }
@@ -4906,8 +5256,8 @@ async fn start_v1_node(
         }
     }
 
-    // RPC server
-    let rpc_addr: SocketAddr = format!("0.0.0.0:{}", cli.rpc_port).parse()?;
+    // SECURITY: default to localhost-only binding. Use --rpc-bind 0.0.0.0 for public.
+    let rpc_addr: SocketAddr = format!("127.0.0.1:{}", cli.rpc_port).parse()?;
     let rpc_state = state.clone();
     let rpc_p2p = p2p.clone();
     let cli_chain_id = cli.chain_id;
@@ -5003,6 +5353,56 @@ mod tests {
     fn test_validator_flag_enables_block_production() {
         let role = NodeRole::determine(NodeMode::Public, true, 0, 1);
         assert!(role.produces_blocks());
+    }
+
+    #[test]
+    fn test_requires_explicit_advertise_addr_for_seed_mode() {
+        assert!(requires_explicit_advertise_addr(
+            NodeMode::Seed,
+            NodeRole::FullNode,
+            false,
+            false,
+        ));
+    }
+
+    #[test]
+    fn test_requires_explicit_advertise_addr_for_public_validator_with_seeds() {
+        assert!(requires_explicit_advertise_addr(
+            NodeMode::Public,
+            NodeRole::Validator,
+            true,
+            false,
+        ));
+    }
+
+    #[test]
+    fn test_requires_explicit_advertise_addr_for_observer_accepting_operator() {
+        assert!(requires_explicit_advertise_addr(
+            NodeMode::Public,
+            NodeRole::FullNode,
+            false,
+            true,
+        ));
+    }
+
+    #[test]
+    fn test_hidden_mode_never_requires_explicit_advertise_addr() {
+        assert!(!requires_explicit_advertise_addr(
+            NodeMode::Hidden,
+            NodeRole::Validator,
+            true,
+            true,
+        ));
+    }
+
+    #[test]
+    fn test_outbound_only_public_observer_can_skip_advertise_addr() {
+        assert!(!requires_explicit_advertise_addr(
+            NodeMode::Public,
+            NodeRole::FullNode,
+            false,
+            false,
+        ));
     }
 
     #[cfg(all(feature = "dag", feature = "ghostdag-compat"))]

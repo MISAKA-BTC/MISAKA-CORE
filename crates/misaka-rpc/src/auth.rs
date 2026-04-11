@@ -32,15 +32,22 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 ///
 /// Not shared across processes; intended as an additional in-process guard
 /// alongside the network-level rate limiting in `misaka-api`.
+///
+/// SEC-FIX N-M2: Maximum number of tracked (method, client) pairs.
+/// Beyond this limit, new clients are rejected until cleanup runs.
+const MAX_RATE_LIMITER_ENTRIES: usize = 100_000;
+
 pub struct MethodRateLimiter {
     limits: HashMap<String, (u32, Duration)>,
     counters: RwLock<HashMap<(String, String), Vec<u64>>>,
+    last_cleanup: RwLock<u64>,
+    rejections: std::sync::atomic::AtomicU64,
+    accepts: std::sync::atomic::AtomicU64,
 }
 
 impl MethodRateLimiter {
     pub fn new() -> Self {
         let mut limits = HashMap::new();
-        // High-cost methods get stricter limits
         limits.insert(
             "submitTransaction".to_string(),
             (100, Duration::from_secs(60)),
@@ -54,13 +61,25 @@ impl MethodRateLimiter {
             "getUtxosByAddresses".to_string(),
             (30, Duration::from_secs(60)),
         );
-        // Default for read methods
         limits.insert("_default".to_string(), (300, Duration::from_secs(60)));
 
         Self {
             limits,
             counters: RwLock::new(HashMap::new()),
+            last_cleanup: RwLock::new(now_secs()),
+            rejections: std::sync::atomic::AtomicU64::new(0),
+            accepts: std::sync::atomic::AtomicU64::new(0),
         }
+    }
+
+    /// Total rate-limit rejections since process start.
+    pub fn rejection_count(&self) -> u64 {
+        self.rejections.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Total rate-limit accepts since process start.
+    pub fn accept_count(&self) -> u64 {
+        self.accepts.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub fn check(&self, method: &str, client_id: &str) -> bool {
@@ -76,13 +95,34 @@ impl MethodRateLimiter {
         let cutoff = now.saturating_sub(window.as_secs());
 
         let mut counters = self.counters.write();
+
+        // SEC-FIX N-M2: Auto-cleanup every 5 minutes to prevent unbounded growth
+        {
+            let mut last = self.last_cleanup.write();
+            if now.saturating_sub(*last) > 300 {
+                counters.retain(|_, ts| {
+                    ts.retain(|&t| now.saturating_sub(t) < 300);
+                    !ts.is_empty()
+                });
+                *last = now;
+            }
+        }
+
+        // SEC-FIX N-M2: Reject if map is at capacity (prevents OOM from rotating client IDs)
+        if !counters.contains_key(&key) && counters.len() >= MAX_RATE_LIMITER_ENTRIES {
+            self.rejections.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return false;
+        }
+
         let timestamps = counters.entry(key).or_default();
         timestamps.retain(|&t| t > cutoff);
 
         if timestamps.len() >= max_count as usize {
+            self.rejections.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             false
         } else {
             timestamps.push(now);
+            self.accepts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             true
         }
     }
@@ -94,6 +134,7 @@ impl MethodRateLimiter {
             ts.retain(|&t| now.saturating_sub(t) < 300);
             !ts.is_empty()
         });
+        *self.last_cleanup.write() = now;
     }
 }
 
@@ -265,6 +306,6 @@ impl InputValidator {
 fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .expect("system clock must be after UNIX epoch")
+        .unwrap_or_default()
         .as_secs()
 }

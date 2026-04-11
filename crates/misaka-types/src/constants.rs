@@ -27,6 +27,13 @@
 //! ```
 
 // ═══ Network Identity ═══
+pub const CHAIN_DISPLAY_NAME: &str = "MISAKA Network";
+pub const CHAIN_TESTNET_NAME: &str = "MISAKA Testnet";
+pub const CURRENCY_NAME: &str = "MISAKA";
+pub const CURRENCY_TICKER: &str = "MSK";
+pub const CURRENCY_MINIMAL_DENOM: &str = "umsk";
+pub const ONE_MISAKA: u64 = 1_000_000_000; // 10^9 base units
+pub const BIP32_COIN_TYPE: u32 = 0x4D534B; // "MSK" in ASCII
 pub const MAINNET_CHAIN_ID: u32 = 0x4D534B01;
 pub const TESTNET_CHAIN_ID: u32 = 0x4D534B02;
 pub const SIMNET_CHAIN_ID: u32 = 0x4D534BFF;

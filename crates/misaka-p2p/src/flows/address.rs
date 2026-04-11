@@ -71,9 +71,27 @@ impl Flow for AddressFlow {
                 }
 
                 MisakaPayloadType::Addresses => {
-                    // Received addresses from a peer.
-                    let addresses: Vec<String> =
-                        serde_json::from_slice(&msg.payload).unwrap_or_default();
+                    // R4-M5 FIX: Enforce payload size limit BEFORE JSON parse to
+                    // prevent CPU/memory waste on large payloads within the 32 MiB wire cap.
+                    // Each address is ~50 bytes max, so 1000 * 60 = 60 KiB is generous.
+                    const MAX_ADDR_PAYLOAD_BYTES: usize = 64 * 1024;
+                    if msg.payload.len() > MAX_ADDR_PAYLOAD_BYTES {
+                        return Err(ProtocolError::ProtocolViolation(format!(
+                            "address payload too large: {} bytes (max {})",
+                            msg.payload.len(),
+                            MAX_ADDR_PAYLOAD_BYTES
+                        )));
+                    }
+
+                    let addresses: Vec<String> = match serde_json::from_slice(&msg.payload) {
+                        Ok(addrs) => addrs,
+                        Err(e) => {
+                            return Err(ProtocolError::ProtocolViolation(format!(
+                                "malformed address JSON: {}",
+                                e
+                            )));
+                        }
+                    };
 
                     if addresses.len() > MAX_ADDRESSES_PER_RESPONSE {
                         return Err(ProtocolError::ProtocolViolation(format!(

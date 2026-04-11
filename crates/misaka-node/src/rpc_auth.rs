@@ -27,10 +27,14 @@ use axum::middleware::Next;
 use std::net::IpAddr;
 
 /// Cached API key + IP allowlist loaded once at server startup.
+///
+/// SEC-FIX N-L2: `required_key` uses `secrecy::SecretString` to ensure
+/// the API key is zeroized on drop. Previous plain `String` left key
+/// material in freed memory.
 #[derive(Clone)]
 pub struct ApiKeyState {
     /// None = auth disabled (open access). Some = require Bearer token.
-    pub required_key: Option<String>,
+    pub required_key: Option<secrecy::SecretString>,
     /// IP allowlist for write endpoints. Empty = no IP restriction.
     pub write_ip_allowlist: Vec<IpAddr>,
     /// Whether auth is mandatory (production mode).
@@ -63,7 +67,8 @@ impl ApiKeyState {
         let required_key = std::env::var("MISAKA_RPC_API_KEY")
             .ok()
             .map(|k| k.trim().to_string())
-            .filter(|k| !k.is_empty());
+            .filter(|k| !k.is_empty())
+            .map(secrecy::SecretString::new);
 
         // Determine if auth is mandatory.
         // Default: REQUIRED (fail-closed). Only explicitly setting "open" disables auth.
@@ -138,22 +143,6 @@ impl ApiKeyState {
         })
     }
 
-    /// Legacy constructor for backward compatibility (no chain_id check).
-    /// Use `from_env_checked()` for production.
-    #[deprecated(
-        note = "Use from_env_checked(chain_id) instead — from_env bypasses mainnet safety checks"
-    )]
-    pub fn from_env() -> Self {
-        Self::from_env_checked(0).unwrap_or_else(|_| Self {
-            required_key: std::env::var("MISAKA_RPC_API_KEY")
-                .ok()
-                .map(|k| k.trim().to_string())
-                .filter(|k| !k.is_empty()),
-            write_ip_allowlist: Vec::new(),
-            auth_required: false,
-        })
-    }
-
     pub fn is_enabled(&self) -> bool {
         self.required_key.is_some()
     }
@@ -205,6 +194,8 @@ pub async fn require_api_key(
     }
 
     // ── Bearer Token Check ──
+    // SEC-FIX N-L1: Uses misaka_security::constant_time::ct_eq instead of
+    // hand-rolled comparison loop for consistency and defense-in-depth.
     if let Some(ref expected_key) = auth.required_key {
         let auth_header = req
             .headers()
@@ -214,18 +205,11 @@ pub async fn require_api_key(
         match auth_header {
             Some(value) if value.starts_with("Bearer ") => {
                 let token = &value[7..];
-                // Phase 38: Fixed timing side-channel (R8 HIGH #1).
-                // Previous impl leaked expected_key length via loop iteration count.
-                // New impl: hash both sides to fixed length, then constant-time compare.
-                // This eliminates both length leakage and byte-by-byte timing.
                 use sha3::{Digest, Sha3_256};
+                use secrecy::ExposeSecret;
                 let token_hash = Sha3_256::digest(token.as_bytes());
-                let expected_hash = Sha3_256::digest(expected_key.as_bytes());
-                let mut acc = 0u8;
-                for i in 0..32 {
-                    acc |= token_hash[i] ^ expected_hash[i];
-                }
-                if acc != 0 {
+                let expected_hash = Sha3_256::digest(expected_key.expose_secret().as_bytes());
+                if !misaka_security::constant_time::ct_eq(&token_hash, &expected_hash) {
                     return Err(StatusCode::UNAUTHORIZED);
                 }
             }
@@ -344,7 +328,7 @@ mod tests {
     #[test]
     fn test_empty_allowlist_allows_all() {
         let state = ApiKeyState {
-            required_key: Some("key".into()),
+            required_key: Some(secrecy::SecretString::new("key".into())),
             write_ip_allowlist: vec![],
             auth_required: false,
         };
@@ -354,7 +338,7 @@ mod tests {
     #[tokio::test]
     async fn test_require_api_key_fail_closed_without_connect_info_when_allowlist_enabled() {
         let auth = ApiKeyState {
-            required_key: Some("key".into()),
+            required_key: Some(secrecy::SecretString::new("key".into())),
             write_ip_allowlist: vec!["127.0.0.1".parse().expect("loopback ip")],
             auth_required: false,
         };
@@ -380,7 +364,7 @@ mod tests {
     #[tokio::test]
     async fn test_require_api_key_rejects_disallowed_ip_even_with_valid_bearer() {
         let auth = ApiKeyState {
-            required_key: Some("key".into()),
+            required_key: Some(secrecy::SecretString::new("key".into())),
             write_ip_allowlist: vec!["127.0.0.1".parse().expect("loopback ip")],
             auth_required: false,
         };
@@ -407,7 +391,7 @@ mod tests {
     #[tokio::test]
     async fn test_require_api_key_accepts_allowed_ip_with_valid_bearer() {
         let auth = ApiKeyState {
-            required_key: Some("key".into()),
+            required_key: Some(secrecy::SecretString::new("key".into())),
             write_ip_allowlist: vec!["127.0.0.1".parse().expect("loopback ip")],
             auth_required: false,
         };
@@ -434,7 +418,7 @@ mod tests {
     #[tokio::test]
     async fn test_require_api_key_rejects_invalid_bearer_from_allowed_ip() {
         let auth = ApiKeyState {
-            required_key: Some("key".into()),
+            required_key: Some(secrecy::SecretString::new("key".into())),
             write_ip_allowlist: vec!["127.0.0.1".parse().expect("loopback ip")],
             auth_required: false,
         };

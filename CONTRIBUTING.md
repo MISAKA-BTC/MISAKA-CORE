@@ -6,6 +6,7 @@
 
 - Rust toolchain compatible with the current local workspace
 - RocksDB development libraries
+- `build-essential`, `pkg-config`, `libssl-dev`, `clang`, `libclang-dev`, `cmake`
 - C/C++ toolchain for `librocksdb-sys` / bindgen
 
 ### Local Validation
@@ -44,7 +45,7 @@ cargo build --release
 The current host line uses the following defaults when running `./check`:
 
 ```bash
-BINDGEN_EXTRA_CLANG_ARGS='-I/usr/lib/gcc/x86_64-linux-gnu/13/include'
+BINDGEN_EXTRA_CLANG_ARGS="-isystem $(gcc -print-file-name=include)"
 CC=gcc
 CXX=g++
 ```

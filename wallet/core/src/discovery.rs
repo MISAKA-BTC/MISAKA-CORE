@@ -169,7 +169,10 @@ impl DiscoveryManager {
         if let Some(state) = self.account_states.get_mut(&account_id) {
             state.total_addresses_found += result.addresses_with_activity;
             state.total_utxos_found += result.utxos_found.len();
-            state.total_balance_found += result.utxos_found.iter().map(|u| u.amount).sum::<u64>();
+            // R7 M-8: saturating_add to prevent overflow
+            state.total_balance_found = state.total_balance_found.saturating_add(
+                result.utxos_found.iter().fold(0u64, |a, u| a.saturating_add(u.amount)),
+            );
 
             // Update highest used indices
             for utxo in &result.utxos_found {
@@ -191,12 +194,11 @@ impl DiscoveryManager {
 
             if receive_gap >= self.config.gap_limit && change_gap >= self.config.gap_limit {
                 state.is_complete = true;
-                tracing::info!(
-                    "Discovery complete for account {}: {} addresses, {} UTXOs, balance {}",
+                tracing::debug!(
+                    "Discovery complete for account {}: {} addresses, {} UTXOs",
                     account_id,
                     state.total_addresses_found,
                     state.total_utxos_found,
-                    state.total_balance_found,
                 );
             }
 

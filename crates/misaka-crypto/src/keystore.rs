@@ -141,11 +141,13 @@ pub fn encrypt_keystore(
     stake_weight: u128,
     passphrase: &[u8],
 ) -> Result<EncryptedKeystore, KeystoreError> {
-    // Generate random salt and nonce
+    // SEC-FIX N-L5: Uses OsRng directly for key material generation
+    // instead of thread_rng() (ChaCha-buffered). OsRng reads from the
+    // OS CSPRNG without intermediate buffering.
     let mut salt = [0u8; SALT_LEN];
     let mut nonce_bytes = [0u8; NONCE_LEN];
     use rand::RngCore;
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rngs::OsRng;
     rng.fill_bytes(&mut salt);
     rng.fill_bytes(&mut nonce_bytes);
 
@@ -271,18 +273,24 @@ pub fn save_keystore(
     // secrets, eliminating the window where other users could read the file.
     let tmp_path = path.with_extension("tmp");
 
-    // Atomic write
     std::fs::write(&tmp_path, json.as_bytes())?;
 
-    // Set restrictive permissions before rename (so the file is never
-    // world-readable at the final path).
+    // SEC-FIX N-L6: If set_permissions fails, clean up the temp file
+    // so unprotected key material does not persist on disk.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600))?;
+        if let Err(e) = std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600))
+        {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(e.into());
+        }
     }
 
-    std::fs::rename(&tmp_path, path)?;
+    if let Err(e) = std::fs::rename(&tmp_path, path) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(e.into());
+    }
     Ok(())
 }
 

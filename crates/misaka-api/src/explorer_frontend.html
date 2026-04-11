@@ -3,7 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>MISAKA Explorer</title>
+<title>MISAKAscan — MSK Block Explorer</title>
+<link rel="icon" type="image/svg+xml" href="/api/chain-icon.svg">
 <style>
   :root {
     --bg: #0d1117; --bg2: #161b22; --bg3: #21262d;
@@ -67,7 +68,7 @@
 <body>
 <header>
   <div class="container inner">
-    <div class="logo">⚡ MISAKA <span>Explorer</span></div>
+    <div class="logo"><img src="/api/chain-icon.svg" alt="MSK" width="24" height="24" style="vertical-align:middle;margin-right:6px">MISAKAscan <span>MSK Explorer</span></div>
     <div class="search-bar">
       <input id="searchInput" type="text" placeholder="Search by Tx Hash / Address / Block Height..." onkeydown="if(event.key==='Enter')doSearch()">
     </div>
@@ -247,7 +248,7 @@ async function showAddress(addr) {
   const bal = d && d.balance != null ? d.balance : '—';
   body.innerHTML = `
     <div class="detail-label">Address</div><div class="detail-value mono">${addr}</div>
-    <div class="detail-label">Balance</div><div class="detail-value">${bal} MISAKA</div>
+    <div class="detail-label">Balance</div><div class="detail-value">${bal} MSK</div>
   `;
   panel.classList.add('active');
 }

@@ -365,14 +365,16 @@ pub enum BlockLogEvent {
 
 /// Collects block events and logs them in batches for readability.
 pub struct BlockEventLogger {
-    sender: tokio::sync::mpsc::UnboundedSender<BlockLogEvent>,
+    sender: tokio::sync::mpsc::Sender<BlockLogEvent>,
     _receiver_handle: Option<tokio::task::JoinHandle<()>>,
 }
+
+const BLOCK_EVENT_CHANNEL_CAPACITY: usize = 4096;
 
 impl BlockEventLogger {
     /// Create and start the logger. Events are batched every `interval`.
     pub fn start(bps: usize) -> Self {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<BlockLogEvent>();
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<BlockLogEvent>(BLOCK_EVENT_CHANNEL_CAPACITY);
         let chunk_limit = bps.max(1) * 10;
 
         let handle = tokio::spawn(async move {
@@ -408,7 +410,7 @@ impl BlockEventLogger {
     }
 
     pub fn log(&self, event: BlockLogEvent) {
-        let _ = self.sender.send(event);
+        let _ = self.sender.try_send(event);
     }
 
     fn flush_batch(batch: &[BlockLogEvent]) {

@@ -117,17 +117,40 @@ impl EncryptedKeystore {
     pub fn decrypt(&self, password: &str) -> Result<Vec<u8>, KeystoreError> {
         // SEC-FIX T3-H5: Validate KDF parameters before use to prevent downgrade attacks.
         const MIN_M_COST: u32 = 16 * 1024; // 16 MiB minimum
+        const MAX_M_COST: u32 = 4 * 1024 * 1024; // 4 GiB maximum
         const MIN_T_COST: u32 = 2;
+        const MAX_T_COST: u32 = 64;
+        const MAX_PARALLELISM: u32 = 16;
         if self.crypto.kdf_params.memory_cost < MIN_M_COST {
             return Err(KeystoreError::Kdf(format!(
                 "KDF memory_cost {} below minimum {}",
                 self.crypto.kdf_params.memory_cost, MIN_M_COST
             )));
         }
+        // R4-H3 FIX: Reject excessively large KDF parameters to prevent
+        // a tampered keystore from causing local DoS on unlock.
+        if self.crypto.kdf_params.memory_cost > MAX_M_COST {
+            return Err(KeystoreError::Kdf(format!(
+                "KDF memory_cost {} exceeds maximum {}",
+                self.crypto.kdf_params.memory_cost, MAX_M_COST
+            )));
+        }
         if self.crypto.kdf_params.time_cost < MIN_T_COST {
             return Err(KeystoreError::Kdf(format!(
                 "KDF time_cost {} below minimum {}",
                 self.crypto.kdf_params.time_cost, MIN_T_COST
+            )));
+        }
+        if self.crypto.kdf_params.time_cost > MAX_T_COST {
+            return Err(KeystoreError::Kdf(format!(
+                "KDF time_cost {} exceeds maximum {}",
+                self.crypto.kdf_params.time_cost, MAX_T_COST
+            )));
+        }
+        if self.crypto.kdf_params.parallelism > MAX_PARALLELISM {
+            return Err(KeystoreError::Kdf(format!(
+                "KDF parallelism {} exceeds maximum {}",
+                self.crypto.kdf_params.parallelism, MAX_PARALLELISM
             )));
         }
         if self.crypto.salt.len() < 16 {
@@ -139,6 +162,13 @@ impl EncryptedKeystore {
 
         let mut derived_key = derive_key(password, &self.crypto.salt, &self.crypto.kdf_params)?;
 
+        // R6-M2: Verify MAC before attempting AEAD decryption.
+        let expected_mac = compute_mac(&derived_key, &self.crypto.ciphertext);
+        if !constant_time_eq(&expected_mac, &self.crypto.mac) {
+            derived_key.zeroize();
+            return Err(KeystoreError::InvalidPassword);
+        }
+
         let key = Key::from_slice(&derived_key);
         let nonce = Nonce::from_slice(&self.crypto.nonce);
         let cipher = ChaCha20Poly1305::new(key);
@@ -147,7 +177,6 @@ impl EncryptedKeystore {
             .decrypt(nonce, self.crypto.ciphertext.as_ref())
             .map_err(|_| KeystoreError::InvalidPassword);
 
-        // SEC-FIX T3-H6: Zeroize derived key after use (regardless of success/failure)
         derived_key.zeroize();
 
         plaintext
@@ -221,21 +250,32 @@ fn compute_mac(key: &[u8], ciphertext: &[u8]) -> [u8; 32] {
     h.finalize().into()
 }
 
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 fn generate_salt() -> Vec<u8> {
     let mut salt = vec![0u8; 32];
-    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut salt);
+    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut salt);
     salt
 }
 
 fn generate_nonce() -> [u8; 12] {
     let mut nonce = [0u8; 12];
-    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut nonce);
+    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut nonce);
     nonce
 }
 
 fn generate_keystore_id() -> String {
     let mut bytes = [0u8; 16];
-    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut bytes);
+    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut bytes);
     hex::encode(bytes)
 }
 

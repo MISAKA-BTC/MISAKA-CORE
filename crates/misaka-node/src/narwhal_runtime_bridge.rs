@@ -103,6 +103,7 @@ impl NarwhalBridge {
             dag_config: misaka_dag::DagStateConfig::default(),
             checkpoint_interval: 100,
             custom_verifier: None, // use default MlDsa65Verifier
+            retention_rounds: 10_000,
         };
 
         // Spawn consensus runtime
@@ -139,6 +140,16 @@ impl NarwhalBridge {
 
     /// Submit a transaction for inclusion in the next block.
     pub fn submit_transaction(&self, tx_bytes: Vec<u8>) -> Result<(), String> {
+        // R4-M1 FIX: Enforce size limit before borsh deserialization to prevent
+        // large allocations from untrusted input (consistent with JSON-RPC 128 KiB cap).
+        const MAX_TX_SIZE: usize = 131_072; // 128 KiB
+        if tx_bytes.len() > MAX_TX_SIZE {
+            return Err(format!(
+                "transaction too large: {} bytes (max {})",
+                tx_bytes.len(),
+                MAX_TX_SIZE
+            ));
+        }
         // SEC-FIX [Audit H4]: Proposer-side validation gate.
         // Same check as narwhal_consensus.rs — prevents malformed transactions
         // from bypassing mempool validation via the runtime bridge.
