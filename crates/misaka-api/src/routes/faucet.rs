@@ -285,7 +285,9 @@ async fn process_drip(
 
     match proxy.post("/api/faucet", &body).await {
         Ok(resp) => {
-            let success = resp["success"].as_bool().unwrap_or(false);
+            let success = resp["success"].as_bool()
+                .or_else(|| resp["accepted"].as_bool())
+                .unwrap_or(false);
             if success {
                 FaucetWorkerResult::Success {
                     tx_hash: resp["txHash"].as_str().unwrap_or("unknown").to_string(),
