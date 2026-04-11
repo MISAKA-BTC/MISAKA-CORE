@@ -81,14 +81,17 @@ def main() -> None:
             if args.platform != "windows":
                 ensure_exec(staging_root / script)
 
-    # Copy binary
-    src_bin = args.binary_dir / binary_name("misaka-node", args.platform)
-    dst_bin = staging_root / binary_name("misaka-node", args.platform)
-    if not src_bin.exists():
-        raise FileNotFoundError(f"missing binary: {src_bin}")
-    shutil.copy2(src_bin, dst_bin)
-    if args.platform != "windows":
-        ensure_exec(dst_bin)
+    # Copy binaries
+    for bin_name in ["misaka-node", "misaka-api"]:
+        src_bin = args.binary_dir / binary_name(bin_name, args.platform)
+        dst_bin = staging_root / binary_name(bin_name, args.platform)
+        if not src_bin.exists():
+            if bin_name == "misaka-node":
+                raise FileNotFoundError(f"missing binary: {src_bin}")
+            continue
+        shutil.copy2(src_bin, dst_bin)
+        if args.platform != "windows":
+            ensure_exec(dst_bin)
 
     # Archive
     archive_base = args.output_dir / package_name
