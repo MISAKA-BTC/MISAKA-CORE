@@ -237,6 +237,16 @@ struct Cli {
     #[arg(long, default_value = "3001")]
     rpc_port: u16,
 
+    /// RPC bind address.
+    ///
+    /// SECURITY: default is `127.0.0.1` (loopback-only). Override to
+    /// `0.0.0.0` ONLY when the RPC port is firewalled to a trusted
+    /// private network (e.g. VPS-to-VPS validator mesh). Mainnet
+    /// operators SHOULD front misaka-api with nginx + TLS instead of
+    /// exposing this directly. Accepts env `MISAKA_RPC_BIND`.
+    #[arg(long, default_value = "127.0.0.1", env = "MISAKA_RPC_BIND")]
+    rpc_bind: String,
+
     /// P2P listen port
     #[arg(long, default_value = "6690")]
     p2p_port: u16,
@@ -1607,10 +1617,19 @@ async fn start_narwhal_node(
     );
 
     // Runtime config
+    //
+    // leader_round_wave = 1 (v0.9.0): every round is a leader round, so
+    // every authority rotates through the leader slot at rate 1 per
+    // committee size. Earlier testnet used wave=2, which combined with
+    // `leader(r) = r % n` only elected EVEN authorities (indices 0,2,4,...)
+    // for even committee sizes — odd-indexed validators NEVER became
+    // leaders, so any tx submitted through them via mempool only entered
+    // their own block and was never included in the leader sub-DAG
+    // (faucet stuck at “承認待ち” in wallets pointing to odd-index nodes).
     let config = RuntimeConfig {
         committee: committee.clone(),
         authority_index,
-        leader_round_wave: 2,
+        leader_round_wave: 1,
         timeout_base_ms: 2000,
         timeout_max_ms: 60_000,
         dag_config: DagStateConfig::default(),
@@ -1958,8 +1977,19 @@ async fn start_narwhal_node(
 
     // Start RPC server (minimal — submit_tx + status)
     let rpc_port = cli.rpc_port;
-    // SECURITY: default to localhost-only binding. Use --rpc-bind 0.0.0.0 for public.
-    let rpc_addr: std::net::SocketAddr = format!("127.0.0.1:{}", rpc_port).parse()?;
+    // SECURITY: default to localhost-only binding (127.0.0.1). Operators may
+    // pass `--rpc-bind 0.0.0.0` (or env `MISAKA_RPC_BIND=0.0.0.0`) when the
+    // RPC port is firewalled to a trusted network.
+    let rpc_addr: std::net::SocketAddr = format!("{}:{}", cli.rpc_bind, rpc_port)
+        .parse()
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "invalid --rpc-bind '{}:{}': {}",
+                cli.rpc_bind,
+                rpc_port,
+                e
+            )
+        })?;
     let msg_tx_rpc = msg_tx.clone();
     let metrics_rpc = metrics.clone();
 
