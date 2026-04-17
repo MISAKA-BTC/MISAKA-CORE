@@ -177,12 +177,13 @@ curl -s http://127.0.0.1:3001/api/health
 
 テストネットでは、バリデーターの登録・削除を REST API で行えます。
 
-公開エンドポイントは運営の **`misaka-api`**（`http://133.167.126.51:4000`）に向けてください。`https://testnet.misaka-network.com` は DNS で名前解決できないため、現状は使えません。
+公開エンドポイントは **`https://misakascan.com`** に向けてください。
+misaka-api は MISAKA testnet オペレーターが運用する https://misakascan.com 配下にリバースプロキシされています。直接 IP + ポート（例 `http://<validator-ip>:4000`）や `seed.misakachain.com` / `testnet.misaka-network.com` といった旧ドメインは現在使えません。
 
 ### 登録
 
 ```bash
-curl -X POST http://133.167.126.51:4000/api/register_validator \
+curl -X POST https://misakascan.com/api/register_validator \
   -H 'Content-Type: application/json' \
   -d '{
     "public_key": "0x<ML-DSA-65 公開鍵 hex>",
@@ -209,12 +210,12 @@ curl -X POST http://133.167.126.51:4000/api/register_validator \
 
 ```bash
 # public_key で削除
-curl -X POST http://133.167.126.51:4000/api/deregister_validator \
+curl -X POST https://misakascan.com/api/deregister_validator \
   -H 'Content-Type: application/json' \
   -d '{"public_key": "0x<削除したい公開鍵 hex>"}'
 
 # network_address で削除
-curl -X POST http://133.167.126.51:4000/api/deregister_validator \
+curl -X POST https://misakascan.com/api/deregister_validator \
   -H 'Content-Type: application/json' \
   -d '{"network_address": "[2a01:4f9:c012:71e8::1]:6691"}'
 # => {"ok":true,"message":"removed 1 validator(s)","remaining":1,"note":"committee reloaded (no restart needed)"}
@@ -225,7 +226,7 @@ curl -X POST http://133.167.126.51:4000/api/deregister_validator \
 現在登録されているバリデーター一覧を取得できます。
 
 ```bash
-curl http://133.167.126.51:4000/api/get_committee
+curl https://misakascan.com/api/get_committee
 # => {"epoch":0,"validators":[{"authority_index":0,...},{"authority_index":1,...}]}
 ```
 
@@ -250,6 +251,34 @@ python3 scripts/register_validator_example.py deregister \
 ```
 
 > **注意**: 登録・削除後はシードノードの再起動が必要です。反映までタイムラグがあります。
+
+### トラブルシューティング
+
+| 症状 | 原因 | 対処 |
+|---|---|---|
+| `nslookup seed.misakachain.com` が NXDOMAIN | 旧ドメイン。現在未使用 | `https://misakascan.com` を使う |
+| `Test-NetConnection <host> -Port 4000` TcpTestSucceeded : False | ポート 4000 は外部公開されていない（nginx 経由のみ） | HTTPS (443) 経由で `https://misakascan.com/api/...` を叩く |
+| 登録後も `observer mode` のまま | ノード起動時に `--validator` フラグが付いていない、または committee hot-reload が 1 サイクル分遅延 | 起動コマンドに `--validator` を追加し、数秒後に `GET https://misakascan.com/api/get_committee` で自分が含まれているか確認 |
+| `stake_verification: "pending"` のまま | Solana stake 未検証。testnet ではネットワーク側が `--allow-unverified-validators` でない限り昇格しない | testnet 運営に連絡するか、ガイド §7 の Solana 環境変数を確認 |
+
+外部から到達性を確認する最小コマンド:
+
+```bash
+# DNS + TLS 疎通
+curl -s https://misakascan.com/v1/chain/info | head -c 200
+
+# 登録 API の疎通 (POST body は何でも良い — 404/400 以外が返れば到達している)
+curl -s -X POST https://misakascan.com/api/register_validator   -H Content-Type: application/json   -d {}
+```
+
+Windows PowerShell:
+
+```powershell
+Resolve-DnsName misakascan.com    # → 133.167.126.51 が返れば OK
+Test-NetConnection misakascan.com -Port 443
+Invoke-RestMethod https://misakascan.com/v1/chain/info
+```
+
 
 ## 含まれているもの
 
