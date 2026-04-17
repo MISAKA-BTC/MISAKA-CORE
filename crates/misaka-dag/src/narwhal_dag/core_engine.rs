@@ -202,7 +202,13 @@ impl CoreEngine {
         chain_ctx: misaka_types::chain_context::ChainContext,
     ) -> Self {
         let leader_schedule = LeaderSchedule::new(committee.clone(), 1);
-        let leader_round_wave = 2;
+        // v0.9.0: wave=1 so every round is a leader round and every
+        // authority rotates through the leader slot (leader(r) = r % n).
+        // wave=2 combined with (leader = r % n) elected only even
+        // authorities for even committee sizes, so odd-indexed nodes
+        // (e.g. authority=1) never became leaders and any tx going
+        // through their mempool never made it into a leader sub-DAG.
+        let leader_round_wave = 1;
         Self {
             authority_index,
             epoch,
