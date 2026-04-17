@@ -36,8 +36,20 @@ pub const MAX_TRANSACTIONS_PER_BLOCK: usize = 10_000;
 /// Maximum ancestors (parents) per block.
 pub const MAX_ANCESTORS: usize = 1024;
 
-/// Maximum past timestamp drift (60 seconds).
-pub const MAX_TIMESTAMP_PAST_DRIFT_MS: u64 = 60_000;
+/// Maximum past timestamp drift (10 minutes).
+///
+/// Raised from 60s to 600s so blocks delayed by peer reconnection,
+/// bounded PeerConnected replay, or transient network hiccups are still
+/// accepted. The original 60s bound caused chain halts whenever a peer
+/// took >60s to replay cached blocks to a late-joining peer; replayed
+/// blocks carry their original (now-stale) propose timestamp and were
+/// rejected, blocking DAG catch-up entirely.
+///
+/// TODO(mainnet): re-evaluate once BlockVerifier::set_syncing(true)
+/// is wired into the sync_fetcher path so catch-up skips the drift
+/// check, allowing mainnet to keep a 60s anti-replay bound in steady
+/// state.
+pub const MAX_TIMESTAMP_PAST_DRIFT_MS: u64 = 600_000;
 
 /// Block verification errors.
 #[derive(Debug, thiserror::Error)]
