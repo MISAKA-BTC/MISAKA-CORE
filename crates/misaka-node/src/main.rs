@@ -12,6 +12,7 @@
 //! - Config validation is MANDATORY at startup.
 //! - Dev features are rejected in release builds.
 //! - MockVerifier is rejected when bridge is enabled.
+#![allow(deprecated)] // StakingRegistry::new (wide use; migration to new_with_config_arc is a separate PR)
 
 // ── Production Safety: reject dev feature in release builds ──
 #[cfg(all(not(debug_assertions), feature = "dev"))]
@@ -1980,16 +1981,12 @@ async fn start_narwhal_node(
     // SECURITY: default to localhost-only binding (127.0.0.1). Operators may
     // pass `--rpc-bind 0.0.0.0` (or env `MISAKA_RPC_BIND=0.0.0.0`) when the
     // RPC port is firewalled to a trusted network.
-    let rpc_addr: std::net::SocketAddr = format!("{}:{}", cli.rpc_bind, rpc_port)
-        .parse()
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "invalid --rpc-bind '{}:{}': {}",
-                cli.rpc_bind,
-                rpc_port,
-                e
-            )
-        })?;
+    let rpc_addr: std::net::SocketAddr =
+        format!("{}:{}", cli.rpc_bind, rpc_port)
+            .parse()
+            .map_err(|e| {
+                anyhow::anyhow!("invalid --rpc-bind '{}:{}': {}", cli.rpc_bind, rpc_port, e)
+            })?;
     let msg_tx_rpc = msg_tx.clone();
     let metrics_rpc = metrics.clone();
 

@@ -349,10 +349,14 @@ impl DagState {
                     self.equivocations.remove(0);
                 }
                 self.equivocations.push(ev.clone());
-                equivocation = Some(ev.clone());
                 // NOTE: In Mysticeti, equivocating blocks are accepted as evidence.
                 // We store the evidence but do NOT insert a second block.
                 // The first block wins. This is stricter than Sui but safer.
+                //
+                // Early return — the local  binding used by the
+                // final match arm below is only reached on the None branch
+                // (no equivocation), so assigning it here before returning is
+                // dead code that tripped  (unused_assignments).
                 return BlockAcceptResult::AcceptedWithEquivocation(ev);
             }
             None => {

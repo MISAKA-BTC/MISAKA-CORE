@@ -324,7 +324,7 @@ mod tests {
     #[test]
     fn test_stack_overflow() {
         let mut stack = DataStack::new();
-        for i in 0..MAX_STACK_SIZE {
+        for _i in 0..MAX_STACK_SIZE {
             stack.push(vec![0]).unwrap();
         }
         assert!(stack.push(vec![0]).is_err());

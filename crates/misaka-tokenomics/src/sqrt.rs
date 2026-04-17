@@ -243,9 +243,14 @@ mod tests {
         let root = sqrt_scaled(u128::MAX);
         // sqrt(2^128 - 1) ≈ 2^64 - 1
         assert!(root > 0);
-        // Verify the invariant
+        // Verify the invariant (r*r fits in u128 because root ≈ 2^64).
+        // Use a checked multiplication so we do not rely on r*r <= u128::MAX
+        // as a tautology (clippy::absurd_extreme_comparisons).
         let r = root as u128;
-        assert!(r * r <= u128::MAX);
+        assert!(
+            r.checked_mul(r).is_some(),
+            "r*r overflowed u128: root={root}"
+        );
     }
 
     #[test]

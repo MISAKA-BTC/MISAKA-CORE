@@ -281,6 +281,12 @@ impl NarwhalMempoolIngress {
                 return Err(format!("input {} has no UTXO refs", i));
             }
             let outref = &input.utxo_refs[0];
+            // fallback_pk is overwritten in the matching arm below (never read in its
+            // initial empty state). The initial Vec::new() triggered
+            // under strict CI; mark the placeholder so the warning is silenced while
+            // keeping the mut borrow semantics the borrow-checker needs to hand out
+            //  from inside the match arm.
+            #[allow(unused_assignments)]
             let mut fallback_pk = Vec::new();
             let pk_bytes = match utxo_guard.get_spending_key(outref) {
                 Some(pk) => pk,
