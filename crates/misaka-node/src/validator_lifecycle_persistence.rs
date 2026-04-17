@@ -510,6 +510,78 @@ mod tests {
         let _ = tokio::fs::remove_file(&path).await;
     }
 
+    /// Regression test: a `persist_global_state` call after a REST
+    /// `/api/register_validator` write MUST leave the on-disk snapshot in a
+    /// state that restores the newly-registered validator on the next boot.
+    ///
+    /// This was the bug behind the operator report where a validator that
+    /// had gone through `/api/register_validator` came back up with only
+    /// the genesis TOML committee on restart: the REST handler mutated the
+    /// in-memory registry but never called `persist_global_state`, so the
+    /// `validator_lifecycle_chain_N.json` snapshot was never rewritten.
+    #[tokio::test]
+    async fn persist_global_state_round_trips_rest_registration() {
+        use super::install_global_store;
+
+        let path = unique_path();
+        let store = Arc::new(ValidatorLifecycleStore::new(&path));
+        // Install as the process-wide store so `persist_global_state`
+        // (which is the exact API the REST handlers now call) picks it up.
+        let _installed = install_global_store(store.clone());
+
+        // Start from an empty registry — simulates a fresh node that has
+        // never seen any REST registration.
+        let registry = Arc::new(RwLock::new(StakingRegistry::new(StakingConfig::testnet())));
+        let current_epoch = Arc::new(RwLock::new(0u64));
+        let epoch_progress = Arc::new(Mutex::new(ValidatorEpochProgress::default()));
+
+        // Simulate the REST handler: write to the registry, then call
+        // persist_global_state (the call the PR adds to register_validator).
+        let mut validator_id = [0u8; 32];
+        validator_id[0] = 0x42;
+        {
+            let mut guard = registry.write().await;
+            guard
+                .register(
+                    validator_id,
+                    vec![0xAB; 1952],
+                    StakingConfig::testnet().min_validator_stake,
+                    500,
+                    validator_id,
+                    0,
+                    [0xCD; 32],
+                    0,
+                    true,
+                    None,
+                    false,
+                )
+                .expect("register succeeds on empty registry");
+        }
+        persist_global_state(&registry, &current_epoch, &epoch_progress)
+            .await
+            .expect("persist_global_state succeeds");
+
+        // Simulate a restart: load the snapshot into a fresh registry and
+        // confirm the REST-registered validator is still present.
+        let reloaded = store
+            .load()
+            .await
+            .expect("load snapshot")
+            .expect("snapshot exists after persist");
+        assert_eq!(
+            reloaded.registry.all_validators().count(),
+            1,
+            "reloaded registry should contain the REST-registered validator"
+        );
+        let v = reloaded
+            .registry
+            .get(&validator_id)
+            .expect("validator_id present after reload");
+        assert_eq!(v.pubkey.len(), 1952, "pubkey preserved across reload");
+
+        let _ = tokio::fs::remove_file(&path).await;
+    }
+
     #[tokio::test]
     async fn restart_round_trip_preserves_progress_and_catches_up_after_finalized_scores() {
         let path = unique_path();

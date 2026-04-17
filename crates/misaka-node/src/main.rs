@@ -1366,7 +1366,15 @@ async fn start_narwhal_node(
     // StakingConfig the executor and registry see.
     let staking_config_arc = lifecycle_bootstrap.staking_config;
     let current_epoch: Arc<RwLock<u64>> = Arc::new(RwLock::new(lifecycle_bootstrap.current_epoch));
-    let _validator_epoch_progress = lifecycle_bootstrap.epoch_progress; // reserved for future β/γ wiring
+    // γ-persistence: share the epoch-progress handle with REST write handlers
+    // (`/api/register_validator` and `/api/deregister_validator`) so each
+    // mutation can call `persist_global_state` to atomically snapshot
+    // registry + epoch + progress to disk. Previously this was discarded
+    // here as `_validator_epoch_progress` (reserved-for-future), so REST
+    // writes only updated in-memory state and were lost on restart.
+    let validator_epoch_progress: Arc<
+        Mutex<validator_lifecycle_persistence::ValidatorEpochProgress>,
+    > = Arc::new(Mutex::new(lifecycle_bootstrap.epoch_progress));
 
     // 0.9.0 β-2: use `load()` (TOML only) + `build_committee_from_sources`.
     // The legacy `load_with_registered` merge is now a no-op because the
@@ -2098,6 +2106,11 @@ async fn start_narwhal_node(
             let reload_committee = committee_shared.clone();
             let route_registry = validator_registry.clone();
             let route_epoch = current_epoch.clone();
+            // γ-persistence: capture the lifecycle progress handle so this
+            // handler can call `persist_global_state` after a successful
+            // registration. Without this the registry mutation lives only
+            // in-memory and is lost on the next restart.
+            let route_epoch_progress = validator_epoch_progress.clone();
             let allow_unverified = cli.allow_unverified_validators;
             move |body: axum::body::Bytes| {
                 let reload_genesis_path = reload_genesis_path.clone();
@@ -2105,6 +2118,7 @@ async fn start_narwhal_node(
                 let reload_committee = reload_committee.clone();
                 let route_registry = route_registry.clone();
                 let route_epoch = route_epoch.clone();
+                let route_epoch_progress = route_epoch_progress.clone();
                 async move {
                     let req: Result<crate::genesis_committee::RegisterValidatorRequest, _> =
                         serde_json::from_slice(&body);
@@ -2278,6 +2292,34 @@ async fn start_narwhal_node(
                         total_now, intent_verified,
                     );
 
+                    // γ-persistence: snapshot the registry + epoch progress
+                    // to `validator_lifecycle_chain_N.json` so the
+                    // registration survives node restart. The companion
+                    // `/api/v1/validators/*` path (system B, validator_api.rs)
+                    // has always done this after every mutation; the
+                    // system-A `/api/register_validator` path was missing
+                    // the call, which is why nodes that went through this
+                    // endpoint came back up with only the genesis TOML
+                    // committee after a restart.
+                    //
+                    // Persist BEFORE hot-reload so a crash between write
+                    // and reload still leaves the on-disk state
+                    // authoritative; the committee will pick it up on
+                    // next startup.
+                    if let Err(e) =
+                        crate::validator_lifecycle_persistence::persist_global_state(
+                            &route_registry,
+                            &route_epoch,
+                            &route_epoch_progress,
+                        )
+                        .await
+                    {
+                        tracing::warn!(
+                            "register_validator: persist_global_state failed                              (registration stays in-memory, will be lost on                              restart): {}",
+                            e
+                        );
+                    }
+
                     // Hot-reload committee into consensus using the merged
                     // (genesis TOML + StakingRegistry ACTIVE) source of truth.
                     if let Ok(new_manifest) = crate::genesis_committee::GenesisCommitteeManifest::load(&reload_genesis_path) {
@@ -2347,12 +2389,16 @@ async fn start_narwhal_node(
             let reload_committee = committee_shared.clone();
             let route_registry = validator_registry.clone();
             let route_epoch = current_epoch.clone();
+            // γ-persistence: same rationale as register_validator above —
+            // deregistration (exit / force_remove_locked) must be durable.
+            let route_epoch_progress = validator_epoch_progress.clone();
             move |body: axum::body::Bytes| {
                 let reload_genesis_path = reload_genesis_path.clone();
                 let reload_msg_tx = reload_msg_tx.clone();
                 let reload_committee = reload_committee.clone();
                 let route_registry = route_registry.clone();
                 let route_epoch = route_epoch.clone();
+                let route_epoch_progress = route_epoch_progress.clone();
                 async move {
                     #[derive(serde::Deserialize)]
                     struct DeregisterRequest {
@@ -2457,6 +2503,24 @@ async fn start_narwhal_node(
                         "Deregistered {} validator(s) via /api/deregister_validator",
                         removed,
                     );
+                    // γ-persistence: same as register_validator — durably
+                    // snapshot the registry before triggering hot-reload so
+                    // the mutation survives a restart.
+                    if removed > 0 {
+                        if let Err(e) =
+                            crate::validator_lifecycle_persistence::persist_global_state(
+                                &route_registry,
+                                &route_epoch,
+                                &route_epoch_progress,
+                            )
+                            .await
+                        {
+                            tracing::warn!(
+                                "deregister_validator: persist_global_state                                  failed (change stays in-memory, will be                                  lost on restart): {}",
+                                e
+                            );
+                        }
+                    }
                     // Hot-reload committee on registry changes.
                     if removed > 0 {
                         if let Ok(new_manifest) = crate::genesis_committee::GenesisCommitteeManifest::load(&reload_genesis_path) {
@@ -6393,6 +6457,22 @@ async fn start_dag_node(
                         }
                     } // end re-check else
                     drop(registry);
+                    // γ-persistence: snapshot after auto-register so that a
+                    // Solana-verified local validator survives a restart
+                    // without re-running the full bootstrap path.
+                    if let Err(e) =
+                        crate::validator_lifecycle_persistence::persist_global_state(
+                            &validator_registry,
+                            &current_epoch,
+                            &epoch_progress,
+                        )
+                        .await
+                    {
+                        warn!(
+                            "SEC-STAKE: persist_global_state after auto-register                              failed (change stays in-memory): {}",
+                            e
+                        );
+                    }
                 } // end if let Some(lv)
             } else if has_stake_sig {
                 // Already registered — update stake verification if new sig provided
@@ -6423,6 +6503,22 @@ async fn start_dag_node(
                     }
                 }
                 drop(registry);
+                // γ-persistence: if mark_stake_verified fired, durably
+                // snapshot the registry so the verification survives a
+                // restart without re-reading the CLI --stake-signature.
+                if let Err(e) =
+                    crate::validator_lifecycle_persistence::persist_global_state(
+                        &validator_registry,
+                        &current_epoch,
+                        &epoch_progress,
+                    )
+                    .await
+                {
+                    warn!(
+                        "SEC-STAKE: persist_global_state after                          mark_stake_verified failed (change stays in-memory): {}",
+                        e
+                    );
+                }
             }
         } else {
             drop(local_validator_ref);
