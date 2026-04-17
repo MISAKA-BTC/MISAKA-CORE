@@ -11,7 +11,6 @@
 //! legacy_verify_transparent, legacy_sign_transparent, LegacyProofData.
 
 use hkdf::Hkdf;
-use rand::RngCore;
 use sha3::{Digest as Sha3Digest, Sha3_256, Sha3_512};
 
 use crate::error::CryptoError;
