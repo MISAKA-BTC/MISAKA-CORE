@@ -288,10 +288,12 @@ impl NarwhalMempoolIngress {
                     fallback_pk = tx.extra.clone();
                     &fallback_pk[..]
                 }
-                None => return Err(format!(
+                None => {
+                    return Err(format!(
                     "spending key not found for input {} in UTXO set and not provided in tx.extra",
                     i
-                )),
+                ))
+                }
             };
 
             let pk = MlDsaPublicKey::from_bytes(pk_bytes)
