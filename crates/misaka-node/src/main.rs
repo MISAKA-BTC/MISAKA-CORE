@@ -3263,20 +3263,34 @@ async fn start_narwhal_node(
                     );
                     // 0.9.0-dev: Catch-up for late-connecting peers.
                     // A newly connected committee peer may have missed our
-                    // earlier BlockProposal broadcasts (which only reach
+                    // most recent BlockProposal broadcasts (which only reach
                     // already-connected peers at the moment of send).
-                    // Replay every cached block to this peer so they can
-                    // accept our past-round blocks and reach quorum.
+                    //
+                    // BOUNDED REPLAY: we only re-send blocks from the last
+                    // PEER_REPLAY_ROUND_WINDOW rounds. Replaying the full
+                    // cache would flood a reconnecting peer with thousands
+                    // of stale blocks that all get rejected by the verifier
+                    // as "timestamp too far in past", saturating the
+                    // ProcessNetworkBlock channel and effectively halting
+                    // consensus. For older rounds, the peer should use the
+                    // normal BlockRequest/fetch_requests path triggered by
+                    // suspended blocks with missing ancestors.
+                    //
                     // Observers are excluded — they receive broadcasts only.
+                    const PEER_REPLAY_ROUND_WINDOW: u32 = 3;
                     if authority_index
                         != crate::narwhal_block_relay_transport::OBSERVER_SENTINEL_AUTHORITY
                     {
-                        let cache_snapshot: Vec<NarwhalBlock> = relay_cache_for_ingress
-                            .read()
-                            .await
-                            .values()
-                            .cloned()
-                            .collect();
+                        let cache_snapshot: Vec<NarwhalBlock> = {
+                            let cache = relay_cache_for_ingress.read().await;
+                            let max_round = cache.keys().map(|r| r.round).max().unwrap_or(0);
+                            let cutoff = max_round.saturating_sub(PEER_REPLAY_ROUND_WINDOW);
+                            cache
+                                .iter()
+                                .filter(|(r, _)| r.round >= cutoff)
+                                .map(|(_, b)| b.clone())
+                                .collect()
+                        };
                         let replay_count = cache_snapshot.len();
                         let relay_out_tx = relay_out_tx_for_ingress.clone();
                         if replay_count > 0 {
@@ -3293,8 +3307,8 @@ async fn start_narwhal_node(
                                 }
                             });
                             info!(
-                                "narwhal_peer_replay authority={} blocks={}",
-                                authority_index, replay_count
+                                "narwhal_peer_replay authority={} blocks={} window_rounds={}",
+                                authority_index, replay_count, PEER_REPLAY_ROUND_WINDOW
                             );
                         }
                     }
