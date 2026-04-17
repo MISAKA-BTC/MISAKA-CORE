@@ -144,6 +144,17 @@ Current testnet staking parameters (configurable in `testnet.toml`):
 
 ## 7. Registration Trust Model (0.9.0 β-3)
 
+### Public endpoint
+
+- **Base URL**: `https://misakascan.com`
+- **Register**: `POST https://misakascan.com/api/register_validator`
+- **Deregister**: `POST https://misakascan.com/api/deregister_validator`
+- **Committee status**: `GET https://misakascan.com/api/get_committee`
+
+The legacy endpoints `http://<seed-ip>:4000`, `seed.misakachain.com`, and
+`testnet.misaka-network.com` are **no longer in service**. Any guide
+referencing them is stale; update to `https://misakascan.com`.
+
 `/api/register_validator` is protected by two independent signature checks
 and one operator-controlled bypass. Understanding which signature proves
 what prevents misconfiguration at onboarding time.

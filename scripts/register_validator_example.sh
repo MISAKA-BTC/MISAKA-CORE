@@ -13,7 +13,7 @@
 # ─────────────────────────────────────────────────────────
 set -euo pipefail
 
-SEED_URL="${MISAKA_SEED_URL:-http://133.167.126.51:4000}"
+SEED_URL="${MISAKA_SEED_URL:-https://misakascan.com}"
 
 if [ $# -lt 2 ]; then
   echo "Usage: $0 <PUBLIC_KEY_HEX> <NETWORK_ADDRESS>"
