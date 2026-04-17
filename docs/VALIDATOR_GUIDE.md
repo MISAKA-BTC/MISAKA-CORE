@@ -142,7 +142,78 @@ Current testnet staking parameters (configurable in `testnet.toml`):
 | Unbonding period | 43,200 blocks |
 | Max validators | 50 |
 
-## 7. Security Checklist
+## 7. Registration Trust Model (0.9.0 β-3)
+
+`/api/register_validator` is protected by two independent signature checks
+and one operator-controlled bypass. Understanding which signature proves
+what prevents misconfiguration at onboarding time.
+
+### Signatures involved
+
+| Field | Type | What it proves | What it does NOT prove |
+|-------|------|----------------|------------------------|
+| `public_key` | ML-DSA-65 pubkey hex (1952 bytes) | The pubkey is well-formed. | That the caller owns the corresponding private key. |
+| `intent_signature` | ML-DSA-65 sig over `"MISAKA:rest_register:v1:" \|\| public_key \|\| network_address` | The caller controls the L1 private key AND committed to this exact `(pubkey, network_address)` tuple — replay to other endpoints is impossible. | That any stake exists on-chain. |
+| `solana_stake_signature` | Solana TX signature | A finalized Solana TX staked ≥ `min_validator_stake` for this L1 key via the MISAKA staking program. | That the caller controls the L1 private key (only that they know *a* valid staking TX). |
+
+Only the combination `intent_signature + solana_stake_signature` is a full
+proof of both identity and economic commitment. Either alone is
+insufficient for mainnet.
+
+### Lifecycle after POST
+
+1. Request body is parsed; `intent_signature` (if supplied) is verified
+   synchronously against the domain-tagged digest. Invalid signatures
+   reject with HTTP 200 + `ok: false`.
+2. Validator inserted into `StakingRegistry` as `LOCKED`,
+   `solana_stake_verified = false`, `solana_stake_signature = Some(sig)`.
+3. Committee is hot-reloaded (the new validator is **not** yet an
+   authority — `LOCKED` is filtered out).
+4. A tokio task is spawned that calls `verify_solana_stake(...)` against
+   the configured Solana RPC. The request handler returns immediately
+   with `stake_verification: "pending"`.
+5. On RPC success the task takes the registry write lock, calls
+   `mark_stake_verified` + `activate(LOCKED → ACTIVE)`, then hot-reloads
+   the committee a second time — the validator enters the authority set.
+6. On RPC failure the validator remains `LOCKED` and is never promoted.
+   No automatic retry — the operator must re-register after fixing the
+   staking TX.
+
+### `stake_verification` response field
+
+| Value | Meaning |
+|-------|---------|
+| `"pending"` | Background verifier was spawned; poll `/api/get_committee` to see when the validator enters the authority set. |
+| `"skipped"` | No `solana_stake_signature` supplied. Validator stays `LOCKED` indefinitely. |
+| `"bypassed"` | Node was started with `--allow-unverified-validators`. Validator was activated **without** on-chain verification. See the warning below. |
+
+### `--allow-unverified-validators` (testnet only)
+
+CLI flag (or env `MISAKA_ALLOW_UNVERIFIED_VALIDATORS=1`) that short-circuits
+the entire Solana verification path: new registrations are inserted with
+`solana_stake_verified = true` and immediately promoted to `ACTIVE`. The
+node logs a prominent `tracing::warn!` at startup and on every use.
+
+**This flag must never be enabled on mainnet**: it removes the economic
+security of the validator set. Anyone with network access to
+`/api/register_validator` can join consensus. Testnet and CI are the
+only legitimate use cases.
+
+### Required Solana environment
+
+When `--allow-unverified-validators` is **not** set, the background
+verifier needs:
+
+| Variable | Purpose | Default |
+|----------|---------|---------|
+| `MISAKA_SOLANA_RPC_URL` | Solana JSON-RPC endpoint | `https://api.mainnet-beta.solana.com` |
+| `MISAKA_STAKING_PROGRAM_ID` | Deployed MISAKA staking program | `27WjgCAWkkjS4H4jqytkKQoCrAN3qgzjp6f6pXLdP8hG` |
+| `MISAKA_STAKING_POOL_ID` | Pool PDA seed | `papaYBfvZcmfmSNHM86zc5NAH5B7Kso1PXYGQsKFYnE` |
+
+If the RPC URL or program ID is unset the verifier logs a warning and the
+validator stays `LOCKED` — the same outcome as an RPC failure.
+
+## 8. Security Checklist
 
 - [ ] Keystore passphrase is strong and stored via Docker secrets or file
 - [ ] Data directory permissions are 0700

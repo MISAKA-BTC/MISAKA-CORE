@@ -120,8 +120,66 @@ pub const FEATURE_ACTIVATIONS: &[FeatureActivation] = &[
     // REMOVED: "qdag-ct" feature — confidential transactions deprecated in v1.0.
 ];
 
+/// Environment-variable name used to override a feature's activation height
+/// at runtime. Feature names are normalized by replacing `-` with `_` and
+/// upper-casing, then wrapped as `MISAKA_FEATURE_{NAME}_HEIGHT`. Example:
+/// `on-chain-staking` → `MISAKA_FEATURE_ON_CHAIN_STAKING_HEIGHT`.
+///
+/// Exposed for diagnostics / startup banners. Normal callers should go
+/// through [`is_feature_active`].
+pub fn feature_env_var_name(feature: &str) -> String {
+    format!(
+        "MISAKA_FEATURE_{}_HEIGHT",
+        feature.replace('-', "_").to_uppercase()
+    )
+}
+
 /// Check whether a feature is active at a given block height.
+///
+/// Resolution order:
+/// 1. Environment variable `MISAKA_FEATURE_{NAME}_HEIGHT` — if set and
+///    parses as `u64`, treat that value as the effective activation height.
+///    Intended for testnet operators to flip a feature on (set to `0`) or
+///    delay it to a specific block without rebuilding the binary.
+/// 2. Compile-time entry in `FEATURE_ACTIVATIONS`. Mainnet stays on this
+///    code-constant path because no operator is expected to set the env var
+///    on a mainnet node.
+///
+/// Behavior on a bad env value (non-`u64`): log a `warn!` once per lookup
+/// and fall through to the code constant. This keeps a typo like
+/// `MISAKA_FEATURE_ON_CHAIN_STAKING_HEIGHT=foo` from silently activating
+/// the feature, while also not crashing the node at startup.
 pub fn is_feature_active(name: &str, height: u64) -> bool {
+    let env_key = feature_env_var_name(name);
+    let env_override = std::env::var(&env_key).ok();
+    is_feature_active_with_override(name, height, env_override.as_deref(), &env_key)
+}
+
+/// Pure-function core used by [`is_feature_active`] and the test suite.
+///
+/// Separated so tests can exercise the override semantics (valid value,
+/// invalid value, missing) without racing on the process-wide environment
+/// — the `serial_test` crate is not in the workspace, so using
+/// `std::env::set_var` in parallel tests would be flaky.
+pub(crate) fn is_feature_active_with_override(
+    name: &str,
+    height: u64,
+    env_override: Option<&str>,
+    env_key_for_log: &str,
+) -> bool {
+    if let Some(val) = env_override {
+        match val.parse::<u64>() {
+            Ok(override_height) => return height >= override_height,
+            Err(_) => {
+                tracing::warn!(
+                    "Invalid value for {}: '{}' (expected u64), falling back to code constant",
+                    env_key_for_log,
+                    val
+                );
+            }
+        }
+    }
+
     FEATURE_ACTIVATIONS
         .iter()
         .any(|f| f.name == name && height >= f.activation_height)
@@ -246,6 +304,125 @@ mod tests {
         let pending = pending_features();
         assert!(pending.iter().any(|f| f.name == "on-chain-staking"));
         assert!(pending.iter().any(|f| f.name == "slashing"));
+    }
+
+    // ─── Option A: feature-activation environment override ───────
+    //
+    // These tests exercise the pure-function core
+    // `is_feature_active_with_override`. `std::env::set_var` is not used
+    // because the workspace has no `serial_test` dependency, and parallel
+    // tests racing on a single env var would flake.
+
+    #[test]
+    fn env_override_activates_feature_at_explicit_height() {
+        // Override at height 100 → below = false, at/above = true.
+        let k = "TEST_OVERRIDE_KEY";
+        assert!(!is_feature_active_with_override(
+            "on-chain-staking",
+            99,
+            Some("100"),
+            k
+        ));
+        assert!(is_feature_active_with_override(
+            "on-chain-staking",
+            100,
+            Some("100"),
+            k
+        ));
+        assert!(is_feature_active_with_override(
+            "on-chain-staking",
+            101,
+            Some("100"),
+            k
+        ));
+    }
+
+    #[test]
+    fn env_override_not_set_uses_code_constant() {
+        // No override → falls through to FEATURE_ACTIVATIONS table.
+        // on-chain-staking code constant is u64::MAX → always false in
+        // realistic heights.
+        let k = "TEST_OVERRIDE_KEY";
+        assert!(!is_feature_active_with_override(
+            "on-chain-staking",
+            0,
+            None,
+            k
+        ));
+        assert!(!is_feature_active_with_override(
+            "on-chain-staking",
+            u64::MAX - 1,
+            None,
+            k
+        ));
+        // Genesis features still active without override.
+        assert!(is_feature_active_with_override(
+            "pq-ring-signatures",
+            0,
+            None,
+            k
+        ));
+    }
+
+    #[test]
+    fn env_override_zero_means_always_active() {
+        // Activation height 0 → active from genesis for all heights.
+        let k = "TEST_OVERRIDE_KEY";
+        assert!(is_feature_active_with_override(
+            "on-chain-staking",
+            0,
+            Some("0"),
+            k
+        ));
+        assert!(is_feature_active_with_override(
+            "on-chain-staking",
+            1,
+            Some("0"),
+            k
+        ));
+        assert!(is_feature_active_with_override(
+            "on-chain-staking",
+            1_000_000,
+            Some("0"),
+            k
+        ));
+    }
+
+    #[test]
+    fn env_override_invalid_value_falls_back_to_code_constant() {
+        // Unparseable value → log warn, use code constant
+        // (u64::MAX for on-chain-staking → always false).
+        let k = "TEST_OVERRIDE_KEY";
+        assert!(!is_feature_active_with_override(
+            "on-chain-staking",
+            0,
+            Some("not_a_number"),
+            k
+        ));
+        assert!(!is_feature_active_with_override(
+            "on-chain-staking",
+            u64::MAX - 1,
+            Some(""),
+            k
+        ));
+    }
+
+    #[test]
+    fn env_var_name_transform() {
+        // Sanity check on the key-naming contract so callers can script
+        // against it.
+        assert_eq!(
+            feature_env_var_name("on-chain-staking"),
+            "MISAKA_FEATURE_ON_CHAIN_STAKING_HEIGHT"
+        );
+        assert_eq!(
+            feature_env_var_name("slashing"),
+            "MISAKA_FEATURE_SLASHING_HEIGHT"
+        );
+        assert_eq!(
+            feature_env_var_name("pq-ring-signatures"),
+            "MISAKA_FEATURE_PQ_RING_SIGNATURES_HEIGHT"
+        );
     }
 
     #[test]

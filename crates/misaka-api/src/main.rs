@@ -3,7 +3,7 @@
 //! Reverse-proxy to a misaka-node RPC endpoint with:
 //! - RESTful GET-based reads (vs node's POST-based RPC)
 //! - CORS (fail-closed: localhost-only by default)
-//! - IP-based rate limiting (general 100/min, sensitive 10/min)
+//! - IP-based rate limiting (general 100/min, sensitive 10/min; faucet routes exempt)
 //! - Request body size limit (128KB)
 //! - Request logging with tracing
 //! - Swagger UI at /docs
@@ -172,10 +172,14 @@ async fn main() -> Result<()> {
 
     // ── Faucet service (queue-based, separate state) ──
     let faucet_config = routes::faucet::FaucetConfig::from_env();
-    info!(
-        "  Faucet: queue-based, {}s cooldown per IP/address",
-        faucet_config.cooldown_secs
-    );
+    if faucet_config.cooldown_secs == 0 {
+        info!("  Faucet: queue-based, no per-IP/address cooldown (set MISAKA_FAUCET_COOLDOWN_SECS to enable)");
+    } else {
+        info!(
+            "  Faucet: queue-based, {}s cooldown per IP/address",
+            faucet_config.cooldown_secs
+        );
+    }
     let faucet_state = routes::faucet::FaucetState::new(faucet_config, proxy.clone());
 
     let ws_broadcaster = routes::ws::WsBroadcaster::new();
@@ -206,6 +210,7 @@ async fn main() -> Result<()> {
     // ── Assemble (ALL middleware connected) ──
     let app = Router::new()
         .merge(routes::chain::router())
+        .merge(routes::validator::router())
         .merge(routes::wallet::router())
         .merge(routes::tx::router())
         .merge(routes::explorer::router())

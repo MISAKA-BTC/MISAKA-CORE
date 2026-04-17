@@ -13,6 +13,11 @@ path = "src/main.rs"
 misaka-types = { path = "../misaka-types" }
 misaka-pqc = { path = "../misaka-pqc" }
 misaka-rpc = { path = "../misaka-rpc" }
+# Phase 9: misaka-crypto for keystore decrypt + ValidatorPqPublicKey;
+# misaka-consensus for validation-error type surface (via transitive use
+# through misaka-types); borsh for UtxoTransaction wire encoding.
+misaka-crypto = { path = "../misaka-crypto" }
+borsh = { workspace = true }
 clap = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

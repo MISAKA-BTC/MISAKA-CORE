@@ -811,6 +811,21 @@ impl DagState {
         &self.committee
     }
 
+    /// Hot-reload committee for dynamic validator changes.
+    /// Extends per-authority vectors if the new committee is larger.
+    pub fn update_committee(&mut self, new_committee: Committee) {
+        let new_size = new_committee.size();
+        let old_size = self.committee.size();
+        if new_size > old_size {
+            self.last_block_round.resize(new_size, 0);
+            self.last_committed_rounds.resize(new_size, 0);
+            for _ in old_size..new_size {
+                self.blocks_per_authority.push(std::collections::BTreeMap::new());
+            }
+        }
+        self.committee = new_committee;
+    }
+
     // ═══════════════════════════════════════════════════════════════
     //  Task 1.2: Sui-parity GC additions
     // ═══════════════════════════════════════════════════════════════

@@ -7,8 +7,10 @@ info:
     All endpoints accept JSON and return JSON unless noted otherwise.
 
 servers:
+  - url: http://localhost:4000
+    description: misaka-api (proxies to node RPC on 127.0.0.1:3001)
   - url: http://localhost:3001
-    description: Local node RPC
+    description: Local node RPC (direct)
 
 paths:
   /health:
@@ -323,6 +325,59 @@ paths:
         "504":
           description: Request timed out
 
+  /api/register_validator:
+    post:
+      summary: Register a validator (forwarded to node RPC)
+      description: |
+        Exposed by **misaka-api** on public deployments. The node listens on loopback only;
+        operators call `http://<host>:4000/api/register_validator` instead of hitting port 3001.
+
+        See `docs/VALIDATOR_GUIDE.md` §7 "Registration Trust Model" for the
+        interaction between `intent_signature`, `solana_stake_signature`,
+        and the `--allow-unverified-validators` startup flag.
+      tags: [Governance]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RegisterValidatorRequest"
+      responses:
+        "200":
+          description: Registration result (always HTTP 200; check `ok` field)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RegisterValidatorResponse"
+        "502":
+          description: Upstream node unavailable
+
+  /api/deregister_validator:
+    post:
+      summary: Deregister a validator (forwarded to node RPC)
+      tags: [Governance]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        "200":
+          description: Deregistration result
+        "502":
+          description: Upstream node unavailable
+
+  /api/get_committee:
+    get:
+      summary: List current committee validators (forwarded to node RPC)
+      tags: [Governance]
+      responses:
+        "200":
+          description: Committee JSON
+        "502":
+          description: Upstream node unavailable
+
 components:
   securitySchemes:
     bearerAuth:
@@ -357,6 +412,64 @@ components:
           type: string
         privacy_backend:
           type: string
+
+    RegisterValidatorRequest:
+      type: object
+      required: [public_key, network_address]
+      properties:
+        public_key:
+          type: string
+          description: ML-DSA-65 public key (1952 bytes, hex-encoded, optional `0x` prefix).
+          example: "0xabcdef..."
+        network_address:
+          type: string
+          description: "`ip:port` of the validator's P2P listener."
+          example: "203.0.113.10:16110"
+        intent_signature:
+          type: string
+          description: |
+            Optional ML-DSA-65 signature over
+            `"MISAKA:rest_register:v1:" || public_key || network_address`
+            (raw bytes, no length prefix). When supplied and valid, the response
+            includes `intent_verified: true`, proving the caller controls the L1
+            private key. When omitted, `intent_verified: false`.
+        solana_stake_signature:
+          type: string
+          description: |
+            Optional finalized Solana TX signature from the MISAKA staking
+            program. When supplied the node spawns a background verifier that,
+            on success, marks the validator `solana_stake_verified = true` and
+            promotes `LOCKED → ACTIVE`. On failure the validator stays `LOCKED`.
+
+    RegisterValidatorResponse:
+      type: object
+      required: [ok]
+      properties:
+        ok:
+          type: boolean
+        message:
+          type: string
+          example: "registered as validator #3"
+        note:
+          type: string
+          example: "committee reloaded (no restart needed)"
+        error:
+          type: string
+          description: Present only when `ok == false`.
+        intent_verified:
+          type: boolean
+          description: True iff a valid `intent_signature` was supplied.
+        stake_verification:
+          type: string
+          enum: [pending, skipped, bypassed]
+          description: |
+            - `pending`: background Solana verifier was spawned; poll
+              `/api/get_committee` to see when the validator activates.
+            - `skipped`: no `solana_stake_signature` supplied; validator
+              stays `LOCKED`.
+            - `bypassed`: node started with `--allow-unverified-validators`;
+              validator was activated without Solana verification (testnet
+              only — see `docs/VALIDATOR_GUIDE.md` §7).
 
     SubmitTxRequest:
       type: object

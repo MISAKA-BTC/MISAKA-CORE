@@ -4,7 +4,8 @@
 //!
 //! Two-tier IP-based rate limiter:
 //! - **General** endpoints: 100 requests/minute per IP.
-//! - **Sensitive** endpoints (faucet, submit_tx): 10 requests/minute per IP.
+//! - **Sensitive** endpoints (submit_tx, etc.): 10 requests/minute per IP.
+//! - **Faucet** HTTP routes (`/faucet`): no per-IP HTTP rate limit (internal optional cooldown only).
 //!
 //! Uses a sliding-window counter backed by an in-memory `HashMap`.
 //!
@@ -413,11 +414,12 @@ fn extract_ip(req: &Request<Body>, trust_proxy: bool) -> Option<IpAddr> {
 
 /// Determine the rate tier for a request path.
 fn path_to_tier(path: &str) -> RateTier {
-    // Sensitive endpoints
-    if path.contains("/faucet")
-        || path.contains("/submit")
+    // Sensitive endpoints (faucet excluded — handled in rate_limit_middleware)
+    if path.contains("/submit")
         || path.contains("/submit_tx")
         || path.contains("/submit_ct_tx")
+        || path.contains("/register_validator")
+        || path.contains("/deregister_validator")
     {
         RateTier::Sensitive
     } else {
@@ -442,6 +444,10 @@ pub async fn rate_limit_middleware(
     req: Request<Body>,
     next: Next,
 ) -> Result<Response<Body>, StatusCode> {
+    // Faucet: no HTTP-layer rate limit (abuse control is optional via MISAKA_FAUCET_COOLDOWN_SECS).
+    if req.uri().path().contains("/faucet") {
+        return Ok(next.run(req).await);
+    }
     // SEC-FIX: extract_ip now returns Option — reject if IP unavailable.
     let ip = match extract_ip(&req, limiter.trust_proxy) {
         Some(ip) => ip,
@@ -714,8 +720,11 @@ mod tests {
     fn test_path_to_tier() {
         assert_eq!(path_to_tier("/v1/chain/info"), RateTier::General);
         assert_eq!(path_to_tier("/v1/tx/submit"), RateTier::Sensitive);
-        assert_eq!(path_to_tier("/v1/faucet"), RateTier::Sensitive);
+        assert_eq!(path_to_tier("/v1/faucet"), RateTier::General);
         assert_eq!(path_to_tier("/api/submit_tx"), RateTier::Sensitive);
+        assert_eq!(path_to_tier("/api/register_validator"), RateTier::Sensitive);
+        assert_eq!(path_to_tier("/api/deregister_validator"), RateTier::Sensitive);
+        assert_eq!(path_to_tier("/api/get_committee"), RateTier::General);
         assert_eq!(path_to_tier("/health"), RateTier::General);
     }
 

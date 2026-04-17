@@ -202,7 +202,8 @@ pub struct ValidatorAccount {
     pub stake_output_index: u32,
 
     /// SEC-STAKE: Whether this validator's stake has been verified on Solana
-    /// via the misakastake.com staking program. REQUIRED for LOCKED → ACTIVE.
+    /// via the misakastake.com staking program. One of the two gates for
+    /// LOCKED → ACTIVE (the other is `l1_stake_verified`).
     /// Set to `true` only after the node confirms the staking TX on-chain.
     #[serde(default)]
     pub solana_stake_verified: bool,
@@ -211,15 +212,39 @@ pub struct ValidatorAccount {
     /// Stored for audit trail and re-verification.
     #[serde(default)]
     pub solana_stake_signature: Option<String>,
+
+    /// v0.9.0: Whether this validator's stake has been locked via an L1 native
+    /// `ValidatorStakeTx::Register` / `StakeMore` UTXO transaction. One of the
+    /// two gates for LOCKED → ACTIVE (the other is `solana_stake_verified`).
+    ///
+    /// The flag is set by `utxo_executor` after a `StakeDeposit` tx is finalized
+    /// (wired in v0.9.0 γ-3). In β-1 the field is defined and read by
+    /// `active_authorities()` but not yet written by any caller — existing
+    /// snapshots deserialize with `false` via `#[serde(default)]`.
+    #[serde(default)]
+    pub l1_stake_verified: bool,
+
+    /// v0.9.0: Peer-to-peer network address (`ip:port`) announced by the
+    /// validator. Populated by the REST registration path and by the
+    /// L1 `Register` tx via `params.p2p_endpoint`. `None` for validators
+    /// migrated from pre-0.9.0 snapshots that never announced an address.
+    #[serde(default)]
+    pub network_address: Option<String>,
 }
 
 impl ValidatorAccount {
     /// Whether eligible for the active set.
+    ///
+    /// γ-3: stake verification is now satisfied by EITHER the Solana bridge
+    /// (`solana_stake_verified`) OR the L1 native `ValidatorStakeTx` path
+    /// (`l1_stake_verified`). Both paths produce the same on-chain
+    /// attestation for consensus purposes; callers can choose either.
     pub fn is_eligible(&self, config: &StakingConfig) -> bool {
         self.state == ValidatorState::Active
             && self.stake_amount >= config.min_validator_stake
             && self.uptime_bps >= config.min_uptime_bps
             && self.score >= config.min_score
+            && (self.solana_stake_verified || self.l1_stake_verified)
     }
 
     /// reward_weight = stake × score (linear). 0 if ineligible.
@@ -255,20 +280,72 @@ pub struct StakingRegistry {
     /// (i.e., 1 stake = 1 validator, not 1 stake = N validators).
     #[serde(default)]
     used_stake_signatures: std::collections::HashSet<String>,
+
+    /// γ-3: non-serialized handle to the caller-owned `Arc<StakingConfig>`.
+    ///
+    /// Serialized snapshots still carry the raw `config` field (above) so the
+    /// wire format is unchanged. On `load()` this starts out `None`; the
+    /// lifecycle bootstrap calls [`Self::rewire_config_arc`] to bind it to
+    /// the process-wide canonical `Arc<StakingConfig>`.
+    ///
+    /// Callers obtain the shared Arc via [`Self::config_arc`] and can assert
+    /// singleton wiring with `Arc::ptr_eq` at startup.
+    #[serde(skip, default)]
+    config_arc: Option<std::sync::Arc<StakingConfig>>,
 }
 
 impl StakingRegistry {
+    /// γ-3: deprecated in favour of [`Self::new_with_config_arc`] so that
+    /// `StakingConfig` exists as a single Arc'd instance shared across
+    /// registry / executor / API state. Kept working for tests and legacy
+    /// callers — internally wraps the value in a fresh Arc.
+    #[deprecated(
+        since = "0.9.0",
+        note = "use new_with_config_arc to share one StakingConfig instance \
+                across registry / executor / api state"
+    )]
     pub fn new(config: StakingConfig) -> Self {
+        Self::new_with_config_arc(std::sync::Arc::new(config))
+    }
+
+    /// γ-3: canonical constructor. Stores the caller-owned Arc so that
+    /// `config_arc()` returns the *same* Arc handle downstream.
+    pub fn new_with_config_arc(config: std::sync::Arc<StakingConfig>) -> Self {
+        let cloned = (*config).clone();
         Self {
             validators: HashMap::new(),
             total_locked: 0,
-            config,
+            config: cloned,
             used_stake_signatures: std::collections::HashSet::new(),
+            config_arc: Some(config),
         }
+    }
+
+    /// γ-3: rewire the internal Arc after snapshot deserialization so the
+    /// registry shares the process-wide canonical `Arc<StakingConfig>`.
+    ///
+    /// The serialized `config` value is kept as-is — by γ-3 design it must
+    /// match the caller's Arc (same values). `Arc::ptr_eq(&self.config_arc,
+    /// &caller_arc)` is what subsequent singleton asserts check.
+    pub fn rewire_config_arc(&mut self, config: std::sync::Arc<StakingConfig>) {
+        self.config_arc = Some(config);
     }
 
     pub fn config(&self) -> &StakingConfig {
         &self.config
+    }
+
+    /// γ-3: handle to the canonical `Arc<StakingConfig>`.
+    ///
+    /// If the registry was deserialized from a snapshot and [`Self::rewire_config_arc`]
+    /// has not yet been called, this falls back to wrapping the inner value in a
+    /// fresh Arc. In that degraded mode `Arc::ptr_eq` with the caller's Arc
+    /// will return false — the lifecycle bootstrap is expected to always
+    /// rewire on the production path.
+    pub fn config_arc(&self) -> std::sync::Arc<StakingConfig> {
+        self.config_arc
+            .clone()
+            .unwrap_or_else(|| std::sync::Arc::new(self.config.clone()))
     }
     pub fn get(&self, id: &[u8; 32]) -> Option<&ValidatorAccount> {
         self.validators.get(id)
@@ -316,6 +393,32 @@ impl StakingRegistry {
             .sum()
     }
 
+    /// v0.9.0: Return validators that should appear in the DAG committee.
+    ///
+    /// The filter is:
+    /// - `state == Active`
+    /// - `(solana_stake_verified || l1_stake_verified)` — at least one of the
+    ///   two verification paths has succeeded
+    /// - `network_address` is `Some` — otherwise the node cannot be contacted
+    ///
+    /// Output is sorted by `validator_id` (canonical id = the 32-byte hash
+    /// of the ML-DSA-65 pubkey) in ascending order, so the caller can assign
+    /// `authority_index` deterministically without depending on `HashMap`
+    /// iteration order.
+    pub fn active_authorities(&self) -> Vec<&ValidatorAccount> {
+        let mut out: Vec<&ValidatorAccount> = self
+            .validators
+            .values()
+            .filter(|v| {
+                v.state == ValidatorState::Active
+                    && (v.solana_stake_verified || v.l1_stake_verified)
+                    && v.network_address.is_some()
+            })
+            .collect();
+        out.sort_by(|a, b| a.validator_id.cmp(&b.validator_id));
+        out
+    }
+
     // ─── State Transitions ──────────────────────────────────
 
     /// UNLOCKED → LOCKED
@@ -332,9 +435,14 @@ impl StakingRegistry {
     /// 5. If not verified: solana_stake_verified = false → activate() will reject
     /// ```
     ///
-    /// The `solana_stake_verified` flag is the ONLY gate between LOCKED and ACTIVE.
-    /// Even if registration succeeds, the validator cannot produce blocks without
-    /// on-chain verification of their stake deposit.
+    /// Either `solana_stake_verified` OR `l1_stake_verified` must become true
+    /// before `activate()` will succeed. They are set by distinct paths:
+    /// Solana bridge (`mark_stake_verified`) and L1 UTXO executor (v0.9.0 γ-3).
+    ///
+    /// # 0.9.0 signature change
+    /// The `l1_stake_verified` parameter was added to allow the L1 native
+    /// path to mark its verification flag at registration time. REST callers
+    /// (Solana path) should pass `false`; the L1 `utxo_executor` passes `true`.
     pub fn register(
         &mut self,
         validator_id: [u8; 32],
@@ -347,6 +455,7 @@ impl StakingRegistry {
         stake_output_index: u32,
         solana_stake_verified: bool,
         solana_stake_signature: Option<String>,
+        l1_stake_verified: bool,
     ) -> Result<(), StakingError> {
         if stake_amount < self.config.min_validator_stake {
             return Err(StakingError::BelowMinStake {
@@ -402,6 +511,8 @@ impl StakingRegistry {
                 stake_output_index,
                 solana_stake_verified,
                 solana_stake_signature,
+                l1_stake_verified,
+                network_address: None,
             },
         );
         self.recompute_total();
@@ -487,10 +598,14 @@ impl StakingRegistry {
             return Err(StakingError::ValidatorSetFull);
         }
 
-        // SEC-STAKE: Require on-chain staking verification from misakastake.com.
-        // Without this, a validator can register with a fake stake_amount and
-        // join the active set without actually locking any tokens on Solana.
-        if !a.solana_stake_verified {
+        // SEC-STAKE / γ-3: Require on-chain stake attestation from EITHER
+        // the Solana bridge (`solana_stake_verified`, set via `mark_stake_verified`)
+        // OR the L1 native `ValidatorStakeTx::Register` path
+        // (`l1_stake_verified`, set by `utxo_executor` when the deposit tx
+        // is finalized). Without one of these, a validator could register
+        // with a fake stake_amount and join the active set without actually
+        // locking tokens on any side.
+        if !a.solana_stake_verified && !a.l1_stake_verified {
             return Err(StakingError::StakeNotVerified);
         }
 
@@ -552,6 +667,260 @@ impl StakingRegistry {
 
         self.recompute_total();
         Ok(amount)
+    }
+
+    // ─── γ-5: Epoch-boundary unbonding settlement ───────────
+
+    /// γ-5: At an epoch boundary, unlock every `Exiting` validator whose
+    /// unbonding period has completed at `current_epoch` and return the
+    /// `(validator_id, unlocked_amount, reward_address)` tuples needed by
+    /// the caller (typically `UtxoExecutor::apply_settled_unlocks`) to
+    /// materialize the unlocked stake into the UTXO set.
+    ///
+    /// This method performs the registry-side mutation (`state = Unlocked`,
+    /// `stake_amount = 0`, etc.) synchronously. The caller is responsible for
+    /// the UTXO-side effects; these two sides are not bundled into a single
+    /// transaction — if the node crashes between them, the registry is
+    /// persisted separately and replay reconciliation is expected to repair
+    /// the gap on the next boot. γ-4 (transactional rollback) tightens this.
+    ///
+    /// Idempotency: after the first call unlocks a validator, subsequent
+    /// calls in the same or later epoch skip it because `state` is no longer
+    /// `Exiting` and `can_unlock()` returns `false`.
+    pub fn settle_unlocks(
+        &mut self,
+        current_epoch: u64,
+    ) -> Vec<([u8; 32], u64, [u8; 32])> {
+        // Collect candidate ids up front so we release the borrow on
+        // `self.validators` before mutating via `self.unlock(..)`.
+        let candidates: Vec<[u8; 32]> = self
+            .validators
+            .iter()
+            .filter(|(_, v)| v.can_unlock(current_epoch, &self.config))
+            .map(|(id, _)| *id)
+            .collect();
+
+        let mut settled = Vec::with_capacity(candidates.len());
+        for vid in candidates {
+            // Capture reward_address BEFORE unlock (unlock() preserves it,
+            // but reading before the mutation keeps the contract simple).
+            let reward_address = match self.validators.get(&vid) {
+                Some(a) => a.reward_address,
+                None => continue,
+            };
+            match self.unlock(&vid, current_epoch) {
+                Ok(amount) => {
+                    tracing::info!(
+                        "γ-5 settle_unlocks: validator={} amount={} reward={}",
+                        hex::encode(&vid[..8]),
+                        amount,
+                        hex::encode(&reward_address[..8]),
+                    );
+                    settled.push((vid, amount, reward_address));
+                }
+                Err(e) => {
+                    // Should not happen — candidates all pass can_unlock().
+                    // Log and skip rather than panic so a single bad entry
+                    // doesn't freeze the epoch boundary.
+                    tracing::warn!(
+                        "γ-5 settle_unlocks: unexpected unlock failure for {}: {:?}",
+                        hex::encode(&vid[..8]),
+                        e
+                    );
+                }
+            }
+        }
+        settled
+    }
+
+    /// Group 2: At an epoch boundary, promote every `Locked` validator that
+    /// has passed the stake-verification gate (OR of `solana_stake_verified`
+    /// / `l1_stake_verified`) and meets the minimum stake threshold, up to
+    /// the `max_active_validators` cap.
+    ///
+    /// This is the automatic counterpart to the manual `activate(..)` REST
+    /// route. Returns the list of `validator_id`s that transitioned LOCKED
+    /// → ACTIVE in this call. A validator that fails any `activate(..)`
+    /// precondition is logged (warn!) and skipped — a single bad entry
+    /// must not freeze the epoch boundary.
+    ///
+    /// Ordering: callers should run `settle_unlocks` FIRST so unbonded
+    /// stake is retired, opening headroom under `max_active_validators`
+    /// for new promotions in this same epoch.
+    ///
+    /// Idempotency: calling again in the same or a later epoch with no new
+    /// LOCKED validators is a no-op. Validators already ACTIVE are ignored
+    /// (filtered by `state == Locked`).
+    pub fn auto_activate_locked(&mut self, current_epoch: u64) -> Vec<[u8; 32]> {
+        // Collect candidate ids up front so we release the borrow on
+        // `self.validators` before mutating via `self.activate(..)`.
+        // Pre-filter here to avoid work inside activate() that will fail
+        // for obvious reasons (wrong state, unverified, below min stake).
+        let candidates: Vec<[u8; 32]> = self
+            .validators
+            .iter()
+            .filter(|(_, v)| {
+                v.state == ValidatorState::Locked
+                    && (v.solana_stake_verified || v.l1_stake_verified)
+                    && v.stake_amount >= self.config.min_validator_stake
+            })
+            .map(|(id, _)| *id)
+            .collect();
+
+        // Deterministic order: ascending validator_id. Without a stable
+        // order, the `max_active_validators` cap would apply non-
+        // deterministically across nodes when more candidates exist than
+        // slots.
+        let mut candidates = candidates;
+        candidates.sort();
+
+        let mut activated = Vec::new();
+        for vid in candidates {
+            // `activate(..)` re-checks every precondition including the
+            // `active_count < max_active_validators` cap, so as we promote
+            // validators one-by-one the cap is enforced automatically
+            // (later candidates see an incremented `active_count`).
+            match self.activate(&vid, current_epoch) {
+                Ok(()) => {
+                    tracing::info!(
+                        "Group 2 auto_activate_locked: promoted validator={} at epoch={}",
+                        hex::encode(&vid[..8]),
+                        current_epoch,
+                    );
+                    activated.push(vid);
+                }
+                Err(StakingError::ValidatorSetFull) => {
+                    // Cap reached — no point trying further candidates.
+                    tracing::info!(
+                        "Group 2 auto_activate_locked: active set full at epoch={}, skipping remaining candidates",
+                        current_epoch,
+                    );
+                    break;
+                }
+                Err(e) => {
+                    // Pre-filter should have caught these, but racing callers
+                    // (REST activate running concurrently) could invalidate
+                    // a candidate. Log and continue with the rest.
+                    tracing::warn!(
+                        "Group 2 auto_activate_locked: activate({}) failed: {:?}",
+                        hex::encode(&vid[..8]),
+                        e
+                    );
+                }
+            }
+        }
+        activated
+    }
+
+    // ─── γ-4: Pre-flight dry-run checks ─────────────────────
+    //
+    // These helpers mirror the mutation path of `register_l1_native`,
+    // `stake_more`, and `exit` but perform NO state changes. They return
+    // the same `StakingError` variants the mutating call would, so
+    // callers (`utxo_executor::apply_stake_*`) can reject a stake tx
+    // *before* touching the UTXO set — closing the "donate to the void"
+    // window where UTXO inputs were consumed only to have the registry
+    // reject the mutation afterwards.
+    //
+    // The check is best-effort: the mutating call still re-validates
+    // everything (defense in depth + race resilience). If the registry
+    // is mutated concurrently between dry-run and commit, the real call
+    // will still reject and the UTXO rollback path kicks in.
+
+    /// γ-4: Dry-run equivalent of `register_l1_native`. Returns `Ok(())`
+    /// iff a subsequent `register_l1_native` call with the same inputs
+    /// would succeed against the current registry state.
+    pub fn can_register_l1_native(
+        &self,
+        validator_id: &[u8; 32],
+        net_stake_amount: u64,
+        commission_bps: u32,
+        stake_tx_hash: &[u8; 32],
+    ) -> Result<(), StakingError> {
+        let tx_hash_hex = hex::encode(stake_tx_hash);
+        if self.used_stake_signatures.contains(&tx_hash_hex) {
+            return Err(StakingError::StakeSignatureAlreadyUsed {
+                signature: tx_hash_hex,
+            });
+        }
+        if net_stake_amount < self.config.min_validator_stake {
+            return Err(StakingError::BelowMinStake {
+                deposited: net_stake_amount,
+                minimum: self.config.min_validator_stake,
+            });
+        }
+        if commission_bps > self.config.max_commission_bps {
+            return Err(StakingError::CommissionTooHigh {
+                requested: commission_bps,
+                maximum: self.config.max_commission_bps,
+            });
+        }
+        if let Some(existing) = self.validators.get(validator_id) {
+            if existing.state != ValidatorState::Unlocked {
+                return Err(StakingError::AlreadyRegistered);
+            }
+        }
+        Ok(())
+    }
+
+    /// γ-4: Dry-run equivalent of `stake_more`.
+    pub fn can_stake_more(
+        &self,
+        validator_id: &[u8; 32],
+        additional_amount: u64,
+        stake_tx_hash: &[u8; 32],
+    ) -> Result<(), StakingError> {
+        let tx_hash_hex = hex::encode(stake_tx_hash);
+        if self.used_stake_signatures.contains(&tx_hash_hex) {
+            return Err(StakingError::StakeSignatureAlreadyUsed {
+                signature: tx_hash_hex,
+            });
+        }
+        if additional_amount == 0 {
+            return Err(StakingError::BelowMinStake {
+                deposited: 0,
+                minimum: 1,
+            });
+        }
+        let a = self
+            .validators
+            .get(validator_id)
+            .ok_or(StakingError::ValidatorNotFound)?;
+        match a.state {
+            ValidatorState::Locked | ValidatorState::Active => {}
+            ValidatorState::Exiting { .. } => {
+                return Err(StakingError::InvalidTransition {
+                    from: "EXITING".into(),
+                    to: "stake_more".into(),
+                });
+            }
+            ValidatorState::Unlocked => {
+                return Err(StakingError::InvalidTransition {
+                    from: "UNLOCKED".into(),
+                    to: "stake_more".into(),
+                });
+            }
+        }
+        // Overflow check — mirrors the mutating path's `checked_add`.
+        a.stake_amount
+            .checked_add(additional_amount)
+            .ok_or(StakingError::Overflow)?;
+        Ok(())
+    }
+
+    /// γ-4: Dry-run equivalent of `exit`.
+    pub fn can_exit(&self, validator_id: &[u8; 32]) -> Result<(), StakingError> {
+        let a = self
+            .validators
+            .get(validator_id)
+            .ok_or(StakingError::ValidatorNotFound)?;
+        if a.state != ValidatorState::Active {
+            return Err(StakingError::InvalidTransition {
+                from: a.state.label().into(),
+                to: "EXITING".into(),
+            });
+        }
+        Ok(())
     }
 
     // ─── Slashing ───────────────────────────────────────────
@@ -683,9 +1052,15 @@ impl StakingRegistry {
                 score: 0,
                 stake_tx_hash,
                 stake_output_index,
-                // L1 ネイティブ登録は L1 UTXO で stake 証明済み
-                solana_stake_verified: true,
+                // 0.9.0 γ-3: L1 ネイティブパスは `l1_stake_verified` のみで
+                // `activate()` の OR gate を満たす。`solana_stake_verified` を
+                // `true` に併記していた β-1 のワークアラウンドは解除した
+                // (activate() は `solana_stake_verified || l1_stake_verified`
+                // を見るので、どちらか片方が true なら ACTIVE に移行できる)。
+                solana_stake_verified: false,
                 solana_stake_signature: Some(tx_hash_hex),
+                l1_stake_verified: true,
+                network_address: None,
             },
         );
         self.recompute_total();
@@ -782,6 +1157,57 @@ impl StakingRegistry {
         if let Some(a) = self.validators.get_mut(validator_id) {
             a.uptime_bps = uptime_bps.min(10_000);
         }
+    }
+
+    /// v0.9.0: Set the validator's announced P2P endpoint.
+    ///
+    /// `register()` inserts with `network_address: None` to keep the parameter
+    /// list finite. Callers that know the address (REST registration,
+    /// `utxo_executor` when processing `ValidatorStakeTx::Register`, the β-1
+    /// `registered_validators.json` migrator) populate it via this method.
+    pub fn set_network_address(
+        &mut self,
+        validator_id: &[u8; 32],
+        addr: Option<String>,
+    ) -> Result<(), StakingError> {
+        let a = self
+            .validators
+            .get_mut(validator_id)
+            .ok_or(StakingError::ValidatorNotFound)?;
+        a.network_address = addr;
+        Ok(())
+    }
+
+    /// v0.9.0: Operator-level hard removal for a validator that is still in
+    /// `LOCKED` (i.e. never activated). Used by the β-2 `/api/deregister_validator`
+    /// REST route so an operator can undo an accidental REST registration
+    /// without waiting for the unbonding period.
+    ///
+    /// `used_stake_signatures` is NOT rolled back — signatures must remain
+    /// monotonically growing for replay protection (audit R7), identical to
+    /// the invariant maintained by `unlock()`.
+    ///
+    /// Returns `Err(StakingError::InvalidTransition)` if the validator is
+    /// `Active`, `Exiting`, or `Unlocked` — those paths must go through
+    /// `exit()` / `unlock()` respectively.
+    pub fn force_remove_locked(
+        &mut self,
+        validator_id: &[u8; 32],
+    ) -> Result<(), StakingError> {
+        let state = self
+            .validators
+            .get(validator_id)
+            .map(|a| a.state)
+            .ok_or(StakingError::ValidatorNotFound)?;
+        if state != ValidatorState::Locked {
+            return Err(StakingError::InvalidTransition {
+                from: state.label().into(),
+                to: "force_remove_locked".into(),
+            });
+        }
+        self.validators.remove(validator_id);
+        self.recompute_total();
+        Ok(())
     }
 
     fn recompute_total(&mut self) {
@@ -906,6 +1332,7 @@ pub enum StakingError {
 // ═══════════════════════════════════════════════════════════════
 
 #[cfg(test)]
+#[allow(deprecated)] // γ-3: existing tests still call `StakingRegistry::new`
 mod tests {
     use super::*;
 
@@ -943,10 +1370,37 @@ mod tests {
             0,
             true, // solana_stake_verified — pre-verified for test convenience
             Some(format!("test_sig_{}", id[0])),
+            false, // l1_stake_verified — not the L1 path in these tests
         )
         .unwrap();
         reg.update_score(&id, 5000);
         reg.activate(&id, epoch + 1).unwrap();
+    }
+
+    /// γ-3: register a validator via the L1 native path (l1_stake_verified = true,
+    /// solana_stake_verified = false). Complementary to the Solana-only
+    /// `register_and_activate` fixture above — mirrors what `utxo_executor`
+    /// does when a `StakeDeposit::Register` tx is finalized.
+    fn preregister_l1(
+        reg: &mut StakingRegistry,
+        id: [u8; 32],
+        pubkey: Vec<u8>,
+        stake_amount: u64,
+    ) {
+        reg.register(
+            id,
+            pubkey,
+            stake_amount,
+            500,
+            id,
+            0,
+            [id[0]; 32],
+            0,
+            false, // solana_stake_verified
+            None,  // solana_stake_signature (L1 path has none)
+            true,  // l1_stake_verified — γ-3 gate
+        )
+        .expect("preregister_l1");
     }
 
     fn insert_active_validator(reg: &mut StakingRegistry, id: [u8; 32], stake: u64, score: u64) {
@@ -971,6 +1425,8 @@ mod tests {
                 stake_output_index: 0,
                 solana_stake_verified: true,
                 solana_stake_signature: Some(format!("test_sig_{}", id[0])),
+                l1_stake_verified: false,
+                network_address: None,
             },
         );
         reg.recompute_total();
@@ -993,6 +1449,7 @@ mod tests {
             0,
             true,
             Some("solana_sig_abc".into()),
+            false,
         )
         .unwrap();
         assert_eq!(reg.get(&id).unwrap().state, ValidatorState::Locked);
@@ -1033,6 +1490,7 @@ mod tests {
                 0,
                 true,
                 None,
+                false,
             )
             .is_err());
     }
@@ -1041,7 +1499,7 @@ mod tests {
     fn test_exit_from_locked_fails() {
         let mut reg = StakingRegistry::new(test_config());
         let id = make_id(1);
-        reg.register(id, vec![], 10_000_000, 500, id, 0, [1; 32], 0, true, None)
+        reg.register(id, vec![], 10_000_000, 500, id, 0, [1; 32], 0, true, None, false)
             .unwrap();
         assert!(reg.exit(&id, 10).is_err());
     }
@@ -1119,6 +1577,8 @@ mod tests {
             stake_output_index: 0,
             solana_stake_verified: true,
             solana_stake_signature: None,
+            l1_stake_verified: false,
+            network_address: None,
         };
         assert_eq!(a.reward_weight(&config), 0);
     }
@@ -1145,6 +1605,8 @@ mod tests {
             stake_output_index: 0,
             solana_stake_verified: true,
             solana_stake_signature: None,
+            l1_stake_verified: false,
+            network_address: None,
         };
         let w1 = make(10_000_000, 1000).reward_weight(&config);
         let w2 = make(40_000_000, 1000).reward_weight(&config);
@@ -1171,6 +1633,7 @@ mod tests {
                 0,
                 true,
                 None,
+                false,
             )
             .is_err());
     }
@@ -1193,6 +1656,7 @@ mod tests {
             0,
             true,
             Some("new_sig".into()),
+            false,
         )
         .unwrap();
         assert_eq!(reg.get(&id).unwrap().state, ValidatorState::Locked);
@@ -1217,6 +1681,7 @@ mod tests {
             0,
             false, // NOT verified via misakastake.com
             None,
+            false, // l1_stake_verified — testing the "no verification" path
         )
         .unwrap();
         assert_eq!(reg.get(&id).unwrap().state, ValidatorState::Locked);
@@ -1252,6 +1717,7 @@ mod tests {
             0,
             false,
             None,
+            false,
         )
         .unwrap();
 
@@ -1290,6 +1756,7 @@ mod tests {
             0,
             true,
             Some("pre_verified_sig".into()),
+            false,
         )
         .unwrap();
 
@@ -1317,6 +1784,7 @@ mod tests {
             0,
             true,
             Some("testnet_sig".into()),
+            false,
         )
         .unwrap();
 
@@ -1333,6 +1801,7 @@ mod tests {
             0,
             true,
             None,
+            false,
         );
         assert!(result.is_err());
     }
@@ -1356,6 +1825,7 @@ mod tests {
             0,
             true,
             None,
+            false,
         );
         assert!(result.is_err());
 
@@ -1371,6 +1841,7 @@ mod tests {
             0,
             true,
             Some("mainnet_sig".into()),
+            false,
         )
         .unwrap();
     }
@@ -1394,6 +1865,7 @@ mod tests {
             0,
             true,
             Some(shared_sig.clone()),
+            false,
         )
         .unwrap();
 
@@ -1409,6 +1881,7 @@ mod tests {
             0,
             true,
             Some(shared_sig.clone()),
+            false,
         );
         assert!(result.is_err());
         match result.unwrap_err() {
@@ -1448,6 +1921,7 @@ mod tests {
             0,
             true,
             Some(sig.clone()),
+            false,
         );
         assert!(result.is_err(), "old signature must not be reusable");
 
@@ -1463,6 +1937,7 @@ mod tests {
             0,
             true,
             Some("new_different_sig".to_string()),
+            false,
         )
         .unwrap();
         assert_eq!(reg.get(&id2).unwrap().state, ValidatorState::Locked);
@@ -1483,6 +1958,7 @@ mod tests {
             0,
             false,
             None,
+            false,
         )
         .unwrap();
 
@@ -1491,5 +1967,487 @@ mod tests {
             serde_json::from_str(&json).expect("deserialize staking registry");
 
         assert!(decoded.get(&validator_id).is_some());
+    }
+
+    // ─── γ-3: activate() / is_eligible() OR gate tests ────────────────────
+
+    #[test]
+    fn test_activate_with_only_l1_verified_ok() {
+        let mut reg = StakingRegistry::new(test_config());
+        let id = make_id(1);
+        preregister_l1(&mut reg, id, vec![1; 1952], 10_000_000);
+        // activation should pass even though solana_stake_verified=false
+        reg.activate(&id, 1).expect("activate with only l1_stake_verified");
+        let acc = reg.get(&id).expect("validator present");
+        assert_eq!(acc.state, ValidatorState::Active);
+        assert!(acc.l1_stake_verified);
+        assert!(!acc.solana_stake_verified);
+    }
+
+    #[test]
+    fn test_activate_with_neither_rejected() {
+        let mut reg = StakingRegistry::new(test_config());
+        let id = make_id(2);
+        reg.register(
+            id,
+            vec![1; 1952],
+            10_000_000,
+            500,
+            id,
+            0,
+            [id[0]; 32],
+            0,
+            false, // solana_stake_verified
+            None,  // solana_stake_signature
+            false, // l1_stake_verified
+        )
+        .expect("register");
+        // both gates false — activate must reject
+        match reg.activate(&id, 1) {
+            Err(StakingError::StakeNotVerified) => {}
+            other => panic!("expected StakeNotVerified, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_is_eligible_l1_only_passes() {
+        let mut reg = StakingRegistry::new(test_config());
+        let id = make_id(3);
+        preregister_l1(&mut reg, id, vec![1; 1952], 10_000_000);
+        reg.activate(&id, 1).expect("activate");
+        reg.update_score(&id, 5000);
+        let cfg = reg.config().clone();
+        let acc = reg.get(&id).expect("validator present");
+        assert!(acc.is_eligible(&cfg), "l1-only validator must be eligible");
+        // sanity: solana-only version is still eligible under the same config
+        let mut reg2 = StakingRegistry::new(test_config());
+        register_and_activate(&mut reg2, make_id(4), 10_000_000, 0);
+        reg2.update_score(&make_id(4), 5000);
+        let acc2 = reg2.get(&make_id(4)).expect("solana validator");
+        assert!(acc2.is_eligible(&cfg));
+    }
+
+    // ─── γ-3: StakingConfig Arc singleton property ────────────────────────
+
+    #[test]
+    fn test_new_with_config_arc_preserves_arc_identity() {
+        let arc = std::sync::Arc::new(test_config());
+        let reg = StakingRegistry::new_with_config_arc(arc.clone());
+        assert!(
+            std::sync::Arc::ptr_eq(&arc, &reg.config_arc()),
+            "new_with_config_arc must return an Arc bit-equal to the caller's",
+        );
+    }
+
+    #[test]
+    fn test_rewire_config_arc_after_deserialize() {
+        let original = StakingRegistry::new(test_config());
+        let json = serde_json::to_string(&original).expect("serialize");
+        let mut decoded: StakingRegistry =
+            serde_json::from_str(&json).expect("deserialize");
+        // config_arc after deserialize is an orphan Arc; rewire to canonical
+        let canonical = std::sync::Arc::new(test_config());
+        decoded.rewire_config_arc(canonical.clone());
+        assert!(
+            std::sync::Arc::ptr_eq(&canonical, &decoded.config_arc()),
+            "rewire must bind to caller-owned Arc",
+        );
+    }
+
+    // ─── γ-5: settle_unlocks tests ────────────────────────────────
+
+    #[test]
+    fn settle_unlocks_returns_completed_validators() {
+        // test_config: unbonding_epochs = 100
+        let mut reg = StakingRegistry::new(test_config());
+        let id = make_id(1);
+        register_and_activate(&mut reg, id, 20_000_000, 0);
+        reg.exit(&id, 10).expect("exit ok");
+
+        // Before unbonding completes (epoch 10 + 100 = 110).
+        assert_eq!(
+            reg.settle_unlocks(109),
+            Vec::<([u8; 32], u64, [u8; 32])>::new(),
+            "must not settle before unbonding completes"
+        );
+
+        // At/after unbonding completion — exactly one settlement.
+        let settled = reg.settle_unlocks(110);
+        assert_eq!(settled.len(), 1);
+        assert_eq!(settled[0].0, id);
+        assert_eq!(settled[0].1, 20_000_000, "returned amount == original stake");
+        assert_eq!(settled[0].2, id, "reward_address matches register()");
+        assert_eq!(
+            reg.get(&id).unwrap().state,
+            ValidatorState::Unlocked,
+            "state transitions to Unlocked"
+        );
+        assert_eq!(reg.get(&id).unwrap().stake_amount, 0, "stake zeroed");
+    }
+
+    #[test]
+    fn settle_unlocks_skips_still_bonding() {
+        let mut reg = StakingRegistry::new(test_config());
+        let id = make_id(2);
+        register_and_activate(&mut reg, id, 15_000_000, 0);
+        reg.exit(&id, 50).expect("exit ok");
+
+        // 100 epochs not yet elapsed (50 + 49 = 99, needs >= 150).
+        assert!(reg.settle_unlocks(99).is_empty());
+        assert!(reg.settle_unlocks(149).is_empty());
+        assert_eq!(
+            reg.get(&id).unwrap().state,
+            ValidatorState::Exiting { exit_epoch: 50 },
+            "still EXITING while under unbonding period"
+        );
+    }
+
+    #[test]
+    fn settle_unlocks_idempotent_within_same_epoch() {
+        let mut reg = StakingRegistry::new(test_config());
+        let id = make_id(3);
+        register_and_activate(&mut reg, id, 12_000_000, 0);
+        reg.exit(&id, 5).expect("exit ok");
+
+        // First call settles; second call must return empty (already Unlocked).
+        let first = reg.settle_unlocks(105);
+        assert_eq!(first.len(), 1);
+
+        let second = reg.settle_unlocks(105);
+        assert!(
+            second.is_empty(),
+            "second call in same epoch must be no-op (idempotent)"
+        );
+
+        // Also idempotent at a later epoch — validator stays Unlocked.
+        let third = reg.settle_unlocks(200);
+        assert!(third.is_empty(), "idempotent at later epoch too");
+    }
+
+    #[test]
+    fn settle_unlocks_multiple_validators_partial_batch() {
+        // 3 validators with staggered exit epochs. At epoch 120:
+        //   - v1 exited at 5  → unlocks at 105   ✓ settled
+        //   - v2 exited at 15 → unlocks at 115   ✓ settled
+        //   - v3 exited at 25 → unlocks at 125   ✗ still bonding
+        let mut reg = StakingRegistry::new(test_config());
+        let v1 = make_id(10);
+        let v2 = make_id(11);
+        let v3 = make_id(12);
+        register_and_activate(&mut reg, v1, 11_000_000, 0);
+        register_and_activate(&mut reg, v2, 11_000_000, 0);
+        register_and_activate(&mut reg, v3, 11_000_000, 0);
+        reg.exit(&v1, 5).unwrap();
+        reg.exit(&v2, 15).unwrap();
+        reg.exit(&v3, 25).unwrap();
+
+        let settled = reg.settle_unlocks(120);
+        assert_eq!(settled.len(), 2, "only the two fully-unbonded validators settle");
+        let settled_ids: std::collections::HashSet<[u8; 32]> =
+            settled.iter().map(|(id, _, _)| *id).collect();
+        assert!(settled_ids.contains(&v1));
+        assert!(settled_ids.contains(&v2));
+        assert!(!settled_ids.contains(&v3));
+
+        assert_eq!(reg.get(&v1).unwrap().state, ValidatorState::Unlocked);
+        assert_eq!(reg.get(&v2).unwrap().state, ValidatorState::Unlocked);
+        assert_eq!(
+            reg.get(&v3).unwrap().state,
+            ValidatorState::Exiting { exit_epoch: 25 },
+            "v3 remains EXITING"
+        );
+
+        // Advance to epoch 125 — v3 now settles, v1/v2 stay Unlocked.
+        let later = reg.settle_unlocks(125);
+        assert_eq!(later.len(), 1);
+        assert_eq!(later[0].0, v3);
+    }
+
+    // ─── Group 2: auto_activate_locked tests ──────────────────────
+
+    /// Register a LOCKED validator (not yet activated) with arbitrary
+    /// verification flags. Mirrors the REST register path without the
+    /// activate step.
+    fn register_locked(
+        reg: &mut StakingRegistry,
+        id: [u8; 32],
+        stake: u64,
+        solana_verified: bool,
+        l1_verified: bool,
+    ) {
+        reg.register(
+            id,
+            vec![1; 1952],
+            stake,
+            500,
+            id,
+            0,
+            [id[0]; 32],
+            0,
+            solana_verified,
+            if solana_verified {
+                Some(format!("sig_{}", id[0]))
+            } else {
+                None
+            },
+            l1_verified,
+        )
+        .expect("register_locked");
+    }
+
+    #[test]
+    fn auto_activate_locked_promotes_verified_validator() {
+        let mut reg = StakingRegistry::new(test_config());
+        let id = make_id(50);
+        // Above min stake (10_000_000) + solana verified.
+        register_locked(&mut reg, id, 20_000_000, true, false);
+        assert_eq!(reg.get(&id).unwrap().state, ValidatorState::Locked);
+
+        let activated = reg.auto_activate_locked(5);
+        assert_eq!(activated, vec![id]);
+        assert_eq!(reg.get(&id).unwrap().state, ValidatorState::Active);
+        assert_eq!(reg.get(&id).unwrap().activation_epoch, Some(5));
+    }
+
+    #[test]
+    fn auto_activate_locked_skips_unverified() {
+        let mut reg = StakingRegistry::new(test_config());
+        let id = make_id(51);
+        // Above min stake but NEITHER verification flag set.
+        register_locked(&mut reg, id, 20_000_000, false, false);
+
+        let activated = reg.auto_activate_locked(7);
+        assert!(
+            activated.is_empty(),
+            "unverified validators must not be auto-activated"
+        );
+        assert_eq!(
+            reg.get(&id).unwrap().state,
+            ValidatorState::Locked,
+            "unverified stays LOCKED",
+        );
+    }
+
+    #[test]
+    fn auto_activate_locked_respects_max_validators_cap() {
+        // test_config has max_active_validators = 5. Fill 5 ACTIVE slots,
+        // then register 3 LOCKED candidates. auto_activate must promote
+        // zero of them because the set is already full.
+        let mut reg = StakingRegistry::new(test_config());
+        for i in 0..5u8 {
+            insert_active_validator(&mut reg, make_id(60 + i), 50_000_000, 5000);
+        }
+        assert_eq!(reg.active_count(), 5);
+
+        for i in 0..3u8 {
+            register_locked(&mut reg, make_id(70 + i), 20_000_000, true, false);
+        }
+
+        let activated = reg.auto_activate_locked(9);
+        assert!(
+            activated.is_empty(),
+            "set is full → no promotions; got {:?}",
+            activated
+        );
+        for i in 0..3u8 {
+            assert_eq!(
+                reg.get(&make_id(70 + i)).unwrap().state,
+                ValidatorState::Locked,
+                "candidate {} must remain LOCKED",
+                70 + i
+            );
+        }
+    }
+
+    // ─── γ-4: dry-run check tests ─────────────────────────────────
+
+    #[test]
+    fn gamma4_can_register_l1_native_mirrors_register_gates() {
+        let mut reg = StakingRegistry::new(test_config());
+        let vid = make_id(91);
+        let tx_hash = [0x91u8; 32];
+
+        // Happy path.
+        assert!(reg
+            .can_register_l1_native(&vid, 20_000_000, 500, &tx_hash)
+            .is_ok());
+
+        // Below min stake.
+        match reg.can_register_l1_native(&vid, 1, 500, &tx_hash) {
+            Err(StakingError::BelowMinStake { .. }) => {}
+            other => panic!("expected BelowMinStake, got {:?}", other),
+        }
+
+        // Commission too high.
+        match reg.can_register_l1_native(&vid, 20_000_000, 9999, &tx_hash) {
+            Err(StakingError::CommissionTooHigh { .. }) => {}
+            other => panic!("expected CommissionTooHigh, got {:?}", other),
+        }
+
+        // After a real register_l1_native, the same tx_hash must be
+        // rejected as replay AND the validator_id must be rejected as
+        // already-registered. Use register_l1_native so the replay check
+        // hits the tx_hash-hex entry that can_register_l1_native inspects.
+        reg.register_l1_native(
+            vid,
+            vec![1; 1952],
+            20_000_000,
+            500,
+            vid,
+            0,
+            tx_hash,
+            0,
+        )
+        .expect("register_l1_native");
+
+        // Replay of same tx_hash.
+        match reg.can_register_l1_native(&make_id(92), 20_000_000, 500, &tx_hash) {
+            Err(StakingError::StakeSignatureAlreadyUsed { .. }) => {}
+            other => panic!("expected StakeSignatureAlreadyUsed, got {:?}", other),
+        }
+
+        // Different tx_hash but same validator_id (Locked — not Unlocked).
+        let other_hash = [0x92u8; 32];
+        match reg.can_register_l1_native(&vid, 20_000_000, 500, &other_hash) {
+            Err(StakingError::AlreadyRegistered) => {}
+            other => panic!("expected AlreadyRegistered, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn gamma4_can_stake_more_mirrors_stake_more_gates() {
+        let mut reg = StakingRegistry::new(test_config());
+        let vid = make_id(93);
+        let initial_hash = [0x93u8; 32];
+
+        // Register first so StakeMore has a target. Use register_l1_native
+        // so the stake_tx_hash-hex lands in used_stake_signatures — the
+        // same replay namespace can_stake_more inspects.
+        reg.register_l1_native(
+            vid,
+            vec![1; 1952],
+            20_000_000,
+            500,
+            vid,
+            0,
+            initial_hash,
+            0,
+        )
+        .expect("register_l1_native");
+
+        // Happy path on a LOCKED validator.
+        let more_hash = [0x94u8; 32];
+        assert!(reg.can_stake_more(&vid, 1_000, &more_hash).is_ok());
+
+        // Zero additional amount → rejected.
+        match reg.can_stake_more(&vid, 0, &[0xFFu8; 32]) {
+            Err(StakingError::BelowMinStake { .. }) => {}
+            other => panic!("expected BelowMinStake, got {:?}", other),
+        }
+
+        // Replay of register's tx_hash → rejected.
+        match reg.can_stake_more(&vid, 1_000, &initial_hash) {
+            Err(StakingError::StakeSignatureAlreadyUsed { .. }) => {}
+            other => panic!("expected StakeSignatureAlreadyUsed, got {:?}", other),
+        }
+
+        // Non-existent validator.
+        match reg.can_stake_more(&make_id(99), 1_000, &more_hash) {
+            Err(StakingError::ValidatorNotFound) => {}
+            other => panic!("expected ValidatorNotFound, got {:?}", other),
+        }
+
+        // Dry-run must not mutate: used_stake_signatures should still
+        // reject the initial_hash (from register), and the new
+        // `more_hash` should still be eligible (not consumed by dry-run).
+        assert!(reg.can_stake_more(&vid, 1_000, &more_hash).is_ok());
+    }
+
+    #[test]
+    fn gamma4_can_exit_mirrors_exit_gates() {
+        let mut reg = StakingRegistry::new(test_config());
+        let vid = make_id(95);
+
+        // Non-existent → ValidatorNotFound.
+        match reg.can_exit(&vid) {
+            Err(StakingError::ValidatorNotFound) => {}
+            other => panic!("expected ValidatorNotFound, got {:?}", other),
+        }
+
+        // Register but don't activate → LOCKED → InvalidTransition.
+        reg.register(
+            vid,
+            vec![1; 1952],
+            20_000_000,
+            500,
+            vid,
+            0,
+            [vid[0]; 32],
+            0,
+            true,
+            Some("s".into()),
+            false,
+        )
+        .expect("register");
+        match reg.can_exit(&vid) {
+            Err(StakingError::InvalidTransition { from, .. }) => {
+                assert_eq!(from, "LOCKED");
+            }
+            other => panic!("expected InvalidTransition from LOCKED, got {:?}", other),
+        }
+
+        // Activate → Active → can_exit OK.
+        reg.update_score(&vid, 5000);
+        reg.activate(&vid, 1).expect("activate");
+        assert!(reg.can_exit(&vid).is_ok(), "ACTIVE can exit");
+
+        // After real exit, validator is EXITING → can_exit rejects again.
+        reg.exit(&vid, 2).expect("exit");
+        match reg.can_exit(&vid) {
+            Err(StakingError::InvalidTransition { from, .. }) => {
+                assert_eq!(from, "EXITING");
+            }
+            other => panic!("expected InvalidTransition from EXITING, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn auto_activate_locked_below_min_stake_is_skipped() {
+        // Pre-filter drops candidates below min_validator_stake before
+        // activate() is called, so they survive as LOCKED.
+        let mut reg = StakingRegistry::new(test_config());
+        // Register succeeds only if stake >= min. To test the pre-filter
+        // we need a validator that registered above min then had stake
+        // reduced (e.g. via slash). Use insert + manual state for this.
+        reg.validators.insert(
+            make_id(80),
+            ValidatorAccount {
+                validator_id: make_id(80),
+                pubkey: vec![1; 1952],
+                stake_amount: 1, // well below min
+                state: ValidatorState::Locked,
+                registered_epoch: 0,
+                activation_epoch: None,
+                exit_epoch: None,
+                unlock_epoch: None,
+                commission_bps: 500,
+                reward_address: make_id(80),
+                cumulative_slashed: 0,
+                last_slash_epoch: None,
+                uptime_bps: 10_000,
+                score: 5000,
+                stake_tx_hash: [0x80; 32],
+                stake_output_index: 0,
+                solana_stake_verified: true,
+                solana_stake_signature: Some("sig_80".into()),
+                l1_stake_verified: false,
+                network_address: None,
+            },
+        );
+        reg.recompute_total();
+
+        let activated = reg.auto_activate_locked(11);
+        assert!(activated.is_empty(), "below-min candidates stay LOCKED");
+        assert_eq!(reg.get(&make_id(80)).unwrap().state, ValidatorState::Locked);
     }
 }

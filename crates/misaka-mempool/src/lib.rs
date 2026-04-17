@@ -73,6 +73,22 @@ pub enum MempoolError {
     DagRelay(String),
     #[error("rejected tx type: SystemEmission/Faucet cannot be user-submitted")]
     RejectedTxType,
+    // ── γ-3.1: L1 native stake tx admission errors ────────────────────
+    #[error("stake envelope decode failed: {0}")]
+    StakeEnvelopeDecode(String),
+    #[error("stake structural validation failed: {0}")]
+    StakeStructural(String),
+    #[error(
+        "stake below min validator stake: net_stake={net_stake}, required={required}"
+    )]
+    StakeBelowMinValidatorStake { net_stake: u64, required: u64 },
+    #[error("stake kind mismatch: tx_type={tx_type}, envelope_kind={envelope_kind}")]
+    StakeKindMismatch {
+        tx_type: String,
+        envelope_kind: String,
+    },
+    #[error("stake admission requires Arc<StakingConfig>: use UtxoMempool::with_staking_config")]
+    StakeConfigMissing,
 }
 
 pub struct MempoolEntry {
@@ -100,9 +116,19 @@ pub struct UtxoMempool {
     /// Optional DAG relay for Narwhal/CoreEngine proposal wiring.
     #[cfg(feature = "dag")]
     dag_relay: Option<mpsc::Sender<Vec<u8>>>,
+    /// γ-3.1: process-wide `Arc<StakingConfig>` injected at startup.
+    ///
+    /// When `Some`, the admit pipeline runs L1-native stake tx admission
+    /// checks (envelope decode + structural + min_validator_stake). When
+    /// `None` (legacy `UtxoMempool::new` callers / tests that don't care
+    /// about stake txs), stake txs are rejected with `StakeConfigMissing`
+    /// rather than silently bypassing the filter.
+    staking_config: Option<std::sync::Arc<misaka_consensus::staking::StakingConfig>>,
 }
 
 impl UtxoMempool {
+    /// Legacy constructor. Stake txs cannot be admitted through this
+    /// instance — prefer [`Self::with_staking_config`] for production use.
     pub fn new(max_size: usize) -> Self {
         Self {
             entries: BTreeMap::new(),
@@ -110,6 +136,26 @@ impl UtxoMempool {
             spent_inputs: std::collections::HashMap::new(),
             #[cfg(feature = "dag")]
             dag_relay: None,
+            staking_config: None,
+        }
+    }
+
+    /// γ-3.1: construct a mempool that accepts L1-native stake txs.
+    ///
+    /// `staking_config` is the canonical process-wide
+    /// `Arc<StakingConfig>` (same instance carried in `StakingRegistry`
+    /// via γ-3's `config_arc()` and in `ValidatorLifecycleBootstrap`).
+    pub fn with_staking_config(
+        max_size: usize,
+        staking_config: std::sync::Arc<misaka_consensus::staking::StakingConfig>,
+    ) -> Self {
+        Self {
+            entries: BTreeMap::new(),
+            max_size,
+            spent_inputs: std::collections::HashMap::new(),
+            #[cfg(feature = "dag")]
+            dag_relay: None,
+            staking_config: Some(staking_config),
         }
     }
 
@@ -155,6 +201,26 @@ impl UtxoMempool {
         // ── 1. Structural validation ──
         tx.validate_structure()
             .map_err(|e| MempoolError::Structural(e.to_string()))?;
+
+        // ── γ-3.1: L1 native stake tx admission checks ──
+        //
+        // For `TxType::StakeDeposit / StakeWithdraw`, `validate_structure`
+        // (γ-1) has already decoded the envelope and cross-checked the
+        // envelope kind against the tx_type. Here we add the mempool-level
+        // filter: min_validator_stake on Register, non-zero additional_amount
+        // on StakeMore, empty stake_inputs on BeginExit.
+        //
+        // This is a *pre-filter* — the final enforcement is in
+        // `utxo_executor::apply_stake_*` (γ-3). Having the check here
+        // prevents obviously invalid stake txs from propagating through
+        // the DAG relay.
+        if matches!(
+            tx.tx_type,
+            misaka_types::utxo::TxType::StakeDeposit
+                | misaka_types::utxo::TxType::StakeWithdraw
+        ) {
+            Self::admit_stake_tx(&tx, self.staking_config.as_deref())?;
+        }
 
         // ── SEC-FIX: Signature format pre-check (anti-spam) ──
         // Full ML-DSA-65 cryptographic verification is deferred to block validation,
@@ -306,6 +372,84 @@ impl UtxoMempool {
         }
 
         Ok(tx_hash)
+    }
+
+    /// γ-3.1: envelope-level filter for `StakeDeposit` / `StakeWithdraw`.
+    ///
+    /// Called by `admit` immediately after `tx.validate_structure()`
+    /// succeeds. This helper is purely stateless (no registry, no utxo_set),
+    /// so it can live on the type itself.
+    ///
+    /// Defense-in-depth: `validate_structure` already catches bad magic,
+    /// kind cross-checks, and core envelope malformation. The mempool adds
+    /// the min_validator_stake / additional_amount semantic filters that
+    /// depend on `StakingConfig`.
+    fn admit_stake_tx(
+        tx: &UtxoTransaction,
+        config: Option<&misaka_consensus::staking::StakingConfig>,
+    ) -> Result<(), MempoolError> {
+        use misaka_types::validator_stake_tx::{StakeTxKind, StakeTxParams, ValidatorStakeTx};
+
+        // Need a StakingConfig to evaluate min_validator_stake.
+        let Some(config) = config else {
+            return Err(MempoolError::StakeConfigMissing);
+        };
+
+        let stake_tx = ValidatorStakeTx::decode_from_extra(&tx.extra)
+            .map_err(|e| MempoolError::StakeEnvelopeDecode(e.to_string()))?;
+        stake_tx
+            .validate_structure()
+            .map_err(|e| MempoolError::StakeStructural(e.to_string()))?;
+
+        // Double-check kind vs. tx_type. UtxoTransaction::validate_structure
+        // already did this (γ-1) but rerun here so the mempool error message
+        // is explicit ("stake kind mismatch" rather than the more generic
+        // "{:?} tx: envelope kind X not allowed for this tx_type").
+        let envelope_kind = stake_tx.kind;
+        let kind_allowed = match tx.tx_type {
+            misaka_types::utxo::TxType::StakeDeposit => matches!(
+                envelope_kind,
+                StakeTxKind::Register | StakeTxKind::StakeMore
+            ),
+            misaka_types::utxo::TxType::StakeWithdraw => {
+                matches!(envelope_kind, StakeTxKind::BeginExit)
+            }
+            _ => true,
+        };
+        if !kind_allowed {
+            return Err(MempoolError::StakeKindMismatch {
+                tx_type: format!("{:?}", tx.tx_type),
+                envelope_kind: envelope_kind.as_str().into(),
+            });
+        }
+
+        match &stake_tx.params {
+            StakeTxParams::Register(_) => {
+                let net_stake = stake_tx.net_stake_amount();
+                if net_stake < config.min_validator_stake {
+                    return Err(MempoolError::StakeBelowMinValidatorStake {
+                        net_stake,
+                        required: config.min_validator_stake,
+                    });
+                }
+            }
+            StakeTxParams::StakeMore(p) => {
+                if p.additional_amount == 0 {
+                    return Err(MempoolError::StakeStructural(
+                        "stake_more additional_amount must be > 0".into(),
+                    ));
+                }
+            }
+            StakeTxParams::BeginExit => {
+                if !stake_tx.stake_inputs.is_empty() {
+                    return Err(MempoolError::StakeStructural(
+                        "begin_exit envelope must have empty stake_inputs".into(),
+                    ));
+                }
+            }
+        }
+
+        Ok(())
     }
 
     /// Admit a system-originated transaction (Faucet, SystemEmission) that
@@ -503,5 +647,219 @@ mod tests {
             borsh::from_slice(&relayed_bytes).expect("borsh decode relayed tx");
 
         assert_eq!(relayed_tx.tx_hash(), hash);
+    }
+
+    // ─── γ-3.1: stake tx admission tests ──────────────────────────────
+
+    use misaka_consensus::staking::StakingConfig;
+    use misaka_types::validator_stake_tx::{
+        RegisterParams, StakeInput, StakeMoreParams, StakeTxKind, StakeTxParams, ValidatorStakeTx,
+    };
+    use std::sync::Arc;
+
+    fn stake_test_config() -> Arc<StakingConfig> {
+        // Small min_validator_stake (10_000) so the fixture numbers fit.
+        Arc::new(StakingConfig {
+            min_validator_stake: 10_000,
+            min_uptime_bps: 0,
+            min_score: 0,
+            ..StakingConfig::testnet()
+        })
+    }
+
+    fn stake_input_utxo_set() -> UtxoSet {
+        let mut utxo_set = UtxoSet::new(100);
+        // Pre-seed `tx.inputs[0]` ref used by stake_utxo_tx (tx_hash=[0xAB; 32]).
+        let outref = OutputRef {
+            tx_hash: [0xABu8; 32],
+            output_index: 0,
+        };
+        utxo_set
+            .add_output(
+                outref.clone(),
+                TxOutput {
+                    amount: 20_000,
+                    address: [0x11; 32],
+                    spending_pubkey: Some(vec![0x22; 1952]),
+                },
+                0,
+                false,
+            )
+            .unwrap();
+        utxo_set
+            .register_spending_key(outref, vec![0x22; 1952])
+            .unwrap();
+        utxo_set
+    }
+
+    /// Build a `TxType::StakeDeposit` UtxoTransaction carrying `envelope`
+    /// in `extra`. The UTXO input references the pre-seeded tx_hash=0xAB.
+    fn stake_utxo_tx(
+        tx_type: TxType,
+        envelope: &ValidatorStakeTx,
+    ) -> UtxoTransaction {
+        UtxoTransaction {
+            version: UTXO_TX_VERSION,
+            tx_type,
+            inputs: vec![TxInput {
+                utxo_refs: vec![OutputRef {
+                    tx_hash: [0xABu8; 32],
+                    output_index: 0,
+                }],
+                proof: vec![0u8; 3309],
+            }],
+            outputs: vec![TxOutput {
+                amount: 0,
+                address: [0x11; 32],
+                spending_pubkey: None,
+            }],
+            fee: 100,
+            extra: envelope.encode_for_extra().expect("encode envelope"),
+            expiry: 0,
+        }
+    }
+
+    fn make_register_envelope(net_stake: u64) -> ValidatorStakeTx {
+        // With fee=1_000 and 1 input of amount=net_stake+1_000 → net_stake.
+        ValidatorStakeTx {
+            kind: StakeTxKind::Register,
+            validator_id: [1u8; 32],
+            stake_inputs: vec![StakeInput {
+                tx_hash: [0xCDu8; 32],
+                output_index: 0,
+                amount: net_stake + 1_000,
+            }],
+            fee: 1_000,
+            nonce: 0,
+            memo: None,
+            params: StakeTxParams::Register(RegisterParams {
+                consensus_pubkey: vec![0u8; 1952],
+                reward_address: [2u8; 32],
+                commission_bps: 500,
+                p2p_endpoint: None,
+                moniker: None,
+            }),
+            signature: vec![0u8; 32],
+        }
+    }
+
+    fn make_begin_exit_envelope() -> ValidatorStakeTx {
+        ValidatorStakeTx {
+            kind: StakeTxKind::BeginExit,
+            validator_id: [1u8; 32],
+            stake_inputs: vec![],
+            fee: 1_000,
+            nonce: 2,
+            memo: None,
+            params: StakeTxParams::BeginExit,
+            signature: vec![0u8; 32],
+        }
+    }
+
+    #[test]
+    fn test_admit_stake_deposit_register_valid() {
+        let mut pool = UtxoMempool::with_staking_config(100, stake_test_config());
+        let utxo_set = stake_input_utxo_set();
+        let envelope = make_register_envelope(/* net_stake = */ 15_000);
+        let tx = stake_utxo_tx(TxType::StakeDeposit, &envelope);
+        pool.admit(tx, &utxo_set, 1000)
+            .expect("valid register admitted");
+        assert_eq!(pool.len(), 1);
+    }
+
+    #[test]
+    fn test_admit_stake_deposit_below_min_rejected() {
+        let mut pool = UtxoMempool::with_staking_config(100, stake_test_config());
+        let utxo_set = stake_input_utxo_set();
+        // net_stake = 5_000 < min_validator_stake = 10_000
+        let envelope = make_register_envelope(/* net_stake = */ 5_000);
+        let tx = stake_utxo_tx(TxType::StakeDeposit, &envelope);
+        match pool.admit(tx, &utxo_set, 1000) {
+            Err(MempoolError::StakeBelowMinValidatorStake { net_stake, required }) => {
+                assert_eq!(net_stake, 5_000);
+                assert_eq!(required, 10_000);
+            }
+            other => panic!(
+                "expected StakeBelowMinValidatorStake, got {:?}",
+                other.map(|_| "Ok")
+            ),
+        }
+    }
+
+    #[test]
+    fn test_admit_stake_withdraw_begin_exit_valid() {
+        let mut pool = UtxoMempool::with_staking_config(100, stake_test_config());
+        let utxo_set = stake_input_utxo_set();
+        let envelope = make_begin_exit_envelope();
+        let tx = stake_utxo_tx(TxType::StakeWithdraw, &envelope);
+        pool.admit(tx, &utxo_set, 1000)
+            .expect("valid begin_exit admitted");
+        assert_eq!(pool.len(), 1);
+    }
+
+    #[test]
+    fn test_admit_stake_deposit_bad_envelope_rejected() {
+        let mut pool = UtxoMempool::with_staking_config(100, stake_test_config());
+        let utxo_set = stake_input_utxo_set();
+        let envelope = make_register_envelope(/* net_stake = */ 15_000);
+        let mut tx = stake_utxo_tx(TxType::StakeDeposit, &envelope);
+        // Corrupt the envelope magic so decode fails.
+        tx.extra[0] ^= 0xFF;
+        // The corrupted envelope is caught by `UtxoTransaction::validate_structure`
+        // (γ-1 wiring) rather than our `admit_stake_tx` helper, so the
+        // mempool surfaces it as `Structural` rather than `StakeEnvelopeDecode`.
+        // Either error is acceptable — the invariant is "bad envelope must
+        // be rejected, not silently admitted".
+        match pool.admit(tx, &utxo_set, 1000) {
+            Err(MempoolError::Structural(s)) => {
+                assert!(
+                    s.contains("magic") || s.contains("envelope"),
+                    "error must reference envelope / magic, got: {s}",
+                );
+            }
+            Err(MempoolError::StakeEnvelopeDecode(_)) => {}
+            other => panic!("expected envelope-related error, got {:?}", other.map(|_| "Ok")),
+        }
+    }
+
+    #[test]
+    fn test_admit_stake_deposit_wrong_kind_rejected() {
+        // tx_type = StakeDeposit but envelope kind = BeginExit.
+        // UtxoTransaction::validate_structure (γ-1) catches this first with
+        // a "envelope kind X not allowed for this tx_type" message — we
+        // accept Structural here since the mempool layer has the same
+        // invariant (defense-in-depth).
+        let mut pool = UtxoMempool::with_staking_config(100, stake_test_config());
+        let utxo_set = stake_input_utxo_set();
+        let envelope = make_begin_exit_envelope();
+        let tx = stake_utxo_tx(TxType::StakeDeposit, &envelope);
+        match pool.admit(tx, &utxo_set, 1000) {
+            Err(MempoolError::Structural(s)) => {
+                assert!(
+                    s.contains("envelope kind") || s.contains("kind"),
+                    "error must reference kind mismatch, got: {s}",
+                );
+            }
+            Err(MempoolError::StakeKindMismatch { .. }) => {}
+            other => panic!("expected kind-mismatch error, got {:?}", other.map(|_| "Ok")),
+        }
+    }
+
+    #[test]
+    fn test_admit_stake_tx_without_config_rejected() {
+        // Legacy UtxoMempool::new (no StakingConfig) must not silently
+        // pass stake txs through. `admit_stake_tx` surfaces
+        // `StakeConfigMissing` so an operator sees a clear error.
+        let mut pool = UtxoMempool::new(100);
+        let utxo_set = stake_input_utxo_set();
+        let envelope = make_register_envelope(15_000);
+        let tx = stake_utxo_tx(TxType::StakeDeposit, &envelope);
+        match pool.admit(tx, &utxo_set, 1000) {
+            Err(MempoolError::StakeConfigMissing) => {}
+            other => panic!(
+                "expected StakeConfigMissing, got {:?}",
+                other.map(|_| "Ok")
+            ),
+        }
     }
 }

@@ -83,7 +83,9 @@ pub mod solana_stake_verify;
 pub mod sr21_election;
 #[cfg(test)]
 pub(crate) mod test_env;
+pub mod staking_config_builder;
 pub mod validator_api;
+pub mod validator_lifecycle_bootstrap;
 pub mod validator_lifecycle_persistence;
 
 // ── v1 modules (linear chain) ──
@@ -158,6 +160,48 @@ fn env_flag_enabled(name: &str) -> bool {
     std::env::var(name)
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
+}
+
+/// Permissionless-SR preflight check: returns `true` iff the validator
+/// identified by `fingerprint` is present in the `StakingRegistry` AND
+/// its state is `Active` (i.e., already promoted past the LOCKED →
+/// ACTIVE gate by γ-3 manual activate, Group 2 auto_activate_locked,
+/// or the REST Solana-verified path).
+///
+/// Callers combine this with `manifest.contains(...)` to decide whether
+/// a node enters OBSERVER MODE at startup. Extracted as a free function
+/// so it is unit-testable without spinning up the full node runtime.
+fn is_dynamic_active_validator(
+    registry: &misaka_consensus::staking::StakingRegistry,
+    fingerprint: &[u8; 32],
+) -> bool {
+    registry
+        .get(fingerprint)
+        .map(|v| v.state == misaka_consensus::staking::ValidatorState::Active)
+        .unwrap_or(false)
+}
+
+/// PR-B: Convert (proposed_blocks, expected_per_validator) to an
+/// uptime basis-points value clamped to `[0, 10_000]`.
+///
+/// Semantics:
+/// - `expected == 0` → `10_000` (quiet / bootstrap epoch — don't punish
+///   validators when no blocks were produced OR no active set existed to
+///   divide across).
+/// - otherwise `uptime_bps = min(10_000, proposed * 10_000 / expected)`.
+///
+/// u128 arithmetic avoids overflow on pathological `proposed` values
+/// (`proposed * 10_000` can exceed u64 only when proposed ≥ ~1.8e15,
+/// well outside realistic epoch sizes, but u128 is free).
+///
+/// Exposed as a pure function so the commit-loop wiring in
+/// `start_narwhal_node` has a unit-testable surface.
+fn compute_uptime_bps(proposed: u64, expected: u64) -> u64 {
+    if expected == 0 {
+        return 10_000;
+    }
+    let ratio = (proposed as u128).saturating_mul(10_000) / (expected as u128);
+    ratio.min(10_000) as u64
 }
 
 fn requires_explicit_advertise_addr(
@@ -261,8 +305,8 @@ struct Cli {
     #[arg(long, default_value = "1000000")]
     faucet_amount: u64,
 
-    /// Faucet cooldown per address in milliseconds
-    #[arg(long, default_value = "300000")]
+    /// Faucet cooldown per address in milliseconds (0 = no cooldown)
+    #[arg(long, default_value = "10000")]
     faucet_cooldown_ms: u64,
 
     // ─── P2P overrides ───────────────────────────────────
@@ -353,6 +397,14 @@ struct Cli {
     #[arg(long, env = "MISAKA_STAKING_PROGRAM_ID")]
     staking_program_id: Option<String>,
 
+    /// 0.9.0 β-3: Testnet-only override. When set, validators registered via
+    /// `/api/register_validator` are activated **without** on-chain Solana
+    /// stake verification — the request is trusted as-is. This bypasses the
+    /// `solana_stake_verified` gate in `StakingRegistry::activate()` and
+    /// skips the background verifier. MUST NOT be enabled on mainnet nodes.
+    #[arg(long, env = "MISAKA_ALLOW_UNVERIFIED_VALIDATORS")]
+    allow_unverified_validators: bool,
+
     // ─── Config file loading ────────────────────────────────
     /// Path to a TOML or JSON configuration file.
     /// Values from the file serve as defaults; explicit CLI args override them.
@@ -373,10 +425,15 @@ async fn main() -> anyhow::Result<()> {
     // explicitly set?" by comparing against the known clap default values.
     // If the CLI value matches the clap default AND the config file
     // provides a different value, we use the config file value.
-    {
-        let config_source: &str;
+    //
+    // Option A: `loaded_config` is lifted to function-level scope (previously
+    // an inner-block local) so `start_narwhal_node` / `start_dag_node` can
+    // pass `Some(&loaded_config)` to `build_staking_config_for_chain`
+    // instead of the `None` placeholder Group 1 left behind. The surrounding
+    // CLI-override logic is unchanged; only the block braces moved.
+    let config_source: &str;
 
-        let loaded_config = if let Some(ref config_path) = cli.config {
+    let loaded_config: Option<misaka_config::NodeConfig> = if let Some(ref config_path) = cli.config {
             config_source = "file";
             Some(
                 misaka_config::load_config(std::path::Path::new(config_path)).map_err(|e| {
@@ -458,12 +515,11 @@ async fn main() -> anyhow::Result<()> {
             }
         }
 
-        // Startup banner (printed to stderr so it appears before tracing init)
-        eprintln!(
-            "MISAKA node config: chain_id={}, data_dir={}, rpc_port={}, p2p_port={}, config_source={}",
-            cli.chain_id, cli.data_dir, cli.rpc_port, cli.p2p_port, config_source
-        );
-    }
+    // Startup banner (printed to stderr so it appears before tracing init)
+    eprintln!(
+        "MISAKA node config: chain_id={}, data_dir={}, rpc_port={}, p2p_port={}, config_source={}",
+        cli.chain_id, cli.data_dir, cli.rpc_port, cli.p2p_port, config_source
+    );
 
     // ════════════════════════════════════════════════════════
     //  共通初期化 (v1/v2 共通)
@@ -991,17 +1047,17 @@ async fn main() -> anyhow::Result<()> {
 
     #[cfg(all(feature = "dag", feature = "ghostdag-compat"))]
     {
-        start_dag_node(cli, node_mode, role, p2p_config).await
+        start_dag_node(cli, node_mode, role, p2p_config, loaded_config).await
     }
 
     #[cfg(all(feature = "dag", not(feature = "ghostdag-compat")))]
     {
-        start_narwhal_node(cli, p2p_config).await
+        start_narwhal_node(cli, p2p_config, loaded_config).await
     }
 
     #[cfg(not(feature = "dag"))]
     {
-        start_v1_node(cli, node_mode, role, p2p_config).await
+        start_v1_node(cli, node_mode, role, p2p_config, loaded_config).await
     }
 }
 
@@ -1035,8 +1091,145 @@ fn resolve_genesis_committee_path(cli_path: Option<&str>) -> std::path::PathBuf 
     cwd_default.to_path_buf()
 }
 
+/// 0.9.0 β-3: Spawn a background task that verifies a validator's Solana
+/// stake signature off the request path.
+///
+/// Rationale: the REST `/api/register_validator` handler must return
+/// quickly and must not hold the `StakingRegistry` write lock during the
+/// Solana RPC round-trip. Instead we insert the validator as LOCKED
+/// (solana_stake_verified = false), then kick off this task. On RPC
+/// success it takes the write lock, calls `mark_stake_verified` and
+/// `activate` (LOCKED → ACTIVE), then triggers a committee hot-reload.
+/// On failure the validator stays LOCKED.
+///
+/// The task owns cheap clones of every handle — no references into the
+/// closure frame — so it outlives the HTTP response.
 #[cfg(all(feature = "dag", not(feature = "ghostdag-compat")))]
-async fn start_narwhal_node(mut cli: Cli, p2p_config: P2pConfig) -> anyhow::Result<()> {
+fn spawn_verify_stake_background(
+    validator_id: [u8; 32],
+    l1_pubkey_hex: String,
+    signature: String,
+    min_stake: u64,
+    registry: std::sync::Arc<tokio::sync::RwLock<misaka_consensus::staking::StakingRegistry>>,
+    committee: std::sync::Arc<tokio::sync::RwLock<misaka_dag::narwhal_types::committee::Committee>>,
+    current_epoch: std::sync::Arc<tokio::sync::RwLock<u64>>,
+    msg_tx: tokio::sync::mpsc::Sender<misaka_dag::narwhal_dag::runtime::ConsensusMessage>,
+    genesis_path: std::path::PathBuf,
+) {
+    tokio::spawn(async move {
+        let id_short = hex::encode(&validator_id[..8]);
+        let rpc_url = crate::solana_stake_verify::solana_rpc_url();
+        let program_id = crate::solana_stake_verify::staking_program_id();
+
+        if rpc_url.is_empty() || program_id.is_empty() {
+            tracing::warn!(
+                "verify_stake_background[{}]: Solana RPC or program ID not configured \
+                 — validator stays LOCKED",
+                id_short,
+            );
+            return;
+        }
+
+        let verified = match crate::solana_stake_verify::verify_solana_stake(
+            &rpc_url,
+            &signature,
+            &l1_pubkey_hex,
+            &program_id,
+            min_stake,
+        )
+        .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::error!(
+                    "verify_stake_background[{}]: ON-CHAIN FAILED: {} — validator stays LOCKED",
+                    id_short,
+                    e,
+                );
+                return;
+            }
+        };
+
+        tracing::info!(
+            "verify_stake_background[{}]: ON-CHAIN SUCCESS — amount={} sig={}...",
+            id_short,
+            verified.amount,
+            &signature[..16.min(signature.len())],
+        );
+
+        let epoch = *current_epoch.read().await;
+        {
+            let mut reg = registry.write().await;
+            if let Err(e) = reg.mark_stake_verified(
+                &validator_id,
+                signature.clone(),
+                Some(verified.amount),
+            ) {
+                tracing::warn!(
+                    "verify_stake_background[{}]: mark_stake_verified failed: {}",
+                    id_short,
+                    e,
+                );
+                return;
+            }
+            if let Err(e) = reg.activate(&validator_id, epoch) {
+                tracing::warn!(
+                    "verify_stake_background[{}]: activate failed: {} — stake verified \
+                     but validator not promoted to ACTIVE",
+                    id_short,
+                    e,
+                );
+                return;
+            }
+        }
+
+        // Hot-reload committee so the newly-ACTIVE validator enters the
+        // authority set. Uses the same merged source-of-truth as the REST
+        // registration handler.
+        match crate::genesis_committee::GenesisCommitteeManifest::load(&genesis_path) {
+            Ok(new_manifest) => {
+                let registry_guard = registry.read().await;
+                match crate::genesis_committee::build_committee_from_sources(
+                    &new_manifest,
+                    &registry_guard,
+                ) {
+                    Ok(new_committee) => {
+                        drop(registry_guard);
+                        *committee.write().await = new_committee.clone();
+                        let _ = msg_tx
+                            .send(
+                                misaka_dag::narwhal_dag::runtime::ConsensusMessage::ReloadCommittee(
+                                    new_committee,
+                                ),
+                            )
+                            .await;
+                        tracing::info!(
+                            "verify_stake_background[{}]: committee hot-reloaded — validator ACTIVE",
+                            id_short,
+                        );
+                    }
+                    Err(e) => tracing::warn!(
+                        "verify_stake_background[{}]: build_committee_from_sources failed: {}",
+                        id_short,
+                        e,
+                    ),
+                }
+            }
+            Err(e) => tracing::warn!(
+                "verify_stake_background[{}]: GenesisCommitteeManifest::load failed: {}",
+                id_short,
+                e,
+            ),
+        }
+    });
+}
+
+#[cfg(all(feature = "dag", not(feature = "ghostdag-compat")))]
+async fn start_narwhal_node(
+    mut cli: Cli,
+    p2p_config: P2pConfig,
+    loaded_config: Option<misaka_config::NodeConfig>,
+) -> anyhow::Result<()> {
     use std::collections::{BTreeMap, BTreeSet};
 
     use misaka_dag::narwhal_dag::core_engine::ProposeContext;
@@ -1108,6 +1301,70 @@ async fn start_narwhal_node(mut cli: Cli, p2p_config: P2pConfig) -> anyhow::Resu
     // ── CRIT #1 fix: Load genesis committee from manifest (not placeholders) ──
     let genesis_path = resolve_genesis_committee_path(cli.genesis_path.as_deref());
     tracing::info!(path = %genesis_path.display(), "Loading genesis committee manifest");
+
+    // ── 0.9.0 β-2 / γ-2.5: bootstrap StakingRegistry + run JSON migration ──
+    //
+    // start_narwhal_node previously had no StakingRegistry of its own (the
+    // REST `/api/register_validator` route wrote to `registered_validators.json`
+    // directly). 0.9.0 consolidates the system-A REST flow onto the same
+    // StakingRegistry that system-B (`/api/v1/validators/*`) already uses, so
+    // we bootstrap it here — before the rpc_router closures capture the Arc
+    // handles — and run the one-shot JSON → registry migration.
+    //
+    // γ-2.5: the bootstrap body moved to `validator_lifecycle_bootstrap` so
+    // `start_dag_node` can share the same code path. Pure refactor — behavior
+    // matches the pre-γ-2.5 inline implementation for `seed_on_fresh = false`.
+    // γ-3: allocate StakingConfig as a process-wide Arc once; share via clone.
+    // Group 1: route construction through `build_staking_config_for_chain` so
+    // mainnet/testnet selection and any NodeConfig-level override live in one
+    // place.
+    //
+    // Option A: `loaded_config` is now passed through `main()` → entry fn,
+    // so the NodeConfig.staking_unbonding_period override from testnet.toml
+    // is honored. On pure-CLI runs (no config file) `loaded_config` is
+    // `None` and we fall back to chain defaults.
+    let staking_config: Arc<misaka_consensus::staking::StakingConfig> = Arc::new(
+        crate::staking_config_builder::build_staking_config_for_chain(
+            cli.chain_id,
+            loaded_config.as_ref(),
+        ),
+    );
+    tracing::info!(
+        "StakingConfig[narwhal]: chain_id={}, unbonding_epochs={}, min_stake={}, max_validators={}, nodeconfig={}",
+        cli.chain_id,
+        staking_config.unbonding_epochs,
+        staking_config.min_validator_stake,
+        staking_config.max_active_validators,
+        if loaded_config.is_some() { "provided" } else { "none" },
+    );
+    let lifecycle_bootstrap =
+        crate::validator_lifecycle_bootstrap::bootstrap_validator_lifecycle(
+            data_dir,
+            cli.chain_id,
+            staking_config.clone(),
+            &genesis_path,
+            "narwhal",
+            /* seed_on_fresh = */ false,
+        )
+        .await?;
+    // narwhal path does not yet wire the store handle downstream (the
+    // persist-on-shutdown path lives in `start_dag_node`); hold a binding
+    // anyway so `install_global_store` stays referenced and the store
+    // survives for the globally-registered instance.
+    let _validator_lifecycle_store = lifecycle_bootstrap.store;
+    let validator_registry = lifecycle_bootstrap.registry;
+    // γ-3.1: consumed below when constructing `NarwhalMempoolIngress` so the
+    // mempool admission pipeline can filter stake txs against the same
+    // StakingConfig the executor and registry see.
+    let staking_config_arc = lifecycle_bootstrap.staking_config;
+    let current_epoch: Arc<RwLock<u64>> =
+        Arc::new(RwLock::new(lifecycle_bootstrap.current_epoch));
+    let _validator_epoch_progress = lifecycle_bootstrap.epoch_progress; // reserved for future β/γ wiring
+
+    // 0.9.0 β-2: use `load()` (TOML only) + `build_committee_from_sources`.
+    // The legacy `load_with_registered` merge is now a no-op because the
+    // migration above has already renamed `registered_validators.json`, but
+    // we switch to the explicit split call to keep the code self-describing.
     let manifest = crate::genesis_committee::GenesisCommitteeManifest::load(&genesis_path)?;
     manifest.validate()?;
     let manifest_validator_count = manifest.validators.len();
@@ -1188,26 +1445,76 @@ async fn start_narwhal_node(mut cli: Cli, p2p_config: P2pConfig) -> anyhow::Resu
     //    `Rejecting unknown relay peer` warnings on the operator side
     //    and `outbound handshake failed` on our side, and the node
     //    falls back to local self-progress.
-    let is_observer = !manifest.contains(authority_index, identity.public_key());
+    // Permissionless SR: a node counts as a full validator if EITHER
+    // (a) it is listed in genesis_committee.toml (static committee), OR
+    // (b) it is present in the StakingRegistry with state == Active
+    //     (dynamic committee, reached via L1 StakeDeposit + γ-3 flow or
+    //     the REST Solana-verified path β-2/β-3).
+    //
+    // Previously is_observer was `!manifest.contains(...)` only, so a
+    // node that registered itself via StakeDeposit and was hot-reloaded
+    // into the committee (Phase 8) would still enter OBSERVER MODE at
+    // startup and skip the propose loop — invisible SR. `validator_id`
+    // in the registry is the canonical SHA3-256(ML-DSA-65 pubkey), which
+    // is bit-equivalent to `ValidatorIdentity::fingerprint()`.
+    let in_static_committee =
+        manifest.contains(authority_index, identity.public_key());
+    let in_dynamic_committee = {
+        let reg = validator_registry.read().await;
+        is_dynamic_active_validator(&reg, &identity.fingerprint())
+    };
+    let is_observer = !in_static_committee && !in_dynamic_committee;
     if is_observer {
         tracing::warn!(
             "🔭 OBSERVER MODE: validator.key fingerprint={} is not in the \
-             genesis committee. This node will receive and verify blocks \
-             from the operator's authority but will NOT propose. Operator \
-             must enable observer acceptance (MISAKA_ACCEPT_OBSERVERS=1) \
-             for the handshake to succeed.",
+             genesis committee and not ACTIVE in the staking registry. This \
+             node will receive and verify blocks from the operator's \
+             authority but will NOT propose. Operator must enable observer \
+             acceptance (MISAKA_ACCEPT_OBSERVERS=1) for the handshake to \
+             succeed. To become a validator, submit a StakeDeposit tx or \
+             register via /api/register_validator.",
+            hex::encode(identity.fingerprint()),
+        );
+    } else if in_static_committee {
+        tracing::info!(
+            "✅ VALIDATOR MODE (static): authority_index={} fingerprint={}",
+            authority_index,
             hex::encode(identity.fingerprint()),
         );
     } else {
+        // Dynamic-only: not in genesis TOML but ACTIVE in registry.
         tracing::info!(
-            "✅ VALIDATOR MODE: authority_index={} fingerprint={}",
-            authority_index,
+            "✅ VALIDATOR MODE (dynamic): fingerprint={} — not in genesis \
+             TOML but ACTIVE in staking registry; joining propose loop.",
             hex::encode(identity.fingerprint()),
         );
     }
 
-    info!("startup[1/6]: building committee from manifest...");
-    let committee = manifest.to_committee()?;
+    // 0.9.0 β-3: loud warning if the testnet override is active. This flag
+    // makes `/api/register_validator` skip on-chain Solana verification, so
+    // leaking it into a mainnet deployment is catastrophic.
+    if cli.allow_unverified_validators {
+        tracing::warn!(
+            "SECURITY: --allow-unverified-validators is ENABLED. New validators \
+             registered via /api/register_validator will be ACTIVATED without \
+             on-chain Solana stake verification. This flag is for testnet/CI use \
+             only — NEVER enable on mainnet."
+        );
+    }
+
+    info!("startup[1/6]: building committee from manifest + StakingRegistry...");
+    // 0.9.0 β-2: merge genesis TOML with any ACTIVE validators in the
+    // StakingRegistry. At bootstrap nothing is ACTIVE yet (the registry
+    // was either restored from snapshot or created fresh), so this is
+    // equivalent to `manifest.to_committee()` on first boot; on restart
+    // it picks up validators that had reached ACTIVE before shutdown.
+    let committee = {
+        let registry_guard = validator_registry.read().await;
+        crate::genesis_committee::build_committee_from_sources(&manifest, &registry_guard)?
+    };
+    let committee_shared: std::sync::Arc<tokio::sync::RwLock<
+        misaka_dag::narwhal_types::committee::Committee,
+    >> = std::sync::Arc::new(tokio::sync::RwLock::new(committee.clone()));
     info!("startup[2/6]: parsing validator keys...");
     let relay_public_key = identity.validator_public_key()?;
     let relay_secret_key = Arc::new(identity.validator_secret_key()?);
@@ -1236,14 +1543,57 @@ async fn start_narwhal_node(mut cli: Cli, p2p_config: P2pConfig) -> anyhow::Resu
             self.identity.public_key().to_vec()
         }
     }
+    // Phase 10 (Item 1): snapshot the identity fingerprint BEFORE `identity`
+    // is moved into `IdentityBlockSigner`. The commit loop below uses this
+    // copy to detect self-activation and exit-for-restart.
+    let self_fingerprint_for_restart: [u8; 32] = identity.fingerprint();
     let signer: std::sync::Arc<dyn misaka_dag::BlockSigner> =
         std::sync::Arc::new(IdentityBlockSigner { identity });
 
     let store_path = data_dir.join("narwhal_consensus");
+
+    // Guard: on a fresh start (no chain.db), wipe any leftover RocksDB data.
+    // Without this, a genesis reset that deletes chain.db but leaves
+    // narwhal_consensus/ intact causes the tx/addr index to contain entries
+    // from the old chain while the UTXO set starts empty — producing the
+    // "balance 0 but 199 historical transactions" inconsistency.
+    {
+        let chain_db = data_dir.join("chain.db");
+        if !chain_db.exists() && store_path.exists() {
+            warn!(
+                "Fresh start detected (no chain.db) but stale RocksDB found at {} — \
+                 wiping to prevent index inconsistency",
+                store_path.display()
+            );
+            if let Err(e) = std::fs::remove_dir_all(&store_path) {
+                error!(
+                    "Failed to remove stale RocksDB at {}: {}",
+                    store_path.display(),
+                    e
+                );
+                anyhow::bail!(
+                    "Cannot remove stale narwhal_consensus directory: {e}. \
+                     Delete it manually and restart."
+                );
+            }
+            let snapshot = data_dir.join("narwhal_utxo_snapshot.json");
+            if snapshot.exists() {
+                warn!("Removing stale UTXO snapshot: {}", snapshot.display());
+                let _ = std::fs::remove_file(&snapshot);
+            }
+            info!("Stale data removed — proceeding with clean genesis");
+        }
+    }
+
     info!("startup[4/6]: opening RocksDB at {}...", store_path.display());
-    let store = misaka_dag::narwhal_dag::rocksdb_store::RocksDbConsensusStore::open(&store_path)?;
+    let rocks_store = std::sync::Arc::new(
+        misaka_dag::narwhal_dag::rocksdb_store::RocksDbConsensusStore::open(&store_path)?
+    );
+    let tx_index_store = rocks_store.clone();
+    let tx_index_store_rpc = rocks_store.clone();
+    let addr_index_store_rpc = rocks_store.clone();
     let store: std::sync::Arc<dyn misaka_dag::narwhal_dag::store::ConsensusStore> =
-        std::sync::Arc::new(store);
+        rocks_store.clone();
     info!("startup[5/6]: RocksDB opened OK");
     let committee_pks: Vec<Vec<u8>> = committee
         .authorities
@@ -1272,7 +1622,7 @@ async fn start_narwhal_node(mut cli: Cli, p2p_config: P2pConfig) -> anyhow::Resu
     };
 
     info!("startup[6/6]: spawning consensus runtime...");
-    let (msg_tx, mut commit_rx, mut block_rx, metrics, runtime_handle) =
+    let (msg_tx, mut commit_rx, mut block_rx, metrics, backpressure, runtime_handle) =
         spawn_consensus_runtime(config, signer, Some(store), chain_ctx);
 
     let our_manifest_entry = manifest
@@ -1317,6 +1667,7 @@ async fn start_narwhal_node(mut cli: Cli, p2p_config: P2pConfig) -> anyhow::Resu
                 authority_index: validator.authority_index,
                 address,
                 public_key,
+                force_dial: false,
             })
         })
         .collect();
@@ -1346,10 +1697,11 @@ async fn start_narwhal_node(mut cli: Cli, p2p_config: P2pConfig) -> anyhow::Resu
     //     `BlockVerifier` because their authority_index is out of range —
     //     so observer seeds cannot forge consensus participation.
     //
-    // Note: the outbound-dial filter inside `spawn_narwhal_block_relay_transport`
-    // only dials peers whose `authority_index > self.authority_index`. Since
-    // synthetic observer indexes start at `manifest.validators.len()`, they
-    // are always > our authority_index, so they will be dialed.
+    // All --seeds peers have `force_dial = true`, which bypasses the
+    // `authority_index > self.authority_index` ordering filter in the
+    // Narwhal relay transport. This ensures a validator behind NAT can
+    // always proactively dial the seed, even when the seed's
+    // authority_index is lower than ours.
     if !cli.seeds.is_empty() && cli.seeds.len() == cli.seed_pubkeys.len() {
         let mut synthetic_index = manifest.validators.len() as u32;
         for (addr_s, pk_s) in cli.seeds.iter().zip(cli.seed_pubkeys.iter()) {
@@ -1392,8 +1744,9 @@ async fn start_narwhal_node(mut cli: Cli, p2p_config: P2pConfig) -> anyhow::Resu
             {
                 let old_addr = existing.address;
                 existing.address = addr;
+                existing.force_dial = true;
                 info!(
-                    "--seeds: overriding committee authority_index={} address {} → {}",
+                    "--seeds: overriding committee authority_index={} address {} → {} (force_dial=true)",
                     existing.authority_index, old_addr, addr,
                 );
             } else {
@@ -1405,6 +1758,7 @@ async fn start_narwhal_node(mut cli: Cli, p2p_config: P2pConfig) -> anyhow::Resu
                     authority_index: synthetic_index,
                     address: addr,
                     public_key: pk,
+                    force_dial: true,
                 });
                 synthetic_index = synthetic_index.saturating_add(1);
             }
@@ -1489,16 +1843,27 @@ async fn start_narwhal_node(mut cli: Cli, p2p_config: P2pConfig) -> anyhow::Resu
     // handlers. Drop-in against v0.5.7/v0.5.8 — no wire changes.
     let safe_mode = Arc::new(crate::safe_mode::SafeMode::new());
 
+    // Shared UtxoSet snapshot for RPC queries and mempool admission.
+    // Both RPC and mempool share the same Arc to avoid duplicating ~600MB.
+    let shared_utxo_set: Arc<tokio::sync::RwLock<misaka_storage::utxo_set::UtxoSet>> =
+        Arc::new(tokio::sync::RwLock::new(misaka_storage::utxo_set::UtxoSet::new(36)));
+    let utxo_set_writer = shared_utxo_set.clone();
+    let utxo_set_rpc = shared_utxo_set.clone();
+
     // Phase 1: Spawn propose loop — drains mempool into CoreEngine
     let (mempool_propose_tx, mempool_propose_rx) =
         crate::narwhal_consensus::mempool_propose_channel(10_000);
     // Audit #26: Pass AppId so submit_tx can verify IntentMessage signatures
     let mempool_app_id = misaka_types::intent::AppId::new(cli.chain_id, genesis_hash);
-    let narwhal_mempool = crate::narwhal_consensus::NarwhalMempoolIngress::new(
+    let narwhal_mempool = crate::narwhal_consensus::NarwhalMempoolIngress::new_with_shared_utxo(
         cli.dag_mempool_size,
-        misaka_storage::utxo_set::UtxoSet::new(1000),
+        shared_utxo_set.clone(),
         mempool_propose_tx.clone(),
         mempool_app_id,
+        // γ-3.1: inject the process-wide Arc<StakingConfig> so the mempool
+        // can filter stake txs (envelope + min_validator_stake) before they
+        // enter the DAG relay pipeline.
+        staking_config_arc.clone(),
     );
     // Shared state_root: updated by executor after each commit, read by propose loop
     let shared_state_root = std::sync::Arc::new(tokio::sync::RwLock::new([0u8; 32]));
@@ -1527,20 +1892,40 @@ async fn start_narwhal_node(mut cli: Cli, p2p_config: P2pConfig) -> anyhow::Resu
     let block_height_writer = shared_block_height.clone();
     let block_height_rpc = shared_block_height.clone();
 
-    // Shared UtxoSet snapshot for RPC queries (get_utxos_by_address, get_balance).
-    // Updated by the commit loop after each commit.
-    let shared_utxo_set: Arc<tokio::sync::RwLock<misaka_storage::utxo_set::UtxoSet>> =
-        Arc::new(tokio::sync::RwLock::new(misaka_storage::utxo_set::UtxoSet::new(36)));
-    let utxo_set_writer = shared_utxo_set.clone();
-    let utxo_set_rpc = shared_utxo_set.clone();
-
-    // Committed TX index for get_tx_status (maps tx_hash -> (height, status))
-    #[derive(Clone, serde::Serialize)]
-    struct CommittedTx {
-        height: u64,
-        status: &'static str,
+    #[derive(Clone, serde::Serialize, serde::Deserialize)]
+    struct TxInputSummary {
+        utxo_refs: Vec<String>,
     }
-    let committed_txs: Arc<tokio::sync::RwLock<std::collections::HashMap<[u8; 32], CommittedTx>>> =
+    #[derive(Clone, serde::Serialize, serde::Deserialize)]
+    struct TxOutputSummary {
+        address: String,
+        amount: u64,
+    }
+    #[derive(Clone, serde::Serialize, serde::Deserialize)]
+    struct CommittedTxDetail {
+        height: u64,
+        status: String,
+        tx_type: String,
+        inputs: Vec<TxInputSummary>,
+        outputs: Vec<TxOutputSummary>,
+        fee: u64,
+        timestamp_ms: u64,
+        leader_authority: u32,
+        participating_validators: Vec<u32>,
+        memo: String,
+    }
+    #[derive(Clone, serde::Serialize, serde::Deserialize)]
+    struct AddressTxRef {
+        tx_hash: String,
+        direction: String,
+        amount: u64,
+        height: u64,
+        timestamp_ms: u64,
+        tx_type: String,
+    }
+
+    // In-memory cache (bounded) + RocksDB for persistence
+    let committed_txs: Arc<tokio::sync::RwLock<std::collections::HashMap<[u8; 32], CommittedTxDetail>>> =
         Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
     let committed_txs_writer = committed_txs.clone();
     let committed_txs_rpc = committed_txs.clone();
@@ -1560,6 +1945,7 @@ async fn start_narwhal_node(mut cli: Cli, p2p_config: P2pConfig) -> anyhow::Resu
             mempool_propose_rx,
             crate::narwhal_consensus::ProposeLoopConfig {
                 max_block_txs: cli.dag_max_txs,
+                backpressure: backpressure.clone(),
                 ..crate::narwhal_consensus::ProposeLoopConfig::default()
             },
             propose_state_root,
@@ -1671,6 +2057,455 @@ async fn start_narwhal_node(mut cli: Cli, p2p_config: P2pConfig) -> anyhow::Resu
                 async move { axum::Json(narwhal_mempool.mempool_info().await) }
             }
         }))
+        .route("/api/register_validator", axum::routing::post({
+            // 0.9.0 β-2: compatibility wrapper over `StakingRegistry::register`.
+            // Response shape remains identical to 0.8.8 (`{ok, message, note}`)
+            // so existing Python/bash clients keep working. The new
+            // `intent_verified: bool` field is appended for clients that opt
+            // in by sending `intent_signature` in the body.
+            let reload_genesis_path = genesis_path.clone();
+            let reload_msg_tx = msg_tx.clone();
+            let reload_committee = committee_shared.clone();
+            let route_registry = validator_registry.clone();
+            let route_epoch = current_epoch.clone();
+            let allow_unverified = cli.allow_unverified_validators;
+            move |body: axum::body::Bytes| {
+                let reload_genesis_path = reload_genesis_path.clone();
+                let reload_msg_tx = reload_msg_tx.clone();
+                let reload_committee = reload_committee.clone();
+                let route_registry = route_registry.clone();
+                let route_epoch = route_epoch.clone();
+                async move {
+                    let req: Result<crate::genesis_committee::RegisterValidatorRequest, _> =
+                        serde_json::from_slice(&body);
+                    let rv = match req {
+                        Ok(rv) => rv,
+                        Err(e) => return axum::Json(serde_json::json!({
+                            "ok": false,
+                            "error": format!("invalid JSON: {e}"),
+                        })),
+                    };
+                    let pk_hex = rv.public_key.strip_prefix("0x")
+                        .unwrap_or(&rv.public_key);
+                    let pubkey_bytes = match hex::decode(pk_hex) {
+                        Ok(b) if b.len() == 1952 => b,
+                        _ => return axum::Json(serde_json::json!({
+                            "ok": false,
+                            "error": "public_key must be a 1952-byte ML-DSA-65 key (hex)",
+                        })),
+                    };
+                    if rv.network_address.parse::<std::net::SocketAddr>().is_err() {
+                        return axum::Json(serde_json::json!({
+                            "ok": false,
+                            "error": "network_address must be ip:port",
+                        }));
+                    }
+
+                    // Derive validator_id via the canonical ML-DSA-65 → 32-byte id.
+                    let pq_pk = match misaka_crypto::validator_sig::ValidatorPqPublicKey::from_bytes(
+                        &pubkey_bytes,
+                    ) {
+                        Ok(p) => p,
+                        Err(e) => return axum::Json(serde_json::json!({
+                            "ok": false,
+                            "error": format!("invalid ML-DSA-65 key: {e}"),
+                        })),
+                    };
+                    let validator_id = pq_pk.to_canonical_id();
+
+                    // 0.9.0 β-2: optional ML-DSA-65 intent_signature verification.
+                    // Binds the request to (pubkey, network_address) with a
+                    // domain-tagged digest so it cannot be replayed to other
+                    // endpoints.
+                    let intent_verified = match rv.intent_signature.as_deref() {
+                        Some(sig_hex) if !sig_hex.trim().is_empty() => {
+                            let sig_hex = sig_hex.trim().strip_prefix("0x").unwrap_or(sig_hex.trim());
+                            let sig_bytes = match hex::decode(sig_hex) {
+                                Ok(b) => b,
+                                Err(e) => return axum::Json(serde_json::json!({
+                                    "ok": false,
+                                    "error": format!("intent_signature hex decode failed: {e}"),
+                                })),
+                            };
+                            let digest = crate::genesis_committee::RegisterValidatorRequest::signing_payload(
+                                &pubkey_bytes, &rv.network_address,
+                            );
+                            let pk = match misaka_pqc::pq_sign::MlDsaPublicKey::from_bytes(&pubkey_bytes) {
+                                Ok(p) => p,
+                                Err(e) => return axum::Json(serde_json::json!({
+                                    "ok": false,
+                                    "error": format!("intent_signature: pubkey parse failed: {e}"),
+                                })),
+                            };
+                            let sig = match misaka_pqc::pq_sign::MlDsaSignature::from_bytes(&sig_bytes) {
+                                Ok(s) => s,
+                                Err(e) => return axum::Json(serde_json::json!({
+                                    "ok": false,
+                                    "error": format!("intent_signature: sig parse failed: {e}"),
+                                })),
+                            };
+                            if misaka_pqc::pq_sign::ml_dsa_verify_raw(&pk, &digest, &sig).is_err() {
+                                return axum::Json(serde_json::json!({
+                                    "ok": false,
+                                    "error": "intent_signature verification failed",
+                                }));
+                            }
+                            true
+                        }
+                        _ => false,
+                    };
+
+                    // Bootstrap parameters — mirror `start_dag_node`'s /api/v1/validators/register
+                    // so a validator that registers via system A vs system B
+                    // produces the same ValidatorAccount shape.
+                    let epoch = *route_epoch.read().await;
+                    let stake_tx_hash = {
+                        use sha3::{Digest, Sha3_256};
+                        let mut h = Sha3_256::new();
+                        h.update(b"MISAKA:stake_lock:");
+                        h.update(&pubkey_bytes);
+                        h.update(epoch.to_le_bytes());
+                        let r: [u8; 32] = h.finalize().into();
+                        r
+                    };
+                    let reward_address = [0u8; 32]; // System A REST path has no reward hint
+                    let commission_bps: u32 = 500;  // 5% default (matches bootstrap path)
+
+                    let mut registry = route_registry.write().await;
+                    let min_stake = registry.config().min_validator_stake;
+
+                    // Idempotency: if already present in any state, return
+                    // the 0.8.8-compatible "already registered" note.
+                    if registry.get(&validator_id).is_some() {
+                        drop(registry);
+                        return axum::Json(serde_json::json!({
+                            "ok": true,
+                            "message": "already registered",
+                            "intent_verified": intent_verified,
+                        }));
+                    }
+
+                    let reg_result = registry.register(
+                        validator_id,
+                        pubkey_bytes,
+                        min_stake,
+                        commission_bps,
+                        reward_address,
+                        epoch,
+                        stake_tx_hash,
+                        0,
+                        // β-3: when `--allow-unverified-validators` is set
+                        // (testnet), trust the registration and mark the Solana
+                        // flag true up-front so `activate()` below succeeds.
+                        // Otherwise register as LOCKED/unverified and let the
+                        // background verifier flip the flag on RPC success.
+                        allow_unverified,
+                        rv.solana_stake_signature.clone(),
+                        // L1 path flag — set only by utxo_executor (γ-3).
+                        false,
+                    );
+                    if let Err(e) = reg_result {
+                        drop(registry);
+                        return axum::Json(serde_json::json!({
+                            "ok": false,
+                            "error": format!("register failed: {e}"),
+                        }));
+                    }
+                    if let Err(e) = registry.set_network_address(
+                        &validator_id,
+                        Some(rv.network_address.clone()),
+                    ) {
+                        tracing::warn!(
+                            "register_validator: set_network_address failed for {}: {}",
+                            rv.network_address, e,
+                        );
+                    }
+                    // β-3: testnet override — promote LOCKED → ACTIVE
+                    // immediately, no Solana RPC. Logs at warn! so the bypass
+                    // is visible in production logs if the flag ever leaks
+                    // into a non-testnet deployment.
+                    if allow_unverified {
+                        match registry.activate(&validator_id, epoch) {
+                            Ok(()) => tracing::warn!(
+                                "register_validator[unverified]: validator {} \
+                                 ACTIVATED without Solana verification \
+                                 (--allow-unverified-validators)",
+                                hex::encode(&validator_id[..8]),
+                            ),
+                            Err(e) => tracing::warn!(
+                                "register_validator[unverified]: activate failed \
+                                 for {}: {} — validator stays LOCKED",
+                                hex::encode(&validator_id[..8]), e,
+                            ),
+                        }
+                    }
+                    let total_now = registry.all_validators().count();
+                    drop(registry);
+
+                    tracing::info!(
+                        "New validator registered via /api/register_validator \
+                         (total in registry: {}, intent_verified: {})",
+                        total_now, intent_verified,
+                    );
+
+                    // Hot-reload committee into consensus using the merged
+                    // (genesis TOML + StakingRegistry ACTIVE) source of truth.
+                    if let Ok(new_manifest) = crate::genesis_committee::GenesisCommitteeManifest::load(&reload_genesis_path) {
+                        let registry_guard = route_registry.read().await;
+                        if let Ok(new_committee) = crate::genesis_committee::build_committee_from_sources(
+                            &new_manifest, &registry_guard,
+                        ) {
+                            drop(registry_guard);
+                            *reload_committee.write().await = new_committee.clone();
+                            let _ = reload_msg_tx.send(
+                                misaka_dag::narwhal_dag::runtime::ConsensusMessage::ReloadCommittee(new_committee)
+                            ).await;
+                            tracing::info!("Committee hot-reloaded after registration");
+                        }
+                    }
+
+                    // 0.9.0 β-3: fire-and-forget Solana stake verification.
+                    // Three response states:
+                    //   - "bypassed": --allow-unverified-validators set (testnet)
+                    //   - "pending":  signature provided, background task spawned
+                    //   - "skipped":  no signature, validator stays LOCKED
+                    let stake_verification_status = if allow_unverified {
+                        "bypassed"
+                    } else {
+                        match rv
+                            .solana_stake_signature
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                        {
+                            Some(sig) => {
+                                spawn_verify_stake_background(
+                                    validator_id,
+                                    hex::encode(validator_id),
+                                    sig.to_string(),
+                                    min_stake,
+                                    route_registry.clone(),
+                                    reload_committee.clone(),
+                                    route_epoch.clone(),
+                                    reload_msg_tx.clone(),
+                                    reload_genesis_path.clone(),
+                                );
+                                "pending"
+                            }
+                            None => "skipped",
+                        }
+                    };
+
+                    axum::Json(serde_json::json!({
+                        "ok": true,
+                        "message": format!("registered as validator #{}", total_now),
+                        "note": "committee reloaded (no restart needed)",
+                        "intent_verified": intent_verified,
+                        "stake_verification": stake_verification_status,
+                    }))
+                }
+            }
+        }))
+        .route("/api/deregister_validator", axum::routing::post({
+            // 0.9.0 β-2: routed through `StakingRegistry`:
+            //   - Active    → `exit()` (enters unbonding via γ-5 unlock)
+            //   - Locked    → `force_remove_locked()` (no unbonding needed)
+            //   - Exiting   → already-exiting, no-op
+            //   - Unlocked  → already-unlocked, no-op
+            let reload_genesis_path = genesis_path.clone();
+            let reload_msg_tx = msg_tx.clone();
+            let reload_committee = committee_shared.clone();
+            let route_registry = validator_registry.clone();
+            let route_epoch = current_epoch.clone();
+            move |body: axum::body::Bytes| {
+                let reload_genesis_path = reload_genesis_path.clone();
+                let reload_msg_tx = reload_msg_tx.clone();
+                let reload_committee = reload_committee.clone();
+                let route_registry = route_registry.clone();
+                let route_epoch = route_epoch.clone();
+                async move {
+                    #[derive(serde::Deserialize)]
+                    struct DeregisterRequest {
+                        public_key: Option<String>,
+                        network_address: Option<String>,
+                    }
+                    let req: Result<DeregisterRequest, _> = serde_json::from_slice(&body);
+                    let dr = match req {
+                        Ok(dr) => dr,
+                        Err(e) => return axum::Json(serde_json::json!({
+                            "ok": false,
+                            "error": format!("invalid JSON: {e}"),
+                        })),
+                    };
+                    if dr.public_key.is_none() && dr.network_address.is_none() {
+                        return axum::Json(serde_json::json!({
+                            "ok": false,
+                            "error": "must provide public_key and/or network_address",
+                        }));
+                    }
+
+                    // Identify candidate validator_ids by pubkey match and/or
+                    // network_address match. We iterate the registry under a
+                    // read lock, collect matches, then take write lock for
+                    // state transitions.
+                    let pk_needle: Option<Vec<u8>> = dr.public_key.as_deref().and_then(|s| {
+                        let trimmed = s.strip_prefix("0x").unwrap_or(s);
+                        let lower = trimmed.to_lowercase();
+                        hex::decode(&lower).ok().filter(|b| b.len() == 1952)
+                    });
+                    let addr_needle: Option<&str> = dr.network_address.as_deref();
+
+                    let matches: Vec<[u8; 32]> = {
+                        let registry = route_registry.read().await;
+                        registry
+                            .all_validators()
+                            .filter(|v| {
+                                let pk_ok = pk_needle.as_ref()
+                                    .map(|needle| needle == &v.pubkey)
+                                    .unwrap_or(false);
+                                let addr_ok = addr_needle
+                                    .zip(v.network_address.as_deref())
+                                    .map(|(a, b)| a == b)
+                                    .unwrap_or(false);
+                                pk_ok || addr_ok
+                            })
+                            .map(|v| v.validator_id)
+                            .collect()
+                    };
+
+                    if matches.is_empty() {
+                        return axum::Json(serde_json::json!({
+                            "ok": false,
+                            "error": "no matching validator found",
+                        }));
+                    }
+
+                    let epoch = *route_epoch.read().await;
+                    let mut removed = 0usize;
+                    let mut errors: Vec<String> = Vec::new();
+                    {
+                        let mut registry = route_registry.write().await;
+                        for id in &matches {
+                            let state_label = registry
+                                .get(id)
+                                .map(|a| a.state.label())
+                                .unwrap_or("UNKNOWN");
+                            match state_label {
+                                "ACTIVE" => {
+                                    match registry.exit(id, epoch) {
+                                        Ok(()) => removed += 1,
+                                        Err(e) => errors.push(format!(
+                                            "exit({}): {}", hex::encode(&id[..8]), e,
+                                        )),
+                                    }
+                                }
+                                "LOCKED" => {
+                                    match registry.force_remove_locked(id) {
+                                        Ok(()) => removed += 1,
+                                        Err(e) => errors.push(format!(
+                                            "force_remove_locked({}): {}",
+                                            hex::encode(&id[..8]), e,
+                                        )),
+                                    }
+                                }
+                                "EXITING" | "UNLOCKED" => {
+                                    tracing::info!(
+                                        "deregister: {} already in {} state — no-op",
+                                        hex::encode(&id[..8]), state_label,
+                                    );
+                                }
+                                other => {
+                                    errors.push(format!(
+                                        "{}: unexpected state {}",
+                                        hex::encode(&id[..8]), other,
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                    tracing::info!(
+                        "Deregistered {} validator(s) via /api/deregister_validator",
+                        removed,
+                    );
+                    // Hot-reload committee on registry changes.
+                    if removed > 0 {
+                        if let Ok(new_manifest) = crate::genesis_committee::GenesisCommitteeManifest::load(&reload_genesis_path) {
+                            let registry_guard = route_registry.read().await;
+                            if let Ok(new_committee) = crate::genesis_committee::build_committee_from_sources(
+                                &new_manifest, &registry_guard,
+                            ) {
+                                drop(registry_guard);
+                                *reload_committee.write().await = new_committee.clone();
+                                let _ = reload_msg_tx.send(
+                                    misaka_dag::narwhal_dag::runtime::ConsensusMessage::ReloadCommittee(new_committee)
+                                ).await;
+                                tracing::info!("Committee hot-reloaded after deregistration");
+                            }
+                        }
+                    }
+                    let remaining = route_registry.read().await.all_validators().count();
+                    let mut resp = serde_json::json!({
+                        "ok": true,
+                        "message": format!("removed {} validator(s)", removed),
+                        "remaining": remaining,
+                        "note": "committee reloaded (no restart needed)",
+                    });
+                    if !errors.is_empty() {
+                        resp["errors"] = serde_json::Value::Array(
+                            errors.into_iter().map(serde_json::Value::String).collect(),
+                        );
+                    }
+                    axum::Json(resp)
+                }
+            }
+        }))
+        // (duplicate deregister_validator route removed — hot-reload version above)
+        .route("/api/get_committee", axum::routing::get({
+            // 0.9.0 β-2: combined view of genesis TOML + StakingRegistry ACTIVE
+            // validators via `build_committee_from_sources`. Response shape is
+            // preserved — each entry still has {authority_index, public_key,
+            // network_address, stake} — but authority_index is now the
+            // positional index in the merged committee.
+            let gp = genesis_path.clone();
+            let route_registry = validator_registry.clone();
+            move || {
+                let gp = gp.clone();
+                let route_registry = route_registry.clone();
+                async move {
+                    let manifest = match crate::genesis_committee::GenesisCommitteeManifest::load(&gp) {
+                        Ok(m) => m,
+                        Err(e) => return axum::Json(serde_json::json!({
+                            "error": format!("{e}"),
+                        })),
+                    };
+                    let registry = route_registry.read().await;
+                    let committee = match crate::genesis_committee::build_committee_from_sources(
+                        &manifest, &registry,
+                    ) {
+                        Ok(c) => c,
+                        Err(e) => return axum::Json(serde_json::json!({
+                            "error": format!("build_committee_from_sources: {e}"),
+                        })),
+                    };
+                    drop(registry);
+                    let validators: Vec<serde_json::Value> = committee
+                        .authorities
+                        .iter()
+                        .enumerate()
+                        .map(|(i, a)| serde_json::json!({
+                            "authority_index": i as u32,
+                            "public_key": format!("0x{}", hex::encode(&a.public_key)),
+                            "network_address": a.hostname,
+                            "stake": a.stake,
+                        }))
+                        .collect();
+                    axum::Json(serde_json::json!({
+                        "epoch": committee.epoch,
+                        "validators": validators,
+                    }))
+                }
+            }
+        }))
         // SEC-FIX v0.5.7: write endpoint now goes through the SHARED
         // `rpc_auth::require_api_key` middleware (Bearer + IP allowlist
         // + fail-closed on missing ConnectInfo). The previous inline
@@ -1719,8 +2554,16 @@ async fn start_narwhal_node(mut cli: Cli, p2p_config: P2pConfig) -> anyhow::Resu
         .route("/api/faucet", axum::routing::post({
             let narwhal_mempool = narwhal_mempool.clone();
             let faucet_chain_id = cli.chain_id;
+            let faucet_cooldown_ms = cli.faucet_cooldown_ms;
+            let faucet_cooldowns: std::sync::Arc<tokio::sync::Mutex<std::collections::HashMap<[u8; 32], u64>>> =
+                std::sync::Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
+            let faucet_global_last: std::sync::Arc<std::sync::atomic::AtomicU64> =
+                std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+            const GLOBAL_FAUCET_MIN_INTERVAL_MS: u64 = 2000;
             move |body: axum::Json<serde_json::Value>| {
                 let narwhal_mempool = narwhal_mempool.clone();
+                let faucet_cooldowns = faucet_cooldowns.clone();
+                let faucet_global_last = faucet_global_last.clone();
                 async move {
                     let address_str = body.get("address").and_then(|v| v.as_str()).unwrap_or("");
                     let spending_pk_hex = body.get("spendingPubkey").and_then(|v| v.as_str());
@@ -1743,9 +2586,45 @@ async fn start_narwhal_node(mut cli: Cli, p2p_config: P2pConfig) -> anyhow::Resu
                         }
                     };
 
+                    // Global rate limit: at most one faucet tx every 2 seconds
+                    {
+                        let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+                        let last = faucet_global_last.load(std::sync::atomic::Ordering::Relaxed);
+                        if now_ms.saturating_sub(last) < GLOBAL_FAUCET_MIN_INTERVAL_MS {
+                            return axum::Json(serde_json::json!({
+                                "accepted": false,
+                                "error": "rate limited: too many faucet requests globally",
+                            }));
+                        }
+                        faucet_global_last.store(now_ms, std::sync::atomic::Ordering::Relaxed);
+                    }
+
+                    // Per-address cooldown to prevent rapid-fire OOM
+                    if faucet_cooldown_ms > 0 {
+                        let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+                        let mut cooldowns = faucet_cooldowns.lock().await;
+                        if let Some(&last_ms) = cooldowns.get(&addr) {
+                            let elapsed = now_ms.saturating_sub(last_ms);
+                            if elapsed < faucet_cooldown_ms {
+                                let remaining = faucet_cooldown_ms - elapsed;
+                                return axum::Json(serde_json::json!({
+                                    "accepted": false,
+                                    "error": format!("cooldown: retry after {}ms", remaining),
+                                    "cooldownRemainingMs": remaining,
+                                }));
+                            }
+                        }
+                        cooldowns.insert(addr, now_ms);
+                        // Evict stale entries (> 10x cooldown) to prevent unbounded growth
+                        if cooldowns.len() > 10_000 {
+                            let cutoff = now_ms.saturating_sub(faucet_cooldown_ms * 10);
+                            cooldowns.retain(|_, &mut ts| ts > cutoff);
+                        }
+                    }
+
                     let spending_pubkey = spending_pk_hex.and_then(|h| hex::decode(h).ok());
 
-                    const MAX_FAUCET_DRIP: u64 = 1_000_000_000_000;
+                    const MAX_FAUCET_DRIP: u64 = 100_000_000_000_000;
                     let faucet_amount: u64 = std::env::var("MISAKA_FAUCET_AMOUNT")
                         .ok()
                         .and_then(|s| s.parse().ok())
@@ -1796,13 +2675,25 @@ async fn start_narwhal_node(mut cli: Cli, p2p_config: P2pConfig) -> anyhow::Resu
             };
             let is_observer_for_rpc = is_observer;
             let observer_count_rpc = observer_count.clone();
-            let committee_size_rpc = manifest_validator_count;
+            // Fix: previously a `let committee_size_rpc = manifest_validator_count;`
+            // snapshot was taken at router build time, so
+            // `/api/get_chain_info.validatorCount` stayed pinned at the
+            // genesis size even after the REST register path / epoch
+            // boundary hot-reloaded `committee_shared` (observed during
+            // Option C smoke test: register_validator produced
+            // "Hot-reloading committee: 1 -> 2 validators" but
+            // get_chain_info still returned 1). Read the live
+            // `committee_shared` inside the closure instead.
+            let committee_shared_for_rpc = committee_shared.clone();
             let block_height = block_height_rpc.clone();
+            let genesis_hash_hex = hex::encode(genesis_hash);
             move || {
                 let msg_tx = msg_tx.clone();
                 let metrics2 = metrics2.clone();
                 let connected_peers = connected_peers.clone();
                 let block_height = block_height.clone();
+                let genesis_hash_hex = genesis_hash_hex.clone();
+                let committee_shared = committee_shared_for_rpc.clone();
                 async move {
                     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
                     let _ = msg_tx.try_send(ConsensusMessage::GetStatus(reply_tx));
@@ -1818,6 +2709,9 @@ async fn start_narwhal_node(mut cli: Cli, p2p_config: P2pConfig) -> anyhow::Resu
                     let topology = if peer_count == 0 { "solo" } else { "joined" };
                     let role = if is_observer_for_rpc { "observer" } else { "validator" };
                     let height = block_height.load(std::sync::atomic::Ordering::Relaxed);
+                    // Live read of the committee set. Survives REST
+                    // hot-reload and epoch-boundary `build_sr21_committee`.
+                    let validator_count = committee_shared.read().await.size();
                     axum::Json(serde_json::json!({
                         "chain": misaka_types::constants::CHAIN_DISPLAY_NAME,
                         "ticker": misaka_types::constants::CURRENCY_TICKER,
@@ -1827,6 +2721,7 @@ async fn start_narwhal_node(mut cli: Cli, p2p_config: P2pConfig) -> anyhow::Resu
                         "iconUrl": "/api/chain-icon.svg",
                         "consensus": "Mysticeti-equivalent",
                         "chainId": chain_id_for_rpc,
+                        "genesisHash": genesis_hash_hex,
                         "version": env!("CARGO_PKG_VERSION"),
                         "pqSignature": "ML-DSA-65 (FIPS 204)",
                         "status": status,
@@ -1836,7 +2731,7 @@ async fn start_narwhal_node(mut cli: Cli, p2p_config: P2pConfig) -> anyhow::Resu
                         "nodeMode": node_mode_str,
                         "role": role,
                         "peerCount": peer_count,
-                        "validatorCount": committee_size_rpc,
+                        "validatorCount": validator_count,
                         "observerCount": observers,
                         "peers": peers_snapshot,
                         "metrics": {
@@ -2080,32 +2975,64 @@ async fn start_narwhal_node(mut cli: Cli, p2p_config: P2pConfig) -> anyhow::Resu
             }
         }))
         .route("/api/get_address_history", axum::routing::post({
+            let rocks = addr_index_store_rpc.clone();
             move |body: axum::Json<serde_json::Value>| {
+                let rocks = rocks.clone();
                 async move {
                     let address = body.get("address").and_then(|v| v.as_str()).unwrap_or("");
-                    let page = body.get("page").and_then(|v| v.as_u64()).unwrap_or(1);
-                    let page_size = body.get("pageSize").and_then(|v| v.as_u64()).unwrap_or(20);
+                    let page = body.get("page").and_then(|v| v.as_u64()).unwrap_or(1).max(1);
+                    let page_size = body.get("pageSize").and_then(|v| v.as_u64()).unwrap_or(20).min(100);
+
+                    let all_entries = match rocks.get_addr_entries(address) {
+                        Ok(entries) => entries,
+                        Err(e) => {
+                            tracing::warn!("get_addr_entries failed: {}", e);
+                            Vec::new()
+                        }
+                    };
+
+                    let total = all_entries.len() as u64;
+                    let skip = ((page - 1) * page_size) as usize;
+                    let txs: Vec<serde_json::Value> = all_entries
+                        .into_iter()
+                        .rev()
+                        .skip(skip)
+                        .take(page_size as usize)
+                        .filter_map(|bytes| serde_json::from_slice::<AddressTxRef>(&bytes).ok())
+                        .map(|r| serde_json::json!({
+                            "txHash": r.tx_hash,
+                            "direction": r.direction,
+                            "amount": r.amount,
+                            "height": r.height,
+                            "timestampMs": r.timestamp_ms,
+                            "txType": r.tx_type,
+                        }))
+                        .collect();
+
                     axum::Json(serde_json::json!({
                         "address": address,
-                        "transactions": [],
+                        "transactions": txs,
                         "page": page,
                         "pageSize": page_size,
-                        "total": 0,
-                        "note": "Address history indexer not yet implemented"
+                        "total": total,
                     }))
                 }
             }
         }))
         .route("/api/get_address_balance", axum::routing::post({
+            let utxo_set = utxo_set_rpc.clone();
+            let balance_chain_id = cli.chain_id;
             move |body: axum::Json<serde_json::Value>| {
+                let utxo_set = utxo_set.clone();
                 async move {
                     let address = body.get("address").and_then(|v| v.as_str()).unwrap_or("");
+                    let result = query_utxos_by_address(&utxo_set, address, balance_chain_id).await;
+                    let balance = result.get("balance").and_then(|v| v.as_u64()).unwrap_or(0);
                     axum::Json(serde_json::json!({
                         "address": address,
-                        "balance": 0,
-                        "confirmed": 0,
+                        "balance": balance,
+                        "confirmed": balance,
                         "unconfirmed": 0,
-                        "note": "Balance indexer not yet implemented"
                     }))
                 }
             }
@@ -2113,36 +3040,78 @@ async fn start_narwhal_node(mut cli: Cli, p2p_config: P2pConfig) -> anyhow::Resu
         .route("/api/get_tx_status", axum::routing::post({
             let mempool = narwhal_mempool.clone();
             let committed = committed_txs_rpc.clone();
+            let rocks = tx_index_store_rpc.clone();
             move |body: axum::Json<serde_json::Value>| {
                 let mempool = mempool.clone();
                 let committed = committed.clone();
+                let rocks = rocks.clone();
                 async move {
                     let tx_hash_hex = body.get("txHash").and_then(|v| v.as_str()).unwrap_or("");
                     let hash_bytes: Option<[u8; 32]> = hex::decode(tx_hash_hex)
                         .ok()
                         .and_then(|b| b.try_into().ok());
 
-                    let (status, block_height) = match hash_bytes {
+                    match hash_bytes {
                         Some(h) => {
                             if mempool.contains_tx(&h).await {
-                                ("pending", None)
-                            } else {
+                                return axum::Json(serde_json::json!({
+                                    "txHash": tx_hash_hex,
+                                    "status": "pending",
+                                    "blockHeight": null,
+                                }));
+                            }
+
+                            // Try in-memory cache first
+                            {
                                 let tx_map = committed.read().await;
-                                if let Some(record) = tx_map.get(&h) {
-                                    ("confirmed", Some(record.height))
-                                } else {
-                                    ("unknown", None)
+                                if let Some(detail) = tx_map.get(&h) {
+                                    return axum::Json(serde_json::json!({
+                                        "txHash": tx_hash_hex,
+                                        "status": detail.status,
+                                        "blockHeight": detail.height,
+                                        "txType": detail.tx_type,
+                                        "inputs": detail.inputs,
+                                        "outputs": detail.outputs,
+                                        "fee": detail.fee,
+                                        "timestampMs": detail.timestamp_ms,
+                                        "leaderAuthority": detail.leader_authority,
+                                        "participatingValidators": detail.participating_validators,
+                                        "memo": detail.memo,
+                                    }));
                                 }
                             }
-                        }
-                        None => ("unknown", None),
-                    };
 
-                    axum::Json(serde_json::json!({
-                        "txHash": tx_hash_hex,
-                        "status": status,
-                        "blockHeight": block_height,
-                    }))
+                            // Fallback to RocksDB
+                            if let Ok(Some(bytes)) = rocks.get_tx_detail(&h) {
+                                if let Ok(detail) = serde_json::from_slice::<CommittedTxDetail>(&bytes) {
+                                    return axum::Json(serde_json::json!({
+                                        "txHash": tx_hash_hex,
+                                        "status": detail.status,
+                                        "blockHeight": detail.height,
+                                        "txType": detail.tx_type,
+                                        "inputs": detail.inputs,
+                                        "outputs": detail.outputs,
+                                        "fee": detail.fee,
+                                        "timestampMs": detail.timestamp_ms,
+                                        "leaderAuthority": detail.leader_authority,
+                                        "participatingValidators": detail.participating_validators,
+                                        "memo": detail.memo,
+                                    }));
+                                }
+                            }
+
+                            axum::Json(serde_json::json!({
+                                "txHash": tx_hash_hex,
+                                "status": "unknown",
+                                "blockHeight": null,
+                            }))
+                        }
+                        None => axum::Json(serde_json::json!({
+                            "txHash": tx_hash_hex,
+                            "status": "unknown",
+                            "blockHeight": null,
+                        })),
+                    }
                 }
             }
         }));
@@ -2168,6 +3137,9 @@ async fn start_narwhal_node(mut cli: Cli, p2p_config: P2pConfig) -> anyhow::Resu
 
     // Track start time for uptime metric
     let start_time = std::time::Instant::now();
+
+    let shutdown_utxo_snapshot_path = std::path::Path::new(&cli.data_dir)
+        .join("narwhal_utxo_snapshot.json");
 
     // Graceful shutdown: handle SIGINT + SIGTERM
     let shutdown_msg_tx = msg_tx.clone();
@@ -2285,6 +3257,43 @@ async fn start_narwhal_node(mut cli: Cli, p2p_config: P2pConfig) -> anyhow::Resu
                         peer_id.short_hex(),
                         address
                     );
+                    // 0.9.0-dev: Catch-up for late-connecting peers.
+                    // A newly connected committee peer may have missed our
+                    // earlier BlockProposal broadcasts (which only reach
+                    // already-connected peers at the moment of send).
+                    // Replay every cached block to this peer so they can
+                    // accept our past-round blocks and reach quorum.
+                    // Observers are excluded — they receive broadcasts only.
+                    if authority_index
+                        != crate::narwhal_block_relay_transport::OBSERVER_SENTINEL_AUTHORITY
+                    {
+                        let cache_snapshot: Vec<NarwhalBlock> = relay_cache_for_ingress
+                            .read()
+                            .await
+                            .values()
+                            .cloned()
+                            .collect();
+                        let replay_count = cache_snapshot.len();
+                        let relay_out_tx = relay_out_tx_for_ingress.clone();
+                        if replay_count > 0 {
+                            tokio::spawn(async move {
+                                for block in cache_snapshot {
+                                    let _ = relay_out_tx.send(
+                                        crate::narwhal_block_relay_transport::OutboundNarwhalRelayEvent::ToAuthority {
+                                            authority_index,
+                                            message: NarwhalRelayMessage::BlockProposal(
+                                                NarwhalBlockProposal { block },
+                                            ),
+                                        },
+                                    ).await;
+                                }
+                            });
+                            info!(
+                                "narwhal_peer_replay authority={} blocks={}",
+                                authority_index, replay_count
+                            );
+                        }
+                    }
                 }
                 crate::narwhal_block_relay_transport::InboundNarwhalRelayEvent::PeerDisconnected {
                     authority_index,
@@ -2535,6 +3544,11 @@ async fn start_narwhal_node(mut cli: Cli, p2p_config: P2pConfig) -> anyhow::Resu
                             "Restored UTXO snapshot: height={}, utxos={}",
                             restored.height, restored.len()
                         );
+                        {
+                            // Mempool and RPC share the same Arc, one write suffices
+                            let mut shared = utxo_set_writer.write().await;
+                            *shared = restored.clone();
+                        }
                         crate::utxo_executor::UtxoExecutor::with_utxo_set(restored, app_id.clone())
                     }
                     _ => {
@@ -2547,12 +3561,126 @@ async fn start_narwhal_node(mut cli: Cli, p2p_config: P2pConfig) -> anyhow::Resu
                     }
                 }
             };
+
+            // Option C (v0.9.0-dev): on a fresh start (no restored snapshot
+            // above), seed the UTXO set from the genesis manifest's
+            // `[initial_utxos] source = ...` if present. This lets
+            // operators carry v0.8.8 balances into a fresh v0.9.0-dev
+            // chain: run `misaka-cli migrate-utxo-snapshot` against the
+            // old snapshot, point the TOML at the resulting JSON, and
+            // start the node with an empty data_dir.
+            //
+            // Idempotency: we seed only when the executor's UTXO set is
+            // empty AND no `narwhal_utxo_snapshot.json` was loaded
+            // earlier. A second boot with a warm chain.db sees a
+            // non-empty utxo_set (from snapshot or from mempool's
+            // canonical) and skips the whole block.
+            if tx_executor.utxo_count() == 0 {
+                match manifest.load_initial_utxos() {
+                    Ok(Some(seeds)) => {
+                        let mut seeded: usize = 0;
+                        let mut total_seeded: u64 = 0;
+                        for seed in &seeds {
+                            let tx_hash = crate::genesis_committee::synthetic_seed_tx_hash(
+                                manifest.epoch,
+                                &seed.label,
+                                &seed.address,
+                            );
+                            let outref = misaka_types::utxo::OutputRef {
+                                tx_hash,
+                                output_index: 0,
+                            };
+                            let output = misaka_types::utxo::TxOutput {
+                                amount: seed.amount,
+                                address: seed.address,
+                                spending_pubkey: seed.spending_pubkey.clone(),
+                            };
+                            // Use the test-only mut accessor added in Phase 10:
+                            // seeding bypasses tx validation intentionally
+                            // (these UTXOs have no originating transaction).
+                            let utxo_set = tx_executor.utxo_set_mut();
+                            match utxo_set.add_output(
+                                outref.clone(),
+                                output.clone(),
+                                /* height = */ 0,
+                                /* is_emission = */ false,
+                            ) {
+                                Ok(()) => {
+                                    if let Some(spk) = &seed.spending_pubkey {
+                                        let _ = utxo_set
+                                            .register_spending_key(outref, spk.clone());
+                                    }
+                                    seeded += 1;
+                                    total_seeded = total_seeded.saturating_add(seed.amount);
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "Option C seed: failed to add utxo {} (label={}): {}",
+                                        hex::encode(&seed.address[..8]),
+                                        seed.label,
+                                        e
+                                    );
+                                }
+                            }
+                        }
+                        tracing::info!(
+                            "Option C: seeded {} initial UTXOs from genesis ({} base units total) — \
+                             source: {}",
+                            seeded,
+                            total_seeded,
+                            manifest
+                                .initial_utxos_source
+                                .as_deref()
+                                .map(|p| p.display().to_string())
+                                .unwrap_or_else(|| "<none>".into()),
+                        );
+                        // Mirror the seeded state into the mempool's canonical
+                        // UTXO set (same Arc that /api/get_utxos_by_address
+                        // reads) so the first RPC query returns these UTXOs.
+                        {
+                            let mut shared = utxo_set_writer.write().await;
+                            *shared = tx_executor.utxo_set().clone();
+                        }
+                    }
+                    Ok(None) => {
+                        tracing::debug!(
+                            "Option C: no [initial_utxos] section in genesis — starting with empty UTXO set"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            "Option C: failed to load initial_utxos ({}). Starting with empty UTXO set.",
+                            e
+                        );
+                    }
+                }
+            } else {
+                tracing::debug!(
+                    "Option C: skipping initial UTXO seed ({} UTXOs already loaded from snapshot/mempool)",
+                    tx_executor.utxo_count()
+                );
+            }
             // v0.5.9: commit loop holds a handle to the safe-mode flag so
             // it can break out on state_root mismatch.
             let safe_mode = safe_mode.clone();
 
             let mut total_committed_txs = 0u64;
             let mut total_accepted_txs = 0u64;
+
+            // PR-B: per-epoch propose accounting. `propose_count` tallies
+            // how many commits each authority produced during the current
+            // epoch; `epoch_block_count` is the total. At an epoch
+            // boundary they drive `StakingRegistry::update_uptime` and
+            // zero-count ACTIVE validators are slashed `Minor` (1%).
+            // Both are cleared after the boundary block fires.
+            //
+            // Key type: `[u8; 32]` = `SHA3-256(ML-DSA-65 pubkey)`, the
+            // canonical `validator_id` used by `StakingRegistry`. The
+            // `leader_address` derived a few lines below is the same
+            // hash; we reuse that value rather than recomputing.
+            let mut propose_count: std::collections::HashMap<[u8; 32], u64> =
+                std::collections::HashMap::new();
+            let mut epoch_block_count: u64 = 0;
 
             while let Some(output) = commit_rx.recv().await {
                 // v0.5.9: if safe-mode has already been tripped, drop
@@ -2567,18 +3695,16 @@ async fn start_narwhal_node(mut cli: Cli, p2p_config: P2pConfig) -> anyhow::Resu
                 // SEC-FIX: Derive the commit leader's address from their pubkey.
                 // This is used to verify SystemEmission outputs go to the correct
                 // proposer, preventing Byzantine reward redirection.
+                let committee_guard = committee_shared.read().await;
                 let leader_address: Option<[u8; 32]> = {
                     let author_idx = output.leader.author as usize;
-                    if author_idx < committee.authorities.len() {
-                        let pk = &committee.authorities[author_idx].public_key;
+                    if author_idx < committee_guard.authorities.len() {
+                        let pk = &committee_guard.authorities[author_idx].public_key;
                         if !pk.is_empty() {
                             use sha3::{Digest, Sha3_256};
                             let addr: [u8; 32] = Sha3_256::digest(pk).into();
                             Some(addr)
                         } else {
-                            // SEC-FIX: Empty pubkey in committee is a configuration error.
-                            // On mainnet this will cause SystemEmission to be rejected
-                            // (leader_address=None triggers StructuralInvalid in FIX 42).
                             tracing::error!(
                                 "Commit leader author={} has empty public key in committee — \
                                  leader_address will be None (SystemEmission will be rejected on mainnet)",
@@ -2590,16 +3716,309 @@ async fn start_narwhal_node(mut cli: Cli, p2p_config: P2pConfig) -> anyhow::Resu
                         tracing::warn!(
                             "Commit leader author={} exceeds committee size={}",
                             author_idx,
-                            committee.authorities.len()
+                            committee_guard.authorities.len()
                         );
                         None
                     }
                 };
+                // PR-B: propose accounting. `leader_address` just above is
+                // the `SHA3-256` of the leader's pubkey, i.e. the same
+                // `validator_id` the staking registry keys on. Count this
+                // commit against that validator so the epoch-boundary
+                // uptime update can compute a ratio. `None` (malformed
+                // committee entry or out-of-range author_idx) is skipped
+                // — already logged above as an error/warn.
+                epoch_block_count = epoch_block_count.saturating_add(1);
+                if let Some(leader_vid) = leader_address {
+                    *propose_count.entry(leader_vid).or_insert(0) =
+                        propose_count.get(&leader_vid).copied().unwrap_or(0) + 1;
+                }
+
+                // γ-3: acquire the registry write lock for the batch and
+                // pass a mut ref through. The lock is held for the span of
+                // one commit batch so all `StakeDeposit` / `StakeWithdraw`
+                // txs in a batch mutate the registry atomically relative to
+                // the REST api (which takes read locks).
+                let current_epoch_for_stake = *current_epoch.read().await;
+                let mut registry_guard = validator_registry.write().await;
                 let exec_result = tx_executor.execute_committed(
                     output.commit_index,
                     &output.transactions,
                     leader_address,
+                    Some(&mut *registry_guard),
+                    current_epoch_for_stake,
                 );
+
+                // γ-5: epoch-boundary unbonding settlement.
+                //
+                // `execute_committed` just bumped `tx_executor.height` by 1.
+                // If that bump crossed an `EPOCH_LENGTH` multiple, walk the
+                // registry for `Exiting` validators whose unbonding period
+                // has now completed, unlock them, and materialize the
+                // unlocked stake as a transparent UTXO directed at each
+                // validator's `reward_address`. The registry write lock is
+                // still held here, so the settle and the commit it follows
+                // are atomic relative to REST-side readers.
+                //
+                // Note: the ghostdag-compat epoch hook lives at
+                // `apply_sr21_election_at_epoch_boundary` (L6085-equivalent)
+                // but that code path does not carry a `UtxoExecutor`, so
+                // γ-5 settlement is wired here in `start_narwhal_node`
+                // instead. See γ-5 preflight notes for the routing detail.
+                let new_height = tx_executor.height();
+                if new_height > 0 {
+                    let epoch_len = misaka_types::constants::EPOCH_LENGTH;
+                    let prev_epoch = new_height.saturating_sub(1) / epoch_len;
+                    let new_epoch = new_height / epoch_len;
+                    if new_epoch > prev_epoch {
+                        let settled = registry_guard.settle_unlocks(new_epoch);
+                        if !settled.is_empty() {
+                            tracing::info!(
+                                "γ-5: epoch {} boundary at height {} — settling {} unbonded validator(s)",
+                                new_epoch,
+                                new_height,
+                                settled.len()
+                            );
+                            tx_executor.apply_settled_unlocks(&settled, new_epoch);
+                        }
+
+                        // PR-B: update uptime_bps from this epoch's propose
+                        // accounting, then slash validators that produced
+                        // zero blocks (downtime Minor — 1%).
+                        //
+                        // Ordering rationale: uptime is measured over the
+                        // CLOSING epoch, BEFORE auto_activate_locked admits
+                        // new validators. New validators have no proposing
+                        // history yet and must not be scored on this pass.
+                        //
+                        // `expected = epoch_block_count / active_count`.
+                        // When `active_count == 0` (bootstrap edge) we
+                        // assign 100% to every currently-Active validator
+                        // rather than divide by zero.
+                        {
+                            let active_count = registry_guard.active_count().max(1) as u64;
+                            let expected = if active_count == 0 {
+                                0
+                            } else {
+                                epoch_block_count / active_count
+                            };
+
+                            // Snapshot (id, current_uptime_unused) so we can drop
+                            // the immutable borrow before calling update_uptime (mut).
+                            let active_ids: Vec<[u8; 32]> = registry_guard
+                                .all_validators()
+                                .filter(|v| v.state == misaka_consensus::staking::ValidatorState::Active)
+                                .map(|v| v.validator_id)
+                                .collect();
+
+                            let mut zero_uptime_ids: Vec<[u8; 32]> = Vec::new();
+                            for vid in &active_ids {
+                                let proposed = propose_count.get(vid).copied().unwrap_or(0);
+                                let uptime_bps = compute_uptime_bps(proposed, expected);
+                                registry_guard.update_uptime(vid, uptime_bps);
+                                if proposed == 0 && expected > 0 {
+                                    zero_uptime_ids.push(*vid);
+                                }
+                            }
+
+                            for vid in &zero_uptime_ids {
+                                match registry_guard.slash(
+                                    vid,
+                                    misaka_consensus::staking::SlashSeverity::Minor,
+                                    new_epoch,
+                                ) {
+                                    Ok((slashed, _reporter_reward)) => {
+                                        tracing::warn!(
+                                            "PR-B: downtime slash Minor (1%) for {} — \
+                                             produced 0 blocks in epoch {} — slashed {} base units",
+                                            hex::encode(&vid[..8]),
+                                            new_epoch,
+                                            slashed,
+                                        );
+                                    }
+                                    Err(e) => {
+                                        // Cooldown / non-slashable state — log and move on.
+                                        tracing::debug!(
+                                            "PR-B: downtime slash skipped for {}: {:?}",
+                                            hex::encode(&vid[..8]),
+                                            e,
+                                        );
+                                    }
+                                }
+                            }
+
+                            if !active_ids.is_empty() {
+                                tracing::info!(
+                                    "PR-B: uptime updated for {} active validators at epoch {} — \
+                                     epoch_blocks={}, expected_per_validator={}, downtime_slashed={}",
+                                    active_ids.len(),
+                                    new_epoch,
+                                    epoch_block_count,
+                                    expected,
+                                    zero_uptime_ids.len(),
+                                );
+                            }
+                        }
+
+                        // Group 2: auto-activate LOCKED → ACTIVE for validators
+                        // whose stake was verified since the last boundary.
+                        // Runs AFTER `settle_unlocks` so retired stake frees
+                        // `max_active_validators` headroom in the same epoch.
+                        let activated = registry_guard.auto_activate_locked(new_epoch);
+                        if !activated.is_empty() {
+                            tracing::info!(
+                                "Group 2: epoch {} boundary — auto-activated {} LOCKED→ACTIVE validator(s)",
+                                new_epoch,
+                                activated.len(),
+                            );
+                        }
+
+                        // Phase 10 (Item 1): Deferred VALIDATOR restart.
+                        //
+                        // If THIS node was started in OBSERVER MODE (not in
+                        // genesis TOML, not ACTIVE in the registry at boot)
+                        // and the epoch-boundary auto_activate_locked just
+                        // promoted it, the relay transport and propose loop
+                        // were already configured for observer-only operation
+                        // at boot and cannot be switched in place. Drop the
+                        // registry write lock cleanly and exit with status 0;
+                        // a supervisor configured with `Restart=always`
+                        // (systemd) will restart the node, and the updated
+                        // `is_dynamic_active_validator(...)` check at boot
+                        // will place it in VALIDATOR MODE (dynamic).
+                        //
+                        // Exit is gated on `is_observer` so this path never
+                        // fires for nodes that were already validators at
+                        // boot (they have nothing to restart).
+                        if is_observer {
+                            if activated.contains(&self_fingerprint_for_restart) {
+                                tracing::warn!(
+                                    "🔄 Phase 10: self-activated at epoch {} — exiting so \
+                                     supervisor can restart in VALIDATOR MODE (dynamic). \
+                                     fingerprint={}. Ensure Restart=always in the systemd unit.",
+                                    new_epoch,
+                                    hex::encode(self_fingerprint_for_restart),
+                                );
+                                // Drop registry write lock before exit so the
+                                // serialized snapshot path (if any) sees a
+                                // consistent state. The explicit drop is
+                                // cosmetic in practice — process exit tears
+                                // down all held guards — but keeps the
+                                // intent obvious to readers.
+                                drop(registry_guard);
+                                std::process::exit(0);
+                            }
+                        }
+
+                        // Group 2: SR21 election on the freshly-updated
+                        // registry. On the narwhal path there is no
+                        // `DagNodeState` / `shared_state` to receive the
+                        // result (that container lives only in
+                        // `start_dag_node`), so the election outcome is
+                        // emitted as structured logs and a gauge metric.
+                        // Phase 8 (dynamic committee) will add the runtime
+                        // write-back plumbing proper.
+                        let identities = crate::sr21_election::registry_to_validator_identities(
+                            &*registry_guard,
+                        );
+                        if !identities.is_empty() {
+                            let election = crate::sr21_election::run_election_for_chain(
+                                &identities,
+                                cli.chain_id,
+                                new_epoch,
+                            );
+                            tracing::info!(
+                                "Group 2: SR21 election at epoch {} — candidates={} active={} dropped={} total_stake={}",
+                                new_epoch,
+                                identities.len(),
+                                election.num_active,
+                                election.dropped_count,
+                                election.total_active_stake,
+                            );
+                        } else {
+                            tracing::debug!(
+                                "Group 2: SR21 election at epoch {} — no ACTIVE validators in registry; skipped",
+                                new_epoch,
+                            );
+                        }
+
+                        // Phase 8 (Gap A): epoch-boundary committee hot-reload.
+                        //
+                        // After settle_unlocks (γ-5) + auto_activate_locked
+                        // (Group 2) the registry's ACTIVE set may have
+                        // changed. Rebuild the committee from
+                        // (genesis manifest + ACTIVE validators) and
+                        // publish it to the narwhal runtime via the same
+                        // `ReloadCommittee` channel the REST path uses
+                        // (β-2 / β-3). Still under `registry_guard.write()`
+                        // so the committee reflects the exact post-mutation
+                        // state atomically.
+                        //
+                        // Error handling: `build_committee_from_sources` can
+                        // fail if genesis TOML is corrupt (shouldn't happen
+                        // post-startup) or if the merged authority set has
+                        // duplicate pubkeys (would already have failed at
+                        // REST register). We log warn! and skip the reload
+                        // rather than halt — the existing committee stays
+                        // in place, which is the same behavior as a
+                        // failed REST hot-reload.
+                        //
+                        // PR-A: use `build_sr21_committee` so the narwhal
+                        // committee reflects the SR21 top-21 stake-ranked
+                        // cap, not the raw merged set. REST hot-reload
+                        // paths (main.rs:1169, 2232, 2411, 2459) still use
+                        // the unfiltered `build_committee_from_sources` for
+                        // event-driven rebuilds; the top-21 cap is applied
+                        // once per epoch at the boundary only.
+                        match crate::genesis_committee::build_sr21_committee(
+                            &manifest,
+                            &*registry_guard,
+                            cli.chain_id,
+                            new_epoch,
+                        ) {
+                            Ok(new_committee) => {
+                                let new_size = new_committee.size();
+                                {
+                                    let mut committee_w = committee_shared.write().await;
+                                    *committee_w = new_committee.clone();
+                                }
+                                if let Err(e) = msg_tx
+                                    .send(
+                                        misaka_dag::narwhal_dag::runtime::ConsensusMessage::ReloadCommittee(
+                                            new_committee,
+                                        ),
+                                    )
+                                    .await
+                                {
+                                    tracing::warn!(
+                                        "PR-A: ReloadCommittee send failed at epoch {}: {}",
+                                        new_epoch, e
+                                    );
+                                } else {
+                                    tracing::info!(
+                                        "PR-A: SR21 committee hot-reloaded at epoch {} — {} authorities (top-21 cap applied)",
+                                        new_epoch, new_size
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "PR-A: build_sr21_committee failed at epoch {}: {} — keeping existing committee",
+                                    new_epoch, e
+                                );
+                            }
+                        }
+
+                        // PR-B: reset per-epoch counters after the boundary
+                        // block has consumed them. The next epoch starts
+                        // from zero; missing this clear would accumulate
+                        // propose counts across epochs and inflate uptime.
+                        propose_count.clear();
+                        epoch_block_count = 0;
+                    }
+                }
+
+                drop(registry_guard);
                 total_committed_txs += output.transactions.len() as u64;
                 total_accepted_txs += exec_result.txs_accepted as u64;
 
@@ -2608,8 +4027,8 @@ async fn start_narwhal_node(mut cli: Cli, p2p_config: P2pConfig) -> anyhow::Resu
                 // to prevent double emission in the same commit.
                 if let Some(addr) = leader_address.filter(|_| !exec_result.had_system_emission) {
                     let author_idx = output.leader.author as usize;
-                    let leader_pk = if author_idx < committee.authorities.len() {
-                        let pk = &committee.authorities[author_idx].public_key;
+                    let leader_pk = if author_idx < committee_guard.authorities.len() {
+                        let pk = &committee_guard.authorities[author_idx].public_key;
                         if !pk.is_empty() { Some(pk.clone()) } else { None }
                     } else {
                         None
@@ -2624,6 +4043,8 @@ async fn start_narwhal_node(mut cli: Cli, p2p_config: P2pConfig) -> anyhow::Resu
                         );
                     }
                 }
+
+                drop(committee_guard);
 
                 // Update shared persistent block height
                 block_height_writer.store(
@@ -2681,26 +4102,110 @@ async fn start_narwhal_node(mut cli: Cli, p2p_config: P2pConfig) -> anyhow::Resu
                     buf.push_front(summary);
                 }
 
-                // Update shared UtxoSet for RPC queries
-                {
+                // Update shared UtxoSet for RPC queries and mempool admission.
+                // Clone is expensive (~800MB copy). Use block_in_place to yield the
+                // async worker thread so RPC handlers remain responsive during the copy.
+                if exec_result.txs_accepted > 0 || output.commit_index % 100 == 1 {
+                    let fresh = tokio::task::block_in_place(|| {
+                        tx_executor.utxo_set().clone()
+                    });
                     let mut shared = utxo_set_writer.write().await;
-                    *shared = tx_executor.utxo_set().clone();
+                    *shared = fresh;
                 }
 
                 // Index committed transaction hashes for get_tx_status
-                {
+                // and remove them from the mempool so status transitions
+                // from "pending" to "confirmed".
+                // Persist full CommittedTxDetail + AddressTxRef to RocksDB.
+                if !output.transactions.is_empty() {
                     let current_height = tx_executor.height();
+                    let leader_authority = output.leader.author as u32;
+                    let mut participating: Vec<u32> = output
+                        .blocks
+                        .iter()
+                        .map(|b| b.author as u32)
+                        .collect::<std::collections::BTreeSet<u32>>()
+                        .into_iter()
+                        .collect();
+                    if !participating.contains(&leader_authority) {
+                        participating.push(leader_authority);
+                        participating.sort_unstable();
+                    }
+
                     let mut tx_map = committed_txs_writer.write().await;
+                    let mut mempool_guard = narwhal_mempool.mempool.lock().await;
                     for raw_tx in &output.transactions {
-                        if let Ok(tx) = serde_json::from_slice::<misaka_types::utxo::UtxoTransaction>(raw_tx) {
+                        if let Ok(tx) = borsh::from_slice::<misaka_types::utxo::UtxoTransaction>(raw_tx) {
                             let hash = tx.tx_hash();
-                            tx_map.insert(hash, CommittedTx {
+                            let hash_hex = hex::encode(hash);
+                            let tx_type_str = format!("{:?}", tx.tx_type);
+                            let memo = String::from_utf8(tx.extra.clone()).unwrap_or_default();
+
+                            let inputs_summary: Vec<TxInputSummary> = tx.inputs.iter().map(|inp| {
+                                TxInputSummary {
+                                    utxo_refs: inp.utxo_refs.iter().map(|r| {
+                                        format!("{}:{}", hex::encode(r.tx_hash), r.output_index)
+                                    }).collect(),
+                                }
+                            }).collect();
+
+                            let outputs_summary: Vec<TxOutputSummary> = tx.outputs.iter().map(|out| {
+                                TxOutputSummary {
+                                    address: misaka_types::address::encode_address(&out.address, cli.chain_id),
+                                    amount: out.amount,
+                                }
+                            }).collect();
+
+                            let detail = CommittedTxDetail {
                                 height: current_height,
-                                status: "confirmed",
-                            });
+                                status: "confirmed".to_string(),
+                                tx_type: tx_type_str.clone(),
+                                inputs: inputs_summary,
+                                outputs: outputs_summary.clone(),
+                                fee: tx.fee,
+                                timestamp_ms: output.timestamp_ms,
+                                leader_authority,
+                                participating_validators: participating.clone(),
+                                memo: memo.clone(),
+                            };
+
+                            // Persist to RocksDB
+                            if let Ok(json_bytes) = serde_json::to_vec(&detail) {
+                                if let Err(e) = tx_index_store.put_tx_detail(&hash, &json_bytes) {
+                                    tracing::warn!("Failed to persist tx_index: {}", e);
+                                }
+                            }
+
+                            // Persist address index entries for outputs
+                            for out_summary in &outputs_summary {
+                                let addr_ref = AddressTxRef {
+                                    tx_hash: hash_hex.clone(),
+                                    direction: "receive".to_string(),
+                                    amount: out_summary.amount,
+                                    height: current_height,
+                                    timestamp_ms: output.timestamp_ms,
+                                    tx_type: tx_type_str.clone(),
+                                };
+                                if let Ok(ref_bytes) = serde_json::to_vec(&addr_ref) {
+                                    let addr_key = format!(
+                                        "{}:{:016x}:{}",
+                                        out_summary.address, current_height, hash_hex
+                                    );
+                                    if let Err(e) = tx_index_store.put_addr_entry(
+                                        addr_key.as_bytes(),
+                                        &ref_bytes,
+                                    ) {
+                                        tracing::warn!("Failed to persist addr_index: {}", e);
+                                    }
+                                }
+                            }
+
+                            // In-memory cache
+                            tx_map.insert(hash, detail);
+                            mempool_guard.remove(&hash);
                         }
                     }
-                    // Evict oldest entries (lowest height) to cap at 10k
+                    // Evict oldest entries from in-memory cache if too large
                     if tx_map.len() > 10_000 {
                         let excess = tx_map.len() - 10_000;
                         let mut entries: Vec<([u8; 32], u64)> = tx_map
@@ -2727,24 +4232,39 @@ async fn start_narwhal_node(mut cli: Cli, p2p_config: P2pConfig) -> anyhow::Resu
                     total_committed_txs,
                 );
 
-                // Persist UTXO snapshot every 100 commits for crash recovery
-                if output.commit_index % 100 == 0 {
+                // Persist UTXO snapshot when user TXs land.
+                // Only save when actual transactions are accepted to avoid
+                // wasteful 2GB+ writes on empty blocks. The snapshot is saved
+                // synchronously here (blocking) because spawn_blocking + clone
+                // doubles memory usage and triggers OOM on small servers.
+                if exec_result.txs_accepted > 0 {
                     if let Err(e) = tx_executor.utxo_set().save_to_file(&utxo_snapshot_path) {
                         tracing::warn!("Failed to save UTXO snapshot: {}", e);
                     } else {
                         tracing::info!(
-                            "UTXO snapshot saved at commit {} (height={})",
+                            "UTXO snapshot saved at commit {} (height={}) [triggered by {} accepted tx(s)]",
                             output.commit_index,
                             tx_executor.utxo_set().height,
+                            exec_result.txs_accepted,
                         );
                     }
                 }
+            }
+            // Graceful shutdown: save UTXO snapshot so balances survive restart.
+            // This is a single save (not per-commit clone) so OOM is not a concern.
+            if let Err(e) = tx_executor.utxo_set().save_to_file(&utxo_snapshot_path) {
+                tracing::warn!("Failed to save UTXO snapshot on shutdown: {}", e);
+            } else {
+                tracing::info!(
+                    "UTXO snapshot saved on shutdown (height={})",
+                    tx_executor.utxo_set().height,
+                );
             }
         } => {
             info!("Commit channel closed");
         }
         _ = shutdown_handle => {
-            info!("Shutdown signal received, waiting for runtime...");
+            info!("Shutdown signal received");
             let _ = runtime_handle.await;
             let uptime = start_time.elapsed();
             info!(
@@ -2773,7 +4293,11 @@ async fn query_utxos_by_address(
         hex::decode(address_str)
             .ok()
             .and_then(|b| <[u8; 32]>::try_from(b).ok())
-    } else if address_str.starts_with("misakatest1") || address_str.starts_with("misaka1") {
+    } else if let Some(hex_part) = address_str.strip_prefix("misakatest1") {
+        hex::decode(hex_part)
+            .ok()
+            .and_then(|b| <[u8; 32]>::try_from(b).ok())
+    } else if address_str.starts_with("misaka1") || address_str.starts_with("msk1") {
         misaka_types::address::decode_address(address_str, chain_id).ok()
     } else {
         None
@@ -2831,8 +4355,13 @@ fn local_validator_key_path(
     data_dir.join(format!("dag_validator_{validator_index}.json"))
 }
 
-#[cfg(all(feature = "dag", feature = "ghostdag-compat"))]
-fn validator_lifecycle_snapshot_path(
+// 0.9.0 β-2: removed `#[cfg(feature = "ghostdag-compat")]` so
+// `start_narwhal_node` (the default `dag` path without ghostdag-compat) can
+// call this helper to locate the lifecycle snapshot file.
+//
+// γ-2.5: bumped to `pub(crate)` so the extracted
+// `validator_lifecycle_bootstrap` module can share the same path convention.
+pub(crate) fn validator_lifecycle_snapshot_path(
     data_dir: &std::path::Path,
     chain_id: u32,
 ) -> std::path::PathBuf {
@@ -3801,6 +5330,7 @@ async fn start_dag_node(
     node_mode: NodeMode,
     role: NodeRole,
     _p2p_config: P2pConfig,
+    loaded_config: Option<misaka_config::NodeConfig>,
 ) -> anyhow::Result<()> {
     // SEC-FIX: Block ghostdag-compat on mainnet.
     // The GhostDAG compatibility path is the legacy runtime (pre-Narwhal).
@@ -3902,97 +5432,46 @@ async fn start_dag_node(
             .collect()
     };
 
-    let validator_lifecycle_store = Arc::new(
-        validator_lifecycle_persistence::ValidatorLifecycleStore::new(
-            validator_lifecycle_path.clone(),
+    // γ-2.5 / γ-3: bootstrap StakingRegistry via the shared extraction.
+    // Behavior matches the pre-γ-2.5 inline dag path (seed_on_fresh=true,
+    // log_prefix="Layer 6"). γ-3 adds a process-wide `Arc<StakingConfig>`
+    // that is threaded through to downstream consumers.
+    // Group 1: same config glue helper as the narwhal path above.
+    // Option A: `loaded_config` threaded in via function parameter.
+    let staking_config: Arc<misaka_consensus::staking::StakingConfig> = Arc::new(
+        crate::staking_config_builder::build_staking_config_for_chain(
+            cli.chain_id,
+            loaded_config.as_ref(),
         ),
     );
-    let validator_lifecycle_store =
-        validator_lifecycle_persistence::install_global_store(validator_lifecycle_store);
-    let staking_config = if cli.chain_id == 1 {
-        misaka_consensus::staking::StakingConfig::default()
-    } else {
-        misaka_consensus::staking::StakingConfig::testnet()
-    };
-    let (restored_registry, restored_epoch, restored_epoch_progress) =
-        match validator_lifecycle_store.load().await {
-            Ok(Some(snapshot)) => {
-                info!(
-                    "Layer 6: restored validator lifecycle snapshot | epoch={} | validators={} | file={}",
-                    snapshot.current_epoch,
-                    snapshot.registry.all_validators().count(),
-                    validator_lifecycle_path.display()
-                );
-                (
-                    snapshot.registry,
-                    snapshot.current_epoch,
-                    snapshot.epoch_progress,
-                )
-            }
-            Ok(None) => {
-                info!(
-                    "Layer 6: validator lifecycle initialized fresh | epoch={} | file={}",
-                    0,
-                    validator_lifecycle_path.display()
-                );
-                let registry =
-                    misaka_consensus::staking::StakingRegistry::new(staking_config.clone());
-                let epoch = 0;
-                if let Err(e) = validator_lifecycle_store
-                    .save_snapshot(
-                        &validator_lifecycle_persistence::ValidatorLifecycleSnapshot {
-                            version: 1,
-                            current_epoch: epoch,
-                            registry: registry.clone(),
-                            epoch_progress:
-                                validator_lifecycle_persistence::ValidatorEpochProgress::default(),
-                        },
-                    )
-                    .await
-                {
-                    warn!(
-                        "Layer 6: failed to seed validator lifecycle snapshot: {}",
-                        e
-                    );
-                }
-                (
-                    registry,
-                    epoch,
-                    validator_lifecycle_persistence::ValidatorEpochProgress::default(),
-                )
-            }
-            Err(e) => {
-                warn!(
-                    "Layer 6: failed to load validator lifecycle snapshot ({}); starting fresh",
-                    e
-                );
-                let registry =
-                    misaka_consensus::staking::StakingRegistry::new(staking_config.clone());
-                let epoch = 0;
-                if let Err(e) = validator_lifecycle_store
-                    .save_snapshot(
-                        &validator_lifecycle_persistence::ValidatorLifecycleSnapshot {
-                            version: 1,
-                            current_epoch: epoch,
-                            registry: registry.clone(),
-                            epoch_progress:
-                                validator_lifecycle_persistence::ValidatorEpochProgress::default(),
-                        },
-                    )
-                    .await
-                {
-                    warn!(
-                        "Layer 6: failed to seed validator lifecycle snapshot: {}",
-                        e
-                    );
-                }
-                (
-                    registry,
-                    epoch,
-                    validator_lifecycle_persistence::ValidatorEpochProgress::default(),
-                )
-            }
-        };
+    tracing::info!(
+        "StakingConfig[dag]: chain_id={}, unbonding_epochs={}, min_stake={}, max_validators={}, nodeconfig={}",
+        cli.chain_id,
+        staking_config.unbonding_epochs,
+        staking_config.min_validator_stake,
+        staking_config.max_active_validators,
+        if loaded_config.is_some() { "provided" } else { "none" },
+    );
+    let lifecycle_bootstrap =
+        crate::validator_lifecycle_bootstrap::bootstrap_validator_lifecycle(
+            std::path::Path::new(&cli.data_dir),
+            cli.chain_id,
+            staking_config.clone(),
+            &genesis_path,
+            "Layer 6",
+            /* seed_on_fresh = */ true,
+        )
+        .await?;
+    let validator_lifecycle_store = lifecycle_bootstrap.store;
+    let validator_registry = lifecycle_bootstrap.registry;
+    // γ-3.1: dag path uses misaka_dag::DagMempool (different mempool type
+    // than narwhal_consensus::NarwhalMempoolIngress), which does not yet
+    // carry StakingConfig. This binding stays underscore-prefixed until the
+    // DagMempool admit path is γ-3.1-equivalent (separate follow-up; misaka-mempool
+    // vs misaka-dag are independent crates with parallel admission pipelines).
+    let _staking_config_arc = lifecycle_bootstrap.staking_config;
+    let restored_epoch = lifecycle_bootstrap.current_epoch;
+    let restored_epoch_progress = lifecycle_bootstrap.epoch_progress;
 
     // ── Extract PQ transport keys before local_validator is moved into DagNodeState ──
     let transport_keys: Option<(
@@ -4648,7 +6127,14 @@ async fn start_dag_node(
     let rpc_runtime_recovery = runtime_recovery_observation.clone();
 
     // ── Validator Staking Registry ──
-    let validator_registry = Arc::new(RwLock::new(restored_registry));
+    //
+    // 0.9.0 β-1 / γ-2.5: the `registered_validators.json` → StakingRegistry
+    // migration used to fire here. γ-2.5 moved it inside
+    // `bootstrap_validator_lifecycle` (called far above, at the snapshot
+    // load point) so that both narwhal + dag paths share the same order of
+    // operations. `validator_registry` is already Arc<RwLock<_>>'d by the
+    // bootstrap; only `current_epoch` and `epoch_progress` still need their
+    // caller-specific lock shapes.
     let current_epoch: Arc<RwLock<u64>> = Arc::new(RwLock::new(restored_epoch));
     let epoch_progress: Arc<Mutex<validator_lifecycle_persistence::ValidatorEpochProgress>> =
         Arc::new(Mutex::new(restored_epoch_progress));
@@ -4806,6 +6292,10 @@ async fn start_dag_node(
                         0,
                         stake_verified,
                         stake_sig.clone(),
+                        // 0.9.0: bootstrap path is the Solana/off-chain variant.
+                        // l1_stake_verified is written only by `utxo_executor`
+                        // when a L1 StakeDeposit tx is finalized (γ-3).
+                        false,
                     ) {
                         Ok(()) => {
                             if stake_verified {
@@ -5132,6 +6622,19 @@ async fn start_dag_node(
                 );
 
                 // ── SR21 Auto-Election at epoch boundary ──
+                //
+                // γ-5 NOTE: `StakingRegistry::settle_unlocks` is deliberately
+                // NOT called here. This epoch hook runs only under
+                // `#[cfg(all(dag, ghostdag-compat))]` (=> `start_dag_node`),
+                // which does not instantiate a `UtxoExecutor` and therefore
+                // has no `staked_receipt_table` to drain or `utxo_set` to
+                // issue the unlocked-stake UTXO into. γ-5 settlement is
+                // wired in `start_narwhal_node`'s commit loop instead
+                // (the default `dag`-without-`ghostdag-compat` build). If a
+                // future reconciliation unifies the two paths (or moves
+                // UtxoExecutor into this path), add a
+                // `settle_unlocks(next_epoch) + apply_settled_unlocks(..)`
+                // pair here as well.
                 {
                     let mut wguard = finality_epoch_state.write().await;
                     apply_sr21_election_at_epoch_boundary(&mut wguard, next_epoch);
@@ -5333,6 +6836,7 @@ async fn start_v1_node(
     node_mode: NodeMode,
     role: NodeRole,
     p2p_config: P2pConfig,
+    _loaded_config: Option<misaka_config::NodeConfig>,
 ) -> anyhow::Result<()> {
     use crate::block_producer::{NodeState, SharedState};
     use crate::chain_store::ChainStore;
@@ -6372,5 +7876,689 @@ mod tests {
         assert_eq!(discovered[0].validator_id, identity.validator_id);
         assert_eq!(discovered[0].stake_weight, identity.stake_weight);
         assert_eq!(discovered[0].public_key.bytes, identity.public_key.bytes);
+    }
+
+    // ─── Permissionless SR: OBSERVER dynamic-validator expansion ─────
+    //
+    // Verifies the Phase 8.5 gate: a validator that is NOT in the
+    // genesis manifest but IS Active in the staking registry must be
+    // recognized as a full validator, not OBSERVER.
+
+    #[test]
+    #[allow(deprecated)]
+    fn dynamic_validator_not_observer() {
+        use misaka_consensus::staking::{StakingConfig, StakingRegistry, ValidatorState};
+
+        let config = StakingConfig {
+            min_validator_stake: 10_000_000,
+            max_active_validators: 10,
+            ..StakingConfig::testnet()
+        };
+        let mut reg = StakingRegistry::new(config);
+        let fp = [0xAB; 32];
+
+        // Before any registration: not a dynamic validator.
+        assert!(!is_dynamic_active_validator(&reg, &fp));
+
+        // Register + activate.
+        reg.register(
+            fp,
+            vec![0xAB; 1952],
+            20_000_000,
+            500,
+            fp,
+            0,
+            fp,
+            0,
+            true,  // solana_stake_verified — satisfies activate() OR-gate
+            Some("sig".into()),
+            false,
+        )
+        .expect("register");
+        reg.update_score(&fp, 5000);
+
+        // LOCKED is not enough — must be Active.
+        assert_eq!(reg.get(&fp).unwrap().state, ValidatorState::Locked);
+        assert!(
+            !is_dynamic_active_validator(&reg, &fp),
+            "LOCKED validator must not be treated as a dynamic validator"
+        );
+
+        reg.activate(&fp, 1).expect("activate");
+        assert_eq!(reg.get(&fp).unwrap().state, ValidatorState::Active);
+
+        // ACTIVE → now recognized as a dynamic validator (not OBSERVER).
+        assert!(
+            is_dynamic_active_validator(&reg, &fp),
+            "ACTIVE registry validator must be recognized as non-OBSERVER",
+        );
+
+        // Different fingerprint → not a dynamic validator.
+        assert!(!is_dynamic_active_validator(&reg, &[0xFF; 32]));
+    }
+
+    #[test]
+    fn observer_returns_to_observer_after_exit() {
+        use misaka_consensus::staking::{StakingConfig, StakingRegistry};
+
+        let config = StakingConfig {
+            min_validator_stake: 10_000_000,
+            max_active_validators: 10,
+            ..StakingConfig::testnet()
+        };
+        let mut reg = StakingRegistry::new(config);
+        let fp = [0xCD; 32];
+
+        // Bring the validator to Active.
+        #[allow(deprecated)]
+        reg.register(
+            fp, vec![0xCD; 1952], 20_000_000, 500, fp, 0, fp, 0, true,
+            Some("sig".into()), false,
+        )
+        .expect("register");
+        reg.update_score(&fp, 5000);
+        reg.activate(&fp, 1).expect("activate");
+        assert!(is_dynamic_active_validator(&reg, &fp));
+
+        // Exit — state goes EXITING, no longer counted as dynamic.
+        reg.exit(&fp, 10).expect("exit");
+        assert!(
+            !is_dynamic_active_validator(&reg, &fp),
+            "EXITING validator must NOT be treated as active dynamic validator — OBSERVER downgrade on exit"
+        );
+    }
+
+    // ─── PR-B: uptime enforcement ─────────────────────────────────────
+
+    /// Test the pure arithmetic helper: 50 proposed / 100 expected → 5000 bps.
+    #[test]
+    fn prb_uptime_calculated_correctly() {
+        // Exact ratios.
+        assert_eq!(compute_uptime_bps(50, 100), 5000);
+        assert_eq!(compute_uptime_bps(100, 100), 10_000);
+        assert_eq!(compute_uptime_bps(0, 100), 0);
+
+        // Over-participation (leader wave imbalance, etc.) clamps to 10_000.
+        assert_eq!(compute_uptime_bps(200, 100), 10_000);
+
+        // Bootstrap / quiet epoch: expected == 0 → full credit.
+        assert_eq!(compute_uptime_bps(0, 0), 10_000);
+        assert_eq!(compute_uptime_bps(5, 0), 10_000);
+
+        // Large values don't overflow (u128 internal arithmetic).
+        let big = u64::MAX / 2;
+        let result = compute_uptime_bps(big, big);
+        assert_eq!(result, 10_000);
+    }
+
+    /// Test that `StakingRegistry::slash(Minor)` applies the 1% rate to
+    /// a zero-uptime ACTIVE validator (the path PR-B's commit loop hits).
+    #[test]
+    #[allow(deprecated)]
+    fn prb_zero_uptime_triggers_minor_slash() {
+        use misaka_consensus::staking::{
+            SlashSeverity, StakingConfig, StakingRegistry, ValidatorState,
+        };
+
+        let config = StakingConfig {
+            min_validator_stake: 1_000,
+            slash_minor_bps: 100, // 1%
+            ..StakingConfig::testnet()
+        };
+        let mut reg = StakingRegistry::new(config);
+        let id = [0xAA; 32];
+        reg.register(
+            id,
+            vec![1; 1952],
+            20_000_000, // well above min
+            500,
+            id,
+            0,
+            [0xAA; 32],
+            0,
+            true,
+            Some("sig".into()),
+            false,
+        )
+        .expect("register");
+        reg.update_score(&id, 5000);
+        reg.activate(&id, 1).expect("activate");
+        assert_eq!(reg.get(&id).unwrap().state, ValidatorState::Active);
+
+        // Simulate PR-B: zero proposed, epoch had blocks → slash Minor.
+        reg.update_uptime(&id, compute_uptime_bps(0, /* expected = */ 100));
+        assert_eq!(reg.get(&id).unwrap().uptime_bps, 0, "uptime set to 0");
+
+        let stake_before = reg.get(&id).unwrap().stake_amount;
+        let (slashed, _reporter) =
+            reg.slash(&id, SlashSeverity::Minor, 2).expect("slash");
+        let stake_after = reg.get(&id).unwrap().stake_amount;
+
+        // 1% of 20_000_000 = 200_000 base units.
+        assert_eq!(slashed, 200_000, "Minor slash = 1% of stake");
+        assert_eq!(
+            stake_before - stake_after,
+            slashed,
+            "stake_amount reduced by slashed amount"
+        );
+    }
+
+    /// Test the clear-on-boundary semantic: the HashMap + counter are
+    /// per-epoch; after clear, the next epoch starts from zero.
+    #[test]
+    fn prb_uptime_resets_each_epoch() {
+        let mut propose_count: std::collections::HashMap<[u8; 32], u64> =
+            std::collections::HashMap::new();
+        let mut epoch_block_count: u64 = 0;
+
+        let v1 = [0x01; 32];
+        let v2 = [0x02; 32];
+
+        // Epoch 1: v1 proposes 3, v2 proposes 7 → 10 total.
+        for _ in 0..3 {
+            *propose_count.entry(v1).or_insert(0) += 1;
+            epoch_block_count += 1;
+        }
+        for _ in 0..7 {
+            *propose_count.entry(v2).or_insert(0) += 1;
+            epoch_block_count += 1;
+        }
+
+        let expected_e1 = epoch_block_count / 2; // 2 validators
+        assert_eq!(expected_e1, 5);
+        assert_eq!(compute_uptime_bps(3, expected_e1), 6000);
+        assert_eq!(compute_uptime_bps(7, expected_e1), 10_000); // clamped
+
+        // Boundary reset.
+        propose_count.clear();
+        epoch_block_count = 0;
+
+        // Epoch 2: v1 only, 5 blocks.
+        for _ in 0..5 {
+            *propose_count.entry(v1).or_insert(0) += 1;
+            epoch_block_count += 1;
+        }
+        assert_eq!(propose_count.get(&v1).copied(), Some(5));
+        assert_eq!(propose_count.get(&v2).copied(), None, "epoch 1 tally was cleared");
+        assert_eq!(epoch_block_count, 5);
+
+        // v2 was not heard in epoch 2 → zero_uptime candidate.
+        let expected_e2 = epoch_block_count / 2;
+        let v2_uptime = compute_uptime_bps(0, expected_e2);
+        assert_eq!(v2_uptime, 0, "v2 must be at 0 uptime in epoch 2");
+    }
+}
+
+// ════════════════════════════════════════════════════════════════
+//  Phase 10 (Item 2): Smoke E2E stake-lifecycle tests
+// ════════════════════════════════════════════════════════════════
+//
+// These tests exercise the full in-process stake lifecycle:
+//   1. ValidatorStakeTx envelope construction (the shape the CLI emits)
+//   2. UtxoExecutor::execute_committed commits it
+//   3. StakingRegistry state transitions (LOCKED → ACTIVE → EXITING → UNLOCKED)
+//   4. auto_activate_locked + settle_unlocks + SR21 + committee rebuild
+//
+// We skip the network / RPC / mempool layer and drive the executor
+// directly. Subprocess-based multi-node tests live in
+// `crates/misaka-test-cluster` (out of scope here). These are smoke
+// tests: they prove the state machine, not throughput.
+
+#[cfg(test)]
+#[allow(deprecated)]
+mod phase10_smoke {
+    use super::*;
+    use misaka_consensus::staking::{StakingConfig, StakingRegistry, ValidatorState};
+    use misaka_crypto::validator_sig::ValidatorPqPublicKey;
+    use misaka_pqc::pq_sign::{ml_dsa_sign_raw, MlDsaKeypair};
+    use misaka_storage::utxo_set::UtxoSet;
+    use misaka_types::intent::AppId;
+    use misaka_types::utxo::{OutputRef, TxInput, TxOutput, TxType, UtxoTransaction, UTXO_TX_VERSION};
+    use misaka_types::validator_stake_tx::{
+        RegisterParams, StakeInput, StakeMoreParams, StakeTxKind, StakeTxParams, ValidatorStakeTx,
+    };
+
+    fn smoke_staking_config() -> StakingConfig {
+        // Tiny thresholds so fixture stake amounts (~11_000 base units)
+        // satisfy min_validator_stake, and the unbonding test can settle
+        // within a short epoch window.
+        StakingConfig {
+            min_validator_stake: 1_000,
+            unbonding_epochs: 5,
+            min_uptime_bps: 0,
+            min_score: 0,
+            ..StakingConfig::testnet()
+        }
+    }
+
+    fn new_executor() -> crate::utxo_executor::UtxoExecutor {
+        let app_id = AppId::new(2, [0u8; 32]);
+        let mut ex = crate::utxo_executor::UtxoExecutor::with_utxo_set(UtxoSet::new(1000), app_id);
+        // Feature gate is u64::MAX in FEATURE_ACTIVATIONS by default;
+        // Phase 6 / Group 1's test override lets stake tx through.
+        ex.enable_on_chain_staking_for_tests(0);
+        ex
+    }
+
+    fn seed_utxo(ex: &mut crate::utxo_executor::UtxoExecutor, outref: OutputRef, amount: u64) {
+        ex.utxo_set_mut()
+            .add_output(
+                outref,
+                TxOutput {
+                    amount,
+                    address: [0x77; 32],
+                    spending_pubkey: None,
+                },
+                0,
+                false,
+            )
+            .expect("seed utxo");
+    }
+
+    fn sign_envelope(mut tx: ValidatorStakeTx, kp: &MlDsaKeypair) -> ValidatorStakeTx {
+        tx.signature = vec![];
+        let payload = tx.signing_payload();
+        let sig = ml_dsa_sign_raw(&kp.secret_key, &payload).expect("sign envelope");
+        tx.signature = sig.as_bytes().to_vec();
+        tx
+    }
+
+    fn validator_id_of(kp: &MlDsaKeypair) -> [u8; 32] {
+        ValidatorPqPublicKey::from_bytes(kp.public_key.as_bytes())
+            .unwrap()
+            .to_canonical_id()
+    }
+
+    fn make_register_envelope(
+        kp: &MlDsaKeypair,
+        vid: [u8; 32],
+        stake_input_ref: (OutputRef, u64),
+    ) -> ValidatorStakeTx {
+        let (outref, input_amount) = stake_input_ref;
+        sign_envelope(
+            ValidatorStakeTx {
+                kind: StakeTxKind::Register,
+                validator_id: vid,
+                stake_inputs: vec![StakeInput {
+                    tx_hash: outref.tx_hash,
+                    output_index: outref.output_index,
+                    amount: input_amount,
+                }],
+                fee: 1_000,
+                nonce: 0,
+                memo: None,
+                params: StakeTxParams::Register(RegisterParams {
+                    consensus_pubkey: kp.public_key.as_bytes().to_vec(),
+                    reward_address: [0x33; 32],
+                    commission_bps: 500,
+                    p2p_endpoint: Some("127.0.0.1:30333".into()),
+                    moniker: None,
+                }),
+                signature: Vec::new(),
+            },
+            kp,
+        )
+    }
+
+    fn make_stake_more_envelope(
+        kp: &MlDsaKeypair,
+        vid: [u8; 32],
+        stake_input_ref: (OutputRef, u64),
+        additional: u64,
+    ) -> ValidatorStakeTx {
+        let (outref, input_amount) = stake_input_ref;
+        sign_envelope(
+            ValidatorStakeTx {
+                kind: StakeTxKind::StakeMore,
+                validator_id: vid,
+                stake_inputs: vec![StakeInput {
+                    tx_hash: outref.tx_hash,
+                    output_index: outref.output_index,
+                    amount: input_amount,
+                }],
+                fee: 1_000,
+                nonce: 1,
+                memo: None,
+                params: StakeTxParams::StakeMore(StakeMoreParams {
+                    additional_amount: additional,
+                }),
+                signature: Vec::new(),
+            },
+            kp,
+        )
+    }
+
+    fn make_begin_exit_envelope(kp: &MlDsaKeypair, vid: [u8; 32]) -> ValidatorStakeTx {
+        sign_envelope(
+            ValidatorStakeTx {
+                kind: StakeTxKind::BeginExit,
+                validator_id: vid,
+                stake_inputs: Vec::new(),
+                fee: 1_000,
+                nonce: 2,
+                memo: None,
+                params: StakeTxParams::BeginExit,
+                signature: Vec::new(),
+            },
+            kp,
+        )
+    }
+
+    /// Wrap a `ValidatorStakeTx` in a `UtxoTransaction { tx_type: StakeDeposit }`
+    /// with the receipt marker at outputs[0] and the given input seeded in
+    /// the caller's UtxoSet.
+    fn wrap_stake_deposit(
+        envelope: &ValidatorStakeTx,
+        input: &OutputRef,
+        validator_id: [u8; 32],
+    ) -> Vec<u8> {
+        let tx = UtxoTransaction {
+            version: UTXO_TX_VERSION,
+            tx_type: TxType::StakeDeposit,
+            inputs: vec![TxInput {
+                utxo_refs: vec![input.clone()],
+                proof: vec![0xAA; 16],
+            }],
+            outputs: vec![TxOutput {
+                amount: 0,
+                address: validator_id,
+                spending_pubkey: None,
+            }],
+            fee: 1_000,
+            extra: envelope.encode_for_extra().expect("encode extra"),
+            expiry: 0,
+        };
+        borsh::to_vec(&tx).expect("borsh tx")
+    }
+
+    fn wrap_stake_withdraw(envelope: &ValidatorStakeTx, input: &OutputRef) -> Vec<u8> {
+        let tx = UtxoTransaction {
+            version: UTXO_TX_VERSION,
+            tx_type: TxType::StakeWithdraw,
+            inputs: vec![TxInput {
+                utxo_refs: vec![input.clone()],
+                proof: vec![0xBB; 16],
+            }],
+            outputs: vec![TxOutput {
+                amount: 0,
+                address: [0x22; 32],
+                spending_pubkey: None,
+            }],
+            fee: 1_000,
+            extra: envelope.encode_for_extra().expect("encode extra"),
+            expiry: 0,
+        };
+        borsh::to_vec(&tx).expect("borsh tx")
+    }
+
+    // ─── Test 1: stake-register full lifecycle ────────────────────────
+
+    #[test]
+    fn phase10_stake_register_lifecycle() {
+        let kp = MlDsaKeypair::generate();
+        let vid = validator_id_of(&kp);
+
+        let mut ex = new_executor();
+        let mut reg = StakingRegistry::new(smoke_staking_config());
+
+        let input_ref = OutputRef { tx_hash: [0xFF; 32], output_index: 0 };
+        seed_utxo(&mut ex, input_ref.clone(), 11_000);
+
+        let env = make_register_envelope(&kp, vid, (input_ref.clone(), 11_000));
+        let raw = wrap_stake_deposit(&env, &input_ref, vid);
+
+        let result = ex.execute_committed(1, &[raw], None, Some(&mut reg), 0);
+        assert_eq!(result.txs_accepted, 1, "register must be accepted");
+        assert_eq!(result.txs_rejected, 0);
+
+        // LOCKED with l1_stake_verified set.
+        let account = reg.get(&vid).expect("registered");
+        assert_eq!(account.state, ValidatorState::Locked);
+        assert!(account.l1_stake_verified);
+        assert_eq!(account.stake_amount, 11_000 - 1_000); // net
+
+        // auto_activate_locked → ACTIVE.
+        let activated = reg.auto_activate_locked(1);
+        assert_eq!(activated, vec![vid]);
+        assert_eq!(reg.get(&vid).unwrap().state, ValidatorState::Active);
+    }
+
+    // ─── Test 2: stake-more increases weight ──────────────────────────
+
+    #[test]
+    fn phase10_stake_more_increases_weight() {
+        let kp = MlDsaKeypair::generate();
+        let vid = validator_id_of(&kp);
+        let mut ex = new_executor();
+        let mut reg = StakingRegistry::new(smoke_staking_config());
+
+        // Register first.
+        let reg_input = OutputRef { tx_hash: [0xFF; 32], output_index: 0 };
+        seed_utxo(&mut ex, reg_input.clone(), 11_000);
+        let reg_env = make_register_envelope(&kp, vid, (reg_input.clone(), 11_000));
+        let r1 =
+            ex.execute_committed(1, &[wrap_stake_deposit(&reg_env, &reg_input, vid)], None, Some(&mut reg), 0);
+        assert_eq!(r1.txs_accepted, 1);
+        let stake_before = reg.get(&vid).unwrap().stake_amount;
+
+        // Activate so stake_more's state check (Locked|Active only) passes
+        // for the ACTIVE path too.
+        reg.auto_activate_locked(1);
+
+        // StakeMore. Use a fresh input ref so it does not collide with the
+        // already-consumed Register input.
+        let more_input = OutputRef { tx_hash: [0xEE; 32], output_index: 0 };
+        seed_utxo(&mut ex, more_input.clone(), 6_000);
+        let more_env =
+            make_stake_more_envelope(&kp, vid, (more_input.clone(), 6_000), 5_000);
+        let r2 = ex.execute_committed(
+            2,
+            &[wrap_stake_deposit(&more_env, &more_input, vid)],
+            None,
+            Some(&mut reg),
+            1,
+        );
+        assert_eq!(r2.txs_accepted, 1, "stake-more must be accepted");
+
+        let stake_after = reg.get(&vid).unwrap().stake_amount;
+        assert_eq!(
+            stake_after,
+            stake_before + 5_000,
+            "stake_amount must increase by additional_amount"
+        );
+    }
+
+    // ─── Test 3: begin-exit + settle_unlocks ──────────────────────────
+
+    #[test]
+    fn phase10_begin_exit_and_settle() {
+        let kp = MlDsaKeypair::generate();
+        let vid = validator_id_of(&kp);
+        let mut ex = new_executor();
+        let mut reg = StakingRegistry::new(smoke_staking_config());
+
+        // Register + activate so we can BeginExit.
+        let reg_input = OutputRef { tx_hash: [0xFF; 32], output_index: 0 };
+        seed_utxo(&mut ex, reg_input.clone(), 11_000);
+        let reg_env = make_register_envelope(&kp, vid, (reg_input.clone(), 11_000));
+        ex.execute_committed(1, &[wrap_stake_deposit(&reg_env, &reg_input, vid)], None, Some(&mut reg), 0);
+        reg.auto_activate_locked(1);
+        assert_eq!(reg.get(&vid).unwrap().state, ValidatorState::Active);
+
+        // BeginExit.
+        let exit_input = OutputRef { tx_hash: [0xCD; 32], output_index: 0 };
+        seed_utxo(&mut ex, exit_input.clone(), 2_000);
+        let exit_env = make_begin_exit_envelope(&kp, vid);
+        let raw = wrap_stake_withdraw(&exit_env, &exit_input);
+        let exit_epoch = 10u64;
+        let r = ex.execute_committed(3, &[raw], None, Some(&mut reg), exit_epoch);
+        assert_eq!(r.txs_accepted, 1, "begin-exit must be accepted");
+        assert!(matches!(
+            reg.get(&vid).unwrap().state,
+            ValidatorState::Exiting { .. }
+        ));
+
+        // Before unbonding completes: settle_unlocks is a no-op.
+        assert!(reg.settle_unlocks(exit_epoch + 1).is_empty());
+        assert!(reg.settle_unlocks(exit_epoch + 4).is_empty());
+
+        // At exit_epoch + unbonding_epochs (=5 in smoke config): settles.
+        let settled = reg.settle_unlocks(exit_epoch + 5);
+        assert_eq!(settled.len(), 1);
+        assert_eq!(settled[0].0, vid);
+        assert_eq!(reg.get(&vid).unwrap().state, ValidatorState::Unlocked);
+
+        // Executor materializes the unlocked stake as a reward UTXO.
+        let before_count = ex.utxo_set().len();
+        ex.apply_settled_unlocks(&settled, exit_epoch + 5);
+        assert!(
+            ex.utxo_set().len() > before_count,
+            "apply_settled_unlocks must create a reward UTXO"
+        );
+
+        // Second settle in the same epoch: idempotent no-op.
+        assert!(reg.settle_unlocks(exit_epoch + 5).is_empty());
+    }
+
+    // ─── Test 4: feature gate closed ──────────────────────────────────
+
+    #[test]
+    fn phase10_stake_register_rejected_when_feature_inactive() {
+        let kp = MlDsaKeypair::generate();
+        let vid = validator_id_of(&kp);
+
+        // NO enable_on_chain_staking_for_tests — simulates production default.
+        let app_id = AppId::new(2, [0u8; 32]);
+        let mut ex =
+            crate::utxo_executor::UtxoExecutor::with_utxo_set(UtxoSet::new(1000), app_id);
+        let mut reg = StakingRegistry::new(smoke_staking_config());
+
+        let input_ref = OutputRef { tx_hash: [0xFF; 32], output_index: 0 };
+        seed_utxo(&mut ex, input_ref.clone(), 11_000);
+
+        let env = make_register_envelope(&kp, vid, (input_ref.clone(), 11_000));
+        let raw = wrap_stake_deposit(&env, &input_ref, vid);
+
+        let result = ex.execute_committed(1, &[raw], None, Some(&mut reg), 0);
+        assert_eq!(
+            result.txs_accepted, 0,
+            "feature gate must reject before the registry is touched"
+        );
+        assert_eq!(result.txs_rejected, 1);
+        assert!(
+            reg.get(&vid).is_none(),
+            "registry must be untouched when the gate rejects"
+        );
+    }
+
+    // ─── Test 5: full epoch-boundary pipeline ─────────────────────────
+    //
+    // Exercises the ordering that the narwhal commit loop (Group 2 +
+    // γ-5 + Phase 8 hot-reload) applies at an epoch boundary:
+    //   1. settle_unlocks drops an EXITING validator past unbonding
+    //   2. auto_activate_locked promotes a freshly-LOCKED validator
+    //   3. SR21 election accepts the new ACTIVE set
+    //   4. build_committee_from_sources produces the post-boundary committee
+    //
+    // The test checks membership shape — not proposer selection.
+
+    #[test]
+    fn phase10_full_epoch_boundary_pipeline() {
+        let kp_new = MlDsaKeypair::generate();
+        let vid_new = validator_id_of(&kp_new);
+
+        let mut ex = new_executor();
+        let mut reg = StakingRegistry::new(smoke_staking_config());
+
+        // --- Seed a prior validator that's about to unlock -----------
+        let kp_old = MlDsaKeypair::generate();
+        let vid_old = validator_id_of(&kp_old);
+        let old_input = OutputRef { tx_hash: [0x10; 32], output_index: 0 };
+        seed_utxo(&mut ex, old_input.clone(), 11_000);
+        ex.execute_committed(
+            1,
+            &[wrap_stake_deposit(
+                &make_register_envelope(&kp_old, vid_old, (old_input.clone(), 11_000)),
+                &old_input,
+                vid_old,
+            )],
+            None,
+            Some(&mut reg),
+            0,
+        );
+        reg.auto_activate_locked(1);
+        // Begin exit at epoch 10.
+        let exit_input = OutputRef { tx_hash: [0x11; 32], output_index: 0 };
+        seed_utxo(&mut ex, exit_input.clone(), 2_000);
+        ex.execute_committed(
+            2,
+            &[wrap_stake_withdraw(
+                &make_begin_exit_envelope(&kp_old, vid_old),
+                &exit_input,
+            )],
+            None,
+            Some(&mut reg),
+            10,
+        );
+        assert!(matches!(
+            reg.get(&vid_old).unwrap().state,
+            ValidatorState::Exiting { .. }
+        ));
+
+        // --- Register a new validator (LOCKED) -----------------------
+        let new_input = OutputRef { tx_hash: [0x20; 32], output_index: 0 };
+        seed_utxo(&mut ex, new_input.clone(), 11_000);
+        ex.execute_committed(
+            3,
+            &[wrap_stake_deposit(
+                &make_register_envelope(&kp_new, vid_new, (new_input.clone(), 11_000)),
+                &new_input,
+                vid_new,
+            )],
+            None,
+            Some(&mut reg),
+            14,
+        );
+        assert_eq!(reg.get(&vid_new).unwrap().state, ValidatorState::Locked);
+
+        // --- Epoch boundary at epoch 15 (exit_epoch=10 + unbonding=5) -
+        let epoch = 15u64;
+
+        // (a) settle_unlocks retires vid_old.
+        let settled = reg.settle_unlocks(epoch);
+        assert_eq!(settled.len(), 1);
+        assert_eq!(settled[0].0, vid_old);
+        ex.apply_settled_unlocks(&settled, epoch);
+        assert_eq!(reg.get(&vid_old).unwrap().state, ValidatorState::Unlocked);
+
+        // (b) auto_activate_locked promotes vid_new.
+        let activated = reg.auto_activate_locked(epoch);
+        assert_eq!(activated, vec![vid_new]);
+        assert_eq!(reg.get(&vid_new).unwrap().state, ValidatorState::Active);
+
+        // (c) SR21 projection + election pick up the post-boundary ACTIVE set.
+        let identities = crate::sr21_election::registry_to_validator_identities(&reg);
+        assert_eq!(
+            identities.len(),
+            1,
+            "only vid_new is ACTIVE after the boundary"
+        );
+        assert_eq!(identities[0].validator_id, vid_new);
+        let election = crate::sr21_election::run_election_with_min_stake(&identities, 0u128, epoch);
+        assert_eq!(election.num_active, 1);
+        assert_eq!(election.active_srs[0].validator_id, vid_new);
+
+        // (d) build_committee_from_sources with an empty genesis — the
+        //     committee is built solely from the dynamic-registry side.
+        //     BFT constructor requires ≥1 authority and total_stake > 0,
+        //     both satisfied here.
+        //
+        //     We cannot call build_committee_from_sources with a truly
+        //     empty GenesisCommitteeManifest (the helper requires at
+        //     least the BFT invariant to hold), so we stop after
+        //     asserting the election result. The Phase 8 tests in
+        //     genesis_committee cover the merge path itself.
+        //     This test validates the ORDERING (settle → activate →
+        //     election) and the state transitions end-to-end.
     }
 }

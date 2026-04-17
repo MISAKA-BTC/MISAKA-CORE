@@ -1011,6 +1011,7 @@ impl CoreEngine {
 
         self.epoch = new_epoch;
         self.committee = new_committee.clone();
+        self.verifier.update_committee(new_committee.clone(), new_epoch);
         // Scenario 3: fresh committer with new committee — old votes discarded
         self.leader_schedule = LeaderSchedule::new(new_committee.clone(), 1);
         self.committer = UniversalCommitter::new(

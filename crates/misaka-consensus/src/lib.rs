@@ -55,6 +55,10 @@ pub mod reward_epoch;
 // ── On-Chain Staking & Slashing ──
 pub mod staking;
 
+// ── γ-2: ValidatorStakeTx signature + state verification ──
+pub mod stake_tx_verify;
+pub use stake_tx_verify::{verify_stake_tx_signature, StakeVerifyError};
+
 // ── Validator Selection System (v9) ──
 // ADA-inspired: no slashing, saturation cap, linear credit,
 // monthly rotation with max 3 demotions, Backup free-join.

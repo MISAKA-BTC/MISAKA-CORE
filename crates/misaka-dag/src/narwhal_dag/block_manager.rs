@@ -114,6 +114,11 @@ impl BlockManager {
         }
     }
 
+    /// Hot-reload committee for dynamic validator changes.
+    pub fn update_committee(&mut self, new_committee: Committee) {
+        self.committee = new_committee;
+    }
+
     /// Process an incoming verified block.
     ///
     /// Returns the accept result and any blocks that were unsuspended.

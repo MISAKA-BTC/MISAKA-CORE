@@ -68,7 +68,7 @@ impl CommitFixture {
         let dag = self.builder.to_dag_state();
         let committer = BaseCommitter::new(self.committee.clone(), self.leader_round_wave);
 
-        let leader = self.builder.leader_of(leader_round);
+        let _leader = self.builder.leader_of(leader_round);
         let leader_ref = match self.builder.leader_block(leader_round) {
             Some(b) => b.reference(),
             None => return Decision::Skip,

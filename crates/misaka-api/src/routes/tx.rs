@@ -131,7 +131,11 @@ mod tests {
             crate::routes::faucet::FaucetConfig::default(),
             proxy.clone(),
         );
-        AppState { proxy, faucet }
+        AppState {
+            proxy,
+            faucet,
+            ws_broadcaster: crate::routes::ws::WsBroadcaster::new(),
+        }
     }
 
     async fn response_json(resp: axum::response::Response) -> serde_json::Value {

@@ -1,0 +1,437 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MISAKA Explorer</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{
+  --bg:#09090b;--bg2:#111113;--bg3:#18181b;--bg4:#1e1e22;
+  --border:rgba(255,255,255,.06);--border2:rgba(255,255,255,.1);
+  --text:#fafafa;--text2:#a1a1aa;--text3:#71717a;
+  --green:#22c55e;--green-bg:rgba(34,197,94,.1);
+  --yellow:#eab308;--yellow-bg:rgba(234,179,8,.1);
+  --red:#ef4444;--red-bg:rgba(239,68,68,.1);
+  --blue:#3b82f6;--blue-bg:rgba(59,130,246,.08);
+  --purple:#a855f7;--purple-bg:rgba(168,85,247,.12);
+  --mono:'SF Mono',SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace;
+  --sans:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',sans-serif;
+  --radius:12px;
+}
+body{background:var(--bg);color:var(--text);font-family:var(--sans);min-height:100vh;-webkit-font-smoothing:antialiased}
+
+.header{display:flex;align-items:center;justify-content:space-between;padding:16px 24px;border-bottom:1px solid var(--border);background:var(--bg2)}
+.header-left{display:flex;align-items:center;gap:12px}
+.logo{font-size:16px;font-weight:700;letter-spacing:.02em}
+.logo span{color:var(--text3);font-weight:400;font-size:13px;margin-left:6px}
+.network-badge{font-size:11px;font-weight:600;color:var(--yellow);background:var(--yellow-bg);padding:3px 8px;border-radius:6px;text-transform:uppercase;letter-spacing:.04em}
+.header-stats{display:flex;gap:20px}
+.header-stat{text-align:right}
+.header-stat .label{font-size:10px;color:var(--text3);text-transform:uppercase;letter-spacing:.06em}
+.header-stat .val{font-size:14px;font-weight:600;color:var(--text)}
+
+.search-wrap{padding:24px;max-width:800px;margin:0 auto}
+.search-bar{display:flex;gap:8px}
+.search-input{flex:1;background:var(--bg3);border:1px solid var(--border2);border-radius:10px;padding:12px 16px;font-size:14px;color:var(--text);font-family:var(--mono);outline:none;transition:border-color .15s}
+.search-input::placeholder{color:var(--text3)}
+.search-input:focus{border-color:rgba(255,255,255,.2)}
+.search-btn{background:var(--bg4);border:1px solid var(--border2);border-radius:10px;padding:0 20px;color:var(--text2);font-size:13px;font-weight:500;cursor:pointer;transition:background .15s,color .15s;white-space:nowrap}
+.search-btn:hover{background:rgba(255,255,255,.08);color:var(--text)}
+
+.main{max-width:800px;margin:0 auto;padding:0 24px 60px}
+
+.page-title{display:flex;align-items:center;gap:12px;margin-bottom:20px}
+.page-title h1{font-size:20px;font-weight:600}
+.page-title .icon{width:32px;height:32px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:16px}
+.icon-tx{background:var(--blue-bg);color:var(--blue)}
+.icon-addr{background:var(--purple-bg);color:var(--purple)}
+
+.status{display:inline-flex;align-items:center;gap:6px;font-size:13px;font-weight:600;padding:4px 12px;border-radius:100px}
+.status-confirmed{background:var(--green-bg);color:var(--green)}
+.status-pending{background:var(--yellow-bg);color:var(--yellow)}
+.status-unknown{background:rgba(255,255,255,.06);color:var(--text3)}
+.status-dot{width:6px;height:6px;border-radius:50%;background:currentColor}
+
+.badge{display:inline-flex;align-items:center;font-size:11px;font-weight:600;padding:3px 10px;border-radius:100px;text-transform:uppercase;letter-spacing:.03em}
+.badge-transfer{background:var(--blue-bg);color:var(--blue)}
+.badge-faucet{background:var(--purple-bg);color:var(--purple)}
+.badge-emission{background:var(--green-bg);color:var(--green)}
+.badge-stake{background:var(--yellow-bg);color:var(--yellow)}
+.badge-default{background:rgba(255,255,255,.06);color:var(--text3)}
+
+.card{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden;margin-bottom:16px}
+.card-header{padding:16px 20px;border-bottom:1px solid var(--border);font-size:14px;font-weight:600;color:var(--text2);display:flex;align-items:center;justify-content:space-between}
+.card-body{padding:0}
+
+.info-row{display:flex;padding:14px 20px;border-bottom:1px solid var(--border);gap:16px}
+.info-row:last-child{border-bottom:none}
+.info-label{width:160px;flex-shrink:0;font-size:13px;color:var(--text3)}
+.info-value{flex:1;font-size:13px;color:var(--text);word-break:break-all;display:flex;align-items:flex-start;gap:8px}
+.info-value.mono{font-family:var(--mono);font-size:12px;line-height:1.7}
+
+.copy-btn{flex-shrink:0;background:none;border:1px solid var(--border2);border-radius:6px;padding:4px 6px;cursor:pointer;color:var(--text3);transition:color .15s,border-color .15s;display:flex;align-items:center}
+.copy-btn:hover{color:var(--text);border-color:rgba(255,255,255,.2)}
+.copy-btn svg{width:13px;height:13px}
+.copy-btn.copied{color:var(--green);border-color:var(--green)}
+
+.io-table{width:100%;border-collapse:collapse}
+.io-table th{text-align:left;padding:10px 20px;font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.06em;border-bottom:1px solid var(--border)}
+.io-table td{padding:12px 20px;font-size:13px;border-bottom:1px solid var(--border);color:var(--text)}
+.io-table tr:last-child td{border-bottom:none}
+.io-table .mono{font-family:var(--mono);font-size:11px}
+.io-table .amount{font-weight:600;text-align:right;white-space:nowrap}
+
+.utxo-table{width:100%;border-collapse:collapse}
+.utxo-table th{text-align:left;padding:10px 20px;font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.06em;border-bottom:1px solid var(--border)}
+.utxo-table td{padding:12px 20px;font-size:13px;border-bottom:1px solid var(--border);color:var(--text)}
+.utxo-table tr:last-child td{border-bottom:none}
+.utxo-table .mono{font-family:var(--mono);font-size:11px}
+.utxo-table .amount{font-weight:600;text-align:right}
+
+.validator-chip{display:inline-flex;align-items:center;gap:4px;background:var(--bg3);border:1px solid var(--border2);border-radius:6px;padding:4px 10px;font-size:12px;font-family:var(--mono);color:var(--text2);margin:2px 4px 2px 0}
+.validator-chip.leader{border-color:var(--green);color:var(--green);background:var(--green-bg)}
+
+.balance-hero{text-align:center;padding:32px 20px}
+.balance-hero .amount{font-size:32px;font-weight:700;letter-spacing:-.02em}
+.balance-hero .sub{font-size:13px;color:var(--text3);margin-top:4px}
+
+.empty{padding:40px 20px;text-align:center;color:var(--text3);font-size:14px}
+
+a.hash-link{color:var(--blue);text-decoration:none;font-family:var(--mono);font-size:12px}
+a.hash-link:hover{text-decoration:underline}
+
+.back-link{display:inline-flex;align-items:center;gap:6px;color:var(--text3);font-size:13px;text-decoration:none;margin-top:24px;transition:color .15s}
+.back-link:hover{color:var(--text)}
+.back-link svg{width:14px;height:14px}
+
+.loading{padding:60px 20px;text-align:center;color:var(--text3);font-size:14px}
+.spinner{width:20px;height:20px;border:2px solid var(--border2);border-top-color:var(--text);border-radius:50%;animation:spin .6s linear infinite;margin:0 auto 12px}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+.tx-history-item{display:flex;align-items:center;gap:16px;padding:14px 20px;border-bottom:1px solid var(--border);cursor:pointer;transition:background .15s}
+.tx-history-item:last-child{border-bottom:none}
+.tx-history-item:hover{background:rgba(255,255,255,.03)}
+.tx-hist-icon{width:36px;height:36px;border-radius:50%;display:flex;align-items:center;justify-content:center;flex-shrink:0;font-size:16px}
+.tx-hist-icon.receive{background:var(--green-bg);color:var(--green)}
+.tx-hist-icon.send{background:var(--red-bg);color:var(--red)}
+.tx-hist-info{flex:1;min-width:0}
+.tx-hist-label{font-size:13px;font-weight:500;margin-bottom:2px}
+.tx-hist-hash{font-size:11px;color:var(--text3);font-family:var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tx-hist-right{text-align:right;flex-shrink:0}
+.tx-hist-amount{font-size:14px;font-weight:600}
+.tx-hist-amount.pos{color:var(--green)}
+.tx-hist-amount.neg{color:var(--text)}
+.tx-hist-time{font-size:11px;color:var(--text3);margin-top:2px}
+
+.collapsible-toggle{cursor:pointer;user-select:none}
+.collapsible-toggle .arrow{display:inline-block;transition:transform .2s;font-size:12px;margin-left:6px}
+.collapsible-toggle.open .arrow{transform:rotate(90deg)}
+.collapsible-content{display:none}
+.collapsible-content.open{display:block}
+
+.load-more{display:block;width:100%;padding:14px;text-align:center;background:none;border:none;border-top:1px solid var(--border);color:var(--blue);font-size:13px;font-weight:500;cursor:pointer;transition:background .15s}
+.load-more:hover{background:rgba(59,130,246,.06)}
+
+@media(max-width:600px){
+  .header{flex-direction:column;gap:12px;align-items:flex-start}
+  .header-stats{gap:16px}
+  .info-row{flex-direction:column;gap:4px}
+  .info-label{width:auto}
+  .search-bar{flex-direction:column}
+  .balance-hero .amount{font-size:26px}
+}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="header-left">
+    <div class="logo">MISAKA<span>Explorer</span></div>
+    <div class="network-badge">Testnet</div>
+  </div>
+  <div class="header-stats">
+    <div class="header-stat"><div class="label">Block Height</div><div class="val" id="h-height">—</div></div>
+    <div class="header-stat"><div class="label">Validators</div><div class="val" id="h-validators">—</div></div>
+  </div>
+</div>
+
+<div class="search-wrap">
+  <div class="search-bar">
+    <input class="search-input" id="search-input" type="text" placeholder="TX ハッシュ または misaka1... アドレスを検索">
+    <button class="search-btn" id="search-btn">検索</button>
+  </div>
+</div>
+
+<div class="main" id="main">
+  <div class="loading"><div class="spinner"></div>読み込み中…</div>
+</div>
+
+<script>
+var NODE_API = '/api';
+var copyIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>';
+var checkIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 6L9 17l-5-5"/></svg>';
+
+function $(s){return document.querySelector(s)}
+function fmt(n){return (Number(n)/1e9).toFixed(9).replace(/\.?0+$/,'')}
+function fmtDate(ms){
+  if(!ms) return '—';
+  var d=new Date(ms);
+  return d.toLocaleString('ja-JP',{year:'numeric',month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit',second:'2-digit'});
+}
+
+function copyText(text, btn){
+  navigator.clipboard.writeText(text).catch(function(){
+    var ta=document.createElement('textarea');ta.value=text;ta.style.position='fixed';ta.style.opacity='0';
+    document.body.appendChild(ta);ta.select();document.execCommand('copy');document.body.removeChild(ta);
+  });
+  if(btn){btn.innerHTML=checkIcon;btn.classList.add('copied');setTimeout(function(){btn.innerHTML=copyIcon;btn.classList.remove('copied')},1500)}
+}
+
+function row(label, value, opts){
+  opts = opts || {};
+  var cls = opts.mono ? ' mono' : '';
+  var copyHtml = opts.copy ? '<button class="copy-btn" onclick="copyText(\''+value.replace(/'/g,"\\'")+'\',this)">'+copyIcon+'</button>' : '';
+  var valHtml = opts.html || escHtml(value);
+  return '<div class="info-row"><div class="info-label">'+escHtml(label)+'</div><div class="info-value'+cls+'"><span>'+valHtml+'</span>'+copyHtml+'</div></div>';
+}
+
+function escHtml(s){var d=document.createElement('div');d.textContent=s;return d.innerHTML}
+
+function statusBadge(s){
+  var labels={confirmed:'Confirmed',pending:'Pending',unknown:'Unknown'};
+  return '<span class="status status-'+s+'"><span class="status-dot"></span>'+(labels[s]||s)+'</span>';
+}
+
+function txTypeBadge(t){
+  if(!t) return '';
+  var map={
+    'TransparentTransfer':['Transfer','badge-transfer'],
+    'Faucet':['Faucet','badge-faucet'],
+    'SystemEmission':['Block Reward','badge-emission'],
+    'StakeDeposit':['Stake','badge-stake'],
+    'StakeWithdraw':['Unstake','badge-stake'],
+    'SlashEvidence':['Slash','badge-default']
+  };
+  var m=map[t]||[t,'badge-default'];
+  return '<span class="badge '+m[1]+'">'+m[0]+'</span>';
+}
+
+function hashLink(hash, type){
+  var href = type==='addr' ? '/tx.html?addr='+hash : '/tx.html?tx='+hash;
+  var display = hash.length > 20 ? hash.slice(0,10)+'…'+hash.slice(-6) : hash;
+  return '<a class="hash-link" href="'+href+'">'+display+'</a>';
+}
+
+function addrLink(addr){
+  var display = addr.length > 24 ? addr.slice(0,14)+'…'+addr.slice(-6) : addr;
+  return '<a class="hash-link" href="/tx.html?addr='+encodeURIComponent(addr)+'">'+display+'</a>';
+}
+
+function loadChainInfo(){
+  fetch('/v1/chain/info').then(function(r){return r.json()}).then(function(d){
+    if(d.blockHeight) $('#h-height').textContent = Number(d.blockHeight).toLocaleString();
+    if(d.validatorCount) $('#h-validators').textContent = d.validatorCount;
+  }).catch(function(){});
+}
+
+function showTx(hash){
+  document.title = 'TX '+hash.slice(0,12)+'… — MISAKA Explorer';
+  var main = $('#main');
+  main.innerHTML = '<div class="loading"><div class="spinner"></div>トランザクションを取得中…</div>';
+
+  fetch(NODE_API+'/get_tx_status', {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({txHash:hash})
+  }).then(function(r){return r.json()}).then(function(d){
+    var status = d.status || 'unknown';
+    var html = '';
+
+    html += '<div class="page-title"><div class="icon icon-tx"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M7 17l9.2-9.2M17 17V7H7"/></svg></div><h1>Transaction Details</h1></div>';
+
+    // Overview card
+    html += '<div class="card"><div class="card-header">Overview</div><div class="card-body">';
+    html += row('TX Hash', hash, {mono:true, copy:true});
+    html += row('Status', '', {html: statusBadge(status)});
+    if(d.txType) html += row('Type', '', {html: txTypeBadge(d.txType)});
+    if(d.blockHeight != null) html += row('Block Height', Number(d.blockHeight).toLocaleString());
+    html += row('Timestamp', fmtDate(d.timestampMs));
+    if(d.fee != null) html += row('Fee', fmt(d.fee)+' MSK');
+    if(d.memo) html += row('Memo', d.memo);
+    html += '</div></div>';
+
+    // Outputs card (transfers)
+    var outputs = d.outputs || [];
+    if(outputs.length > 0){
+      var totalOut = outputs.reduce(function(s,o){return s+o.amount},0);
+      html += '<div class="card"><div class="card-header">Outputs<span style="font-size:12px;color:var(--text3);font-weight:400">'+fmt(totalOut)+' MSK total</span></div><div class="card-body">';
+      html += '<table class="io-table"><thead><tr><th>#</th><th>Recipient</th><th style="text-align:right">Amount</th></tr></thead><tbody>';
+      outputs.forEach(function(o,i){
+        html += '<tr><td class="mono" style="color:var(--text3)">'+i+'</td><td>'+addrLink(o.address)+'</td><td class="amount">'+fmt(o.amount)+' MSK</td></tr>';
+      });
+      html += '</tbody></table>';
+      html += '</div></div>';
+    }
+
+    // Inputs card
+    var inputs = d.inputs || [];
+    if(inputs.length > 0){
+      html += '<div class="card"><div class="card-header">Inputs ('+inputs.length+')</div><div class="card-body">';
+      html += '<table class="io-table"><thead><tr><th>#</th><th>UTXO Reference</th></tr></thead><tbody>';
+      inputs.forEach(function(inp,i){
+        var refs = inp.utxo_refs || inp.utxoRefs || [];
+        refs.forEach(function(ref){
+          var parts = ref.split(':');
+          var txLink = parts.length===2 ? hashLink(parts[0],'tx')+':'+parts[1] : escHtml(ref);
+          html += '<tr><td class="mono" style="color:var(--text3)">'+i+'</td><td class="mono">'+txLink+'</td></tr>';
+        });
+      });
+      html += '</tbody></table>';
+      html += '</div></div>';
+    }
+
+    // Consensus card
+    if(d.leaderAuthority != null || (d.participatingValidators && d.participatingValidators.length)){
+      html += '<div class="card"><div class="card-header">Consensus</div><div class="card-body">';
+      if(d.leaderAuthority != null){
+        html += row('Leader', '', {html:'<span class="validator-chip leader">★ Validator #'+d.leaderAuthority+'</span>'});
+      }
+      if(d.participatingValidators && d.participatingValidators.length){
+        var chips = d.participatingValidators.map(function(v){
+          var isLeader = v === d.leaderAuthority;
+          return '<span class="validator-chip'+(isLeader?' leader':'')+'">'+
+            (isLeader?'★ ':'')+
+            'Validator #'+v+'</span>';
+        }).join('');
+        html += row('Participants', '', {html:'<div style="display:flex;flex-wrap:wrap;gap:0">'+chips+'</div>'});
+      }
+      html += '</div></div>';
+    }
+
+    // Raw Data (collapsible)
+    html += '<div class="card"><div class="card-header collapsible-toggle" onclick="toggleCollapse(this)">Raw Data<span class="arrow">▶</span></div><div class="card-body collapsible-content">';
+    html += '<div class="info-row"><div class="info-value mono" style="white-space:pre-wrap;color:var(--text3)">'+escHtml(JSON.stringify(d, null, 2))+'</div></div>';
+    html += '</div></div>';
+
+    html += '<a class="back-link" href="/" onclick="history.back();return false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>ウォレットに戻る</a>';
+
+    main.innerHTML = html;
+  }).catch(function(e){
+    main.innerHTML = '<div class="empty">トランザクションの取得に失敗しました</div><a class="back-link" href="/" onclick="history.back();return false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>戻る</a>';
+  });
+}
+
+function toggleCollapse(el){
+  el.classList.toggle('open');
+  var content = el.nextElementSibling;
+  content.classList.toggle('open');
+}
+
+function showAddr(addr){
+  document.title = addr.slice(0,16)+'… — MISAKA Explorer';
+  var main = $('#main');
+  main.innerHTML = '<div class="loading"><div class="spinner"></div>アドレス情報を取得中…</div>';
+
+  Promise.all([
+    fetch('/v1/wallet/'+encodeURIComponent(addr)).then(function(r){return r.json()}),
+    fetch(NODE_API+'/get_address_history', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({address:addr,page:1,pageSize:50})
+    }).then(function(r){return r.json()}).catch(function(){return {transactions:[],total:0}})
+  ]).then(function(results){
+    var d = results[0];
+    var hist = results[1];
+    if(d.error) throw new Error(d.error);
+
+    var html = '';
+    html += '<div class="page-title"><div class="icon icon-addr"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 10h18"/></svg></div><h1>Account</h1></div>';
+
+    html += '<div class="card"><div class="card-body">';
+    html += '<div class="balance-hero"><div class="amount">'+fmt(d.balance || 0)+' MSK</div><div class="sub">'+Number(d.balance || 0).toLocaleString()+' base units</div></div>';
+    html += '</div></div>';
+
+    html += '<div class="card"><div class="card-header">Overview</div><div class="card-body">';
+    html += row('Address', addr, {mono:true, copy:true});
+    html += row('Balance', fmt(d.balance || 0)+' MSK');
+    html += row('UTXO Count', String(d.utxoCount || 0));
+    html += '</div></div>';
+
+    // Transaction History
+    var txs = hist.transactions || [];
+    html += '<div class="card"><div class="card-header">Transaction History ('+hist.total+')</div><div class="card-body" id="tx-history-body">';
+    if(txs.length === 0){
+      html += '<div class="empty">取引履歴なし</div>';
+    } else {
+      txs.forEach(function(tx){
+        var isReceive = tx.direction === 'receive';
+        var iconCls = isReceive ? 'receive' : 'send';
+        var amtCls = isReceive ? 'pos' : 'neg';
+        var amtPrefix = isReceive ? '+' : '-';
+        var label = tx.txType || 'Transfer';
+        if(label === 'TransparentTransfer') label = 'Transfer';
+        if(label === 'SystemEmission') label = 'Block Reward';
+        html += '<div class="tx-history-item" onclick="location.href=\'/tx.html?tx='+tx.txHash+'\'">';
+        html += '<div class="tx-hist-icon '+iconCls+'">'+(isReceive?'↓':'↑')+'</div>';
+        html += '<div class="tx-hist-info"><div class="tx-hist-label">'+escHtml(label)+'</div><div class="tx-hist-hash">'+tx.txHash+'</div></div>';
+        html += '<div class="tx-hist-right"><div class="tx-hist-amount '+amtCls+'">'+amtPrefix+fmt(tx.amount)+' MSK</div><div class="tx-hist-time">'+fmtDate(tx.timestampMs)+'</div></div>';
+        html += '</div>';
+      });
+    }
+    html += '</div></div>';
+
+    // UTXOs
+    var utxos = d.utxos || [];
+    html += '<div class="card"><div class="card-header collapsible-toggle" onclick="toggleCollapse(this)">UTXOs ('+utxos.length+')<span class="arrow">▶</span></div><div class="card-body collapsible-content">';
+    if(utxos.length === 0){
+      html += '<div class="empty">UTXOなし</div>';
+    } else {
+      html += '<table class="utxo-table"><thead><tr><th>TX Hash</th><th>Index</th><th>Block</th><th style="text-align:right">Amount</th></tr></thead><tbody>';
+      utxos.forEach(function(u){
+        var txLink = '<a class="hash-link" href="/tx.html?tx='+u.txHash+'">'+(u.txHash||'').slice(0,10)+'…</a>';
+        html += '<tr><td>'+txLink+'</td><td class="mono">'+u.outputIndex+'</td><td>'+Number(u.createdAt||0).toLocaleString()+'</td><td class="amount">'+fmt(u.amount)+' MSK</td></tr>';
+      });
+      html += '</tbody></table>';
+    }
+    html += '</div></div>';
+
+    html += '<a class="back-link" href="/" onclick="history.back();return false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>ウォレットに戻る</a>';
+
+    main.innerHTML = html;
+  }).catch(function(e){
+    main.innerHTML = '<div class="empty">アドレス情報の取得に失敗しました</div><a class="back-link" href="/" onclick="history.back();return false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>戻る</a>';
+  });
+}
+
+function doSearch(q){
+  q = (q||'').trim();
+  if(!q) return;
+  if(q.startsWith('misaka1') || q.startsWith('misakatest1') || q.startsWith('msk1')){
+    location.href = '/tx.html?addr='+encodeURIComponent(q);
+  } else {
+    location.href = '/tx.html?tx='+encodeURIComponent(q);
+  }
+}
+
+$('#search-btn').addEventListener('click', function(){doSearch($('#search-input').value)});
+$('#search-input').addEventListener('keydown', function(e){if(e.key==='Enter')doSearch(this.value)});
+
+loadChainInfo();
+
+var params = new URLSearchParams(location.search);
+var txHash = params.get('tx');
+var addrQ = params.get('addr');
+
+if(txHash){
+  $('#search-input').value = txHash;
+  showTx(txHash);
+} else if(addrQ){
+  $('#search-input').value = addrQ;
+  showAddr(addrQ);
+} else {
+  $('#main').innerHTML = '<div class="empty" style="padding:80px 20px"><div style="font-size:15px;color:var(--text);margin-bottom:8px">MISAKA Testnet Explorer</div><div>TX ハッシュまたはアドレスを検索してください</div></div>';
+}
+</script>
+</body>
+</html>

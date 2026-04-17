@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 misaka-types = { path = "../misaka-types" }
 misaka-crypto = { path = "../misaka-crypto" }
+misaka-consensus = { path = "../misaka-consensus" }
 misaka-storage = { path = "../misaka-storage" }
 borsh = { workspace = true }
 hex = { workspace = true }

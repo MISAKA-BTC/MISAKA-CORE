@@ -233,9 +233,17 @@ impl UtxoSet {
     }
 
     /// Get the spending public key for a UTXO.
-    /// Returns None if the UTXO doesn't exist or has no registered key.
+    /// Falls back to the output's embedded spending_pubkey if the key
+    /// was not explicitly registered (recovery for pre-fix faucet UTXOs).
     pub fn get_spending_key(&self, outref: &OutputRef) -> Option<&[u8]> {
-        self.spending_pubkeys.get(outref).map(|v| v.as_slice())
+        self.spending_pubkeys
+            .get(outref)
+            .map(|v| v.as_slice())
+            .or_else(|| {
+                self.unspent
+                    .get(outref)
+                    .and_then(|e| e.output.spending_pubkey.as_deref())
+            })
     }
 
     /// Get all registered spending keys (for anonymity set construction).
@@ -563,7 +571,11 @@ impl UtxoSet {
                 outref: outref.clone(),
                 output: entry.output.clone(),
                 created_at: entry.created_at,
-                spending_pubkey: self.spending_pubkeys.get(outref).cloned(),
+                spending_pubkey: self
+                    .spending_pubkeys
+                    .get(outref)
+                    .cloned()
+                    .or_else(|| entry.output.spending_pubkey.clone()),
                 is_emission: entry.is_emission,
             })
             .collect();

@@ -29,7 +29,7 @@
     └── seed-pubkeys.txt            # seed の ML-DSA-65 公開鍵 (PK-pinning 必須)
 ```
 
-**v0.5.7+ から `bundled-validator.key` は配布されません**。起動時に ephemeral な `validator.key` が `misaka-data/` に自動生成され、ノードは observer mode で動作します (運営の authority からブロックを受信・検証するだけで、提案はしない)。
+**v0.8.x 配布では `bundled-validator.key` は含まれません**。起動時に ephemeral な `validator.key` が `misaka-data/` に自動生成され、ノードは observer mode で動作します (運営の authority からブロックを受信・検証するだけで、提案はしない)。
 
 ## 起動フロー
 
@@ -50,7 +50,7 @@ curl http://127.0.0.1:3001/api/health
 curl http://127.0.0.1:3001/api/get_chain_info
 # => {"chain":"MISAKA Network","chainId":2,
 #     "consensus":"Mysticeti-equivalent",
-#     "version":"0.5.13","topology":"joined","nodeMode":"public",
+#     "version":"0.8.6","topology":"joined","nodeMode":"public",
 #     "role":"observer","peerCount":1,
 #     "status":{"current_round":N,"highest_accepted_round":N,...}}
 ```
@@ -74,7 +74,7 @@ curl http://127.0.0.1:3001/api/get_chain_info
 | macOS Gatekeeper | `start-public-node.command` を右クリック → 「開く」 |
 | Windows SmartScreen | 「詳細情報」→「実行」 |
 | Linux: 権限エラー | `chmod +x start-public-node.sh misaka-node` |
-| `insufficient ancestors` / `peer_sig_verify_failed` ログ | v0.5.8 未満を使っている証拠です。v0.5.13 以降へアップグレードしてください |
+| `insufficient ancestors` / `peer_sig_verify_failed` ログ | 古いノードバイナリの可能性があります。[最新 Release](https://github.com/sasakiyuuu/misaka-test-net/releases/latest) の v0.8.x へアップグレードしてください |
 | launcher が `seeds.txt / seed-pubkeys.txt mismatch` で停止 | stock package の config が壊れています。2 つのファイルを同じ件数に揃えて再試行 |
 | `seeds.txt と seed-pubkeys.txt が空` で停止 | stock package の config が欠落しています。public observer package は official/public seed への join 専用で、solo self-host mode には入りません |
 | `validator.key が genesis validator と一致` で停止 | operator/shared validator key を public package に混ぜています。`misaka-data/validator.key` を削除して observer key を再生成してください |
