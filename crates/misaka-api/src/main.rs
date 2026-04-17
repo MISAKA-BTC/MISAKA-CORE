@@ -216,13 +216,18 @@ async fn main() -> Result<()> {
         .merge(routes::explorer::router())
         .merge(routes::faucet::router())
         .merge(routes::ws::router())
-        .route("/api/chain-icon.svg", axum::routing::get(|| async {
-            axum::response::Response::builder()
-                .header("content-type", "image/svg+xml")
-                .header("cache-control", "public, max-age=86400")
-                .body(axum::body::Body::from(include_str!("../../../assets/misaka-icon.svg")))
-                .expect("static SVG response")
-        }))
+        .route(
+            "/api/chain-icon.svg",
+            axum::routing::get(|| async {
+                axum::response::Response::builder()
+                    .header("content-type", "image/svg+xml")
+                    .header("cache-control", "public, max-age=86400")
+                    .body(axum::body::Body::from(include_str!(
+                        "../../../assets/misaka-icon.svg"
+                    )))
+                    .expect("static SVG response")
+            }),
+        )
         .merge(docs_routes)
         .with_state(state)
         // FIX-F: Rate limiting middleware CONNECTED to all routes

@@ -256,7 +256,14 @@ impl FaucetState {
         };
 
         tokio::spawn(async move {
-            faucet_worker(queue_rx, worker_proxy, worker_depth, drip_amount, worker_rate_limiter).await;
+            faucet_worker(
+                queue_rx,
+                worker_proxy,
+                worker_depth,
+                drip_amount,
+                worker_rate_limiter,
+            )
+            .await;
         });
 
         state
@@ -273,7 +280,13 @@ async fn faucet_worker(
 ) {
     let mut items_since_cleanup: u64 = 0;
     while let Some(item) = rx.recv().await {
-        let result = process_drip(&proxy, &item.address, drip_amount, item.spending_pubkey.as_deref()).await;
+        let result = process_drip(
+            &proxy,
+            &item.address,
+            drip_amount,
+            item.spending_pubkey.as_deref(),
+        )
+        .await;
         {
             let mut d = depth.lock().await;
             *d = d.saturating_sub(1);
@@ -306,7 +319,8 @@ async fn process_drip(
 
     match proxy.post("/api/faucet", &body).await {
         Ok(resp) => {
-            let success = resp["success"].as_bool()
+            let success = resp["success"]
+                .as_bool()
                 .or_else(|| resp["accepted"].as_bool())
                 .unwrap_or(false);
             if success {

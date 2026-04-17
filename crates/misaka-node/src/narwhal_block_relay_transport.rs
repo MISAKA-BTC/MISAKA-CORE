@@ -725,7 +725,11 @@ pub fn spawn_narwhal_block_relay_transport_with_updates(
         for peer in config
             .peers
             .iter()
-            .filter(|peer| peer.force_dial || config.observer_self || peer.authority_index > config.authority_index)
+            .filter(|peer| {
+                peer.force_dial
+                    || config.observer_self
+                    || peer.authority_index > config.authority_index
+            })
             .cloned()
         {
             let registry = registry.clone();
@@ -912,7 +916,8 @@ pub fn spawn_narwhal_block_relay_transport_with_updates(
                         let peer_id = derive_peer_id(&hs.peer_pk, config.chain_id);
                         let (peer_tx, peer_rx) = mpsc::channel(PEER_OUTBOUND_CAPACITY);
 
-                        let known_peer = peer_by_pk.read().await.get(&hs.peer_pk.to_bytes()).cloned();
+                        let known_peer =
+                            peer_by_pk.read().await.get(&hs.peer_pk.to_bytes()).cloned();
                         let (peer_for_session, registry_handle) = match known_peer {
                             Some(peer) => {
                                 registry.write().await.insert(peer.authority_index, peer_tx);

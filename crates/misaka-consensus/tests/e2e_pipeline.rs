@@ -86,7 +86,7 @@ fn test_e2e_genesis_to_two_blocks_current_pipeline() {
             target_time_per_block_ms: 100,
             max_block_level: 32,
             skip_proposer_validation: true, // E2E pipeline test (GhostDAG layer)
-            chain_id: 0, // test chain
+            chain_id: 0,                    // test chain
         },
         db.clone(),
         ghostdag_store.clone(),

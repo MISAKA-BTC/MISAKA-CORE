@@ -187,7 +187,8 @@ impl CommitSyncer {
             if !self.requested.contains(&idx) {
                 tracing::warn!(
                     "commit_syncer: peer {} sent unrequested commit index {} — dropped",
-                    peer, idx
+                    peer,
+                    idx
                 );
                 continue;
             }
@@ -196,7 +197,8 @@ impl CommitSyncer {
             if fetched.commit.blocks.is_empty() {
                 tracing::warn!(
                     "commit_syncer: peer {} sent commit {} with no block refs — dropped",
-                    peer, idx
+                    peer,
+                    idx
                 );
                 continue;
             }
@@ -205,7 +207,8 @@ impl CommitSyncer {
             if fetched.commit.leader.round == 0 {
                 tracing::warn!(
                     "commit_syncer: peer {} sent commit {} with leader round 0 — dropped",
-                    peer, idx
+                    peer,
+                    idx
                 );
                 continue;
             }

@@ -288,7 +288,10 @@ impl NarwhalMempoolIngress {
                     fallback_pk = tx.extra.clone();
                     &fallback_pk[..]
                 }
-                None => return Err(format!("spending key not found for input {} in UTXO set and not provided in tx.extra", i)),
+                None => return Err(format!(
+                    "spending key not found for input {} in UTXO set and not provided in tx.extra",
+                    i
+                )),
             };
 
             let pk = MlDsaPublicKey::from_bytes(pk_bytes)
@@ -413,7 +416,10 @@ pub fn spawn_propose_loop(
                 }
             }
 
-            if config.backpressure.load(std::sync::atomic::Ordering::Relaxed) {
+            if config
+                .backpressure
+                .load(std::sync::atomic::Ordering::Relaxed)
+            {
                 tracing::debug!("Propose loop: commit backpressure detected, throttling 500ms");
                 tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
                 continue;
@@ -597,13 +603,8 @@ mod tests {
         // γ-3.1: stake_config is not exercised by this test (tx_type=TransparentTransfer)
         // but the constructor now requires it; pass testnet() for fixture.
         let stake_config = std::sync::Arc::new(misaka_consensus::staking::StakingConfig::testnet());
-        let ingress = NarwhalMempoolIngress::new(
-            16,
-            utxo_set,
-            relay_tx,
-            test_app_id.clone(),
-            stake_config,
-        );
+        let ingress =
+            NarwhalMempoolIngress::new(16, utxo_set, relay_tx, test_app_id.clone(), stake_config);
         let tx = signed_sample_tx(&kp, outref, &test_app_id, [0xAB; 32]);
         let response = ingress
             .submit_tx(&serde_json::to_vec(&tx).expect("serialize tx"))

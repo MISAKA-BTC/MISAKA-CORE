@@ -632,8 +632,7 @@ impl ConsensusNetworkClient {
             read_message(&mut stream),
         )
         .await
-        .map_err(|_| ProtocolError::Timeout)?
-        ?;
+        .map_err(|_| ProtocolError::Timeout)??;
         let resp: BlockResponse = serde_json::from_slice(&resp_msg.payload)
             .map_err(|e| ProtocolError::Serde(e.to_string()))?;
         Ok(resp)
@@ -659,8 +658,7 @@ impl ConsensusNetworkClient {
             read_message(&mut stream),
         )
         .await
-        .map_err(|_| ProtocolError::Timeout)?
-        ?;
+        .map_err(|_| ProtocolError::Timeout)??;
         let resp: CommitResponse = serde_json::from_slice(&resp_msg.payload)
             .map_err(|e| ProtocolError::Serde(e.to_string()))?;
         Ok(resp)
@@ -709,8 +707,7 @@ impl ConsensusNetworkClient {
             read_message(&mut stream),
         )
         .await
-        .map_err(|_| ProtocolError::Timeout)?
-        ?;
+        .map_err(|_| ProtocolError::Timeout)??;
         if resp.msg_type != MessageType::Pong {
             return Err(ProtocolError::Serde("expected pong".into()));
         }

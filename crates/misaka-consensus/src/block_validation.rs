@@ -364,11 +364,12 @@ fn validate_and_apply_block_inner(
                         index: tx_idx,
                         reason: e.to_string(),
                     })?;
-                crate::stake_tx_verify::verify_stake_tx_signature(&stake_tx, registry)
-                    .map_err(|e| BlockError::StakeTxVerifyFailed {
+                crate::stake_tx_verify::verify_stake_tx_signature(&stake_tx, registry).map_err(
+                    |e| BlockError::StakeTxVerifyFailed {
                         index: tx_idx,
                         reason: e.to_string(),
-                    })?;
+                    },
+                )?;
             }
         }
 

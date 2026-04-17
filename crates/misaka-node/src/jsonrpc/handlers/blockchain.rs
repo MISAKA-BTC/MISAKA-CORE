@@ -195,7 +195,12 @@ pub async fn uptime(_rpc: &DagRpcState) -> HandlerResult {
 pub async fn get_connection_count(rpc: &DagRpcState) -> HandlerResult {
     let count = if let Some(ref obs) = rpc.dag_p2p_observation {
         let state = obs.read().await;
-        state.by_surface.values().map(|c| c.inbound + c.outbound_unicast).sum::<u64>().min(1)
+        state
+            .by_surface
+            .values()
+            .map(|c| c.inbound + c.outbound_unicast)
+            .sum::<u64>()
+            .min(1)
             * if state.total_messages > 0 { 1 } else { 0 }
     } else {
         0
@@ -207,14 +212,18 @@ pub async fn get_connection_count(rpc: &DagRpcState) -> HandlerResult {
 pub async fn get_peer_info(rpc: &DagRpcState) -> HandlerResult {
     if let Some(ref obs) = rpc.dag_p2p_observation {
         let state = obs.read().await;
-        let peers: Vec<Value> = state.by_surface.iter().map(|(surface, counts)| {
-            json!({
-                "surface": format!("{:?}", surface),
-                "inbound": counts.inbound,
-                "outbound_unicast": counts.outbound_unicast,
-                "outbound_broadcast": counts.outbound_broadcast,
+        let peers: Vec<Value> = state
+            .by_surface
+            .iter()
+            .map(|(surface, counts)| {
+                json!({
+                    "surface": format!("{:?}", surface),
+                    "inbound": counts.inbound,
+                    "outbound_unicast": counts.outbound_unicast,
+                    "outbound_broadcast": counts.outbound_broadcast,
+                })
             })
-        }).collect();
+            .collect();
         Ok(Value::Array(peers))
     } else {
         Ok(Value::Array(vec![]))

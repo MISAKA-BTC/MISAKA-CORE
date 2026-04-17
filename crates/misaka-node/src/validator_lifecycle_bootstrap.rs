@@ -86,54 +86,54 @@ pub async fn bootstrap_validator_lifecycle(
     let store = Arc::new(ValidatorLifecycleStore::new(snapshot_path.clone()));
     let store = validator_lifecycle_persistence::install_global_store(store);
 
-    let (mut restored_registry, restored_epoch, restored_epoch_progress) =
-        match store.load().await {
-            Ok(Some(mut snapshot)) => {
-                info!(
-                    "{}: restored validator lifecycle snapshot | epoch={} | validators={} | file={}",
-                    log_prefix,
-                    snapshot.current_epoch,
-                    snapshot.registry.all_validators().count(),
-                    snapshot_path.display(),
-                );
-                // γ-3: bind the deserialized registry to the caller's
-                // canonical `Arc<StakingConfig>` so every downstream consumer
-                // (executor, api state, mempool) sees the same instance.
-                snapshot.registry.rewire_config_arc(staking_config.clone());
-                (
-                    snapshot.registry,
-                    snapshot.current_epoch,
-                    snapshot.epoch_progress,
-                )
+    let (mut restored_registry, restored_epoch, restored_epoch_progress) = match store.load().await
+    {
+        Ok(Some(mut snapshot)) => {
+            info!(
+                "{}: restored validator lifecycle snapshot | epoch={} | validators={} | file={}",
+                log_prefix,
+                snapshot.current_epoch,
+                snapshot.registry.all_validators().count(),
+                snapshot_path.display(),
+            );
+            // γ-3: bind the deserialized registry to the caller's
+            // canonical `Arc<StakingConfig>` so every downstream consumer
+            // (executor, api state, mempool) sees the same instance.
+            snapshot.registry.rewire_config_arc(staking_config.clone());
+            (
+                snapshot.registry,
+                snapshot.current_epoch,
+                snapshot.epoch_progress,
+            )
+        }
+        Ok(None) => {
+            info!(
+                "{}: validator lifecycle initialized fresh | file={}",
+                log_prefix,
+                snapshot_path.display(),
+            );
+            let registry = StakingRegistry::new_with_config_arc(staking_config.clone());
+            let epoch = 0u64;
+            let progress = ValidatorEpochProgress::default();
+            if seed_on_fresh {
+                seed_empty_snapshot(&store, log_prefix, &registry, epoch, &progress).await;
             }
-            Ok(None) => {
-                info!(
-                    "{}: validator lifecycle initialized fresh | file={}",
-                    log_prefix,
-                    snapshot_path.display(),
-                );
-                let registry = StakingRegistry::new_with_config_arc(staking_config.clone());
-                let epoch = 0u64;
-                let progress = ValidatorEpochProgress::default();
-                if seed_on_fresh {
-                    seed_empty_snapshot(&store, log_prefix, &registry, epoch, &progress).await;
-                }
-                (registry, epoch, progress)
+            (registry, epoch, progress)
+        }
+        Err(e) => {
+            warn!(
+                "{}: failed to load validator lifecycle snapshot ({}); starting fresh",
+                log_prefix, e,
+            );
+            let registry = StakingRegistry::new_with_config_arc(staking_config.clone());
+            let epoch = 0u64;
+            let progress = ValidatorEpochProgress::default();
+            if seed_on_fresh {
+                seed_empty_snapshot(&store, log_prefix, &registry, epoch, &progress).await;
             }
-            Err(e) => {
-                warn!(
-                    "{}: failed to load validator lifecycle snapshot ({}); starting fresh",
-                    log_prefix, e,
-                );
-                let registry = StakingRegistry::new_with_config_arc(staking_config.clone());
-                let epoch = 0u64;
-                let progress = ValidatorEpochProgress::default();
-                if seed_on_fresh {
-                    seed_empty_snapshot(&store, log_prefix, &registry, epoch, &progress).await;
-                }
-                (registry, epoch, progress)
-            }
-        };
+            (registry, epoch, progress)
+        }
+    };
 
     // β-1 migration hook (previously lived inline at both call sites, on
     // diverging lines — narwhal:1315-1325, dag:5658-5669). Unified here so

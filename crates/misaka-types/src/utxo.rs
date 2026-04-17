@@ -604,7 +604,8 @@ mod tests {
     fn validate_structure_stake_deposit_register_ok() {
         let extra = make_register_envelope_extra();
         let tx = make_stake_tx(TxType::StakeDeposit, extra);
-        tx.validate_structure().expect("valid stake deposit register");
+        tx.validate_structure()
+            .expect("valid stake deposit register");
     }
 
     #[test]

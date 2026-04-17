@@ -723,7 +723,10 @@ mod tests {
         assert_eq!(path_to_tier("/v1/faucet"), RateTier::General);
         assert_eq!(path_to_tier("/api/submit_tx"), RateTier::Sensitive);
         assert_eq!(path_to_tier("/api/register_validator"), RateTier::Sensitive);
-        assert_eq!(path_to_tier("/api/deregister_validator"), RateTier::Sensitive);
+        assert_eq!(
+            path_to_tier("/api/deregister_validator"),
+            RateTier::Sensitive
+        );
         assert_eq!(path_to_tier("/api/get_committee"), RateTier::General);
         assert_eq!(path_to_tier("/health"), RateTier::General);
     }

@@ -81,9 +81,9 @@ pub mod safe_mode;
 // REMOVED: privacy modules deprecated
 pub mod solana_stake_verify;
 pub mod sr21_election;
+pub mod staking_config_builder;
 #[cfg(test)]
 pub(crate) mod test_env;
-pub mod staking_config_builder;
 pub mod validator_api;
 pub mod validator_lifecycle_bootstrap;
 pub mod validator_lifecycle_persistence;
@@ -433,87 +433,87 @@ async fn main() -> anyhow::Result<()> {
     // CLI-override logic is unchanged; only the block braces moved.
     let config_source: &str;
 
-    let loaded_config: Option<misaka_config::NodeConfig> = if let Some(ref config_path) = cli.config {
-            config_source = "file";
-            Some(
-                misaka_config::load_config(std::path::Path::new(config_path)).map_err(|e| {
-                    anyhow::anyhow!("failed to load config '{}': {}", config_path, e)
-                })?,
-            )
-        } else if cli.chain_id == 1 {
-            // Auto-detect mainnet config if --chain-id 1 and no --config given
-            let default_path = std::path::Path::new("configs/mainnet.toml");
-            if default_path.exists() {
-                // Warn — mainnet.toml found but not explicitly specified.
-                // Use eprintln here because tracing isn't initialized yet.
-                eprintln!(
-                    "WARNING: Loading configs/mainnet.toml automatically (chain_id=1). \
+    let loaded_config: Option<misaka_config::NodeConfig> = if let Some(ref config_path) = cli.config
+    {
+        config_source = "file";
+        Some(
+            misaka_config::load_config(std::path::Path::new(config_path))
+                .map_err(|e| anyhow::anyhow!("failed to load config '{}': {}", config_path, e))?,
+        )
+    } else if cli.chain_id == 1 {
+        // Auto-detect mainnet config if --chain-id 1 and no --config given
+        let default_path = std::path::Path::new("configs/mainnet.toml");
+        if default_path.exists() {
+            // Warn — mainnet.toml found but not explicitly specified.
+            // Use eprintln here because tracing isn't initialized yet.
+            eprintln!(
+                "WARNING: Loading configs/mainnet.toml automatically (chain_id=1). \
                      Pass --config configs/mainnet.toml explicitly to suppress this warning."
-                );
-                config_source = "file(auto)";
-                match misaka_config::load_config(default_path) {
-                    Ok(cfg) => Some(cfg),
-                    Err(e) => {
-                        // Phase 1: mainnet config parse failure is FATAL.
-                        // Do NOT fall back to CLI defaults on chain_id=1 —
-                        // this would skip weak_subjectivity checkpoint validation.
-                        eprintln!("FATAL: failed to parse configs/mainnet.toml: {}", e);
-                        eprintln!("Mainnet MUST have a valid configuration file.");
-                        std::process::exit(1);
-                    }
+            );
+            config_source = "file(auto)";
+            match misaka_config::load_config(default_path) {
+                Ok(cfg) => Some(cfg),
+                Err(e) => {
+                    // Phase 1: mainnet config parse failure is FATAL.
+                    // Do NOT fall back to CLI defaults on chain_id=1 —
+                    // this would skip weak_subjectivity checkpoint validation.
+                    eprintln!("FATAL: failed to parse configs/mainnet.toml: {}", e);
+                    eprintln!("Mainnet MUST have a valid configuration file.");
+                    std::process::exit(1);
                 }
-            } else {
-                // Phase 1: mainnet without config file is FATAL.
-                eprintln!(
+            }
+        } else {
+            // Phase 1: mainnet without config file is FATAL.
+            eprintln!(
                     "FATAL: chain_id=1 (mainnet) but configs/mainnet.toml not found. \
                      Mainnet MUST have a valid configuration file with weak_subjectivity checkpoint."
                 );
-                std::process::exit(1);
-            }
-        } else {
-            config_source = "defaults+CLI";
-            None
-        };
+            std::process::exit(1);
+        }
+    } else {
+        config_source = "defaults+CLI";
+        None
+    };
 
-        if let Some(ref cfg) = loaded_config {
-            // Apply config file values as defaults — only override CLI fields
-            // that still hold the clap-default value.
-            //
-            // Clap defaults (must match the #[arg(default_value = ...)] above):
-            //   chain_id=2, rpc_port=3001, p2p_port=6690, data_dir="./data", log_level="info"
+    if let Some(ref cfg) = loaded_config {
+        // Apply config file values as defaults — only override CLI fields
+        // that still hold the clap-default value.
+        //
+        // Clap defaults (must match the #[arg(default_value = ...)] above):
+        //   chain_id=2, rpc_port=3001, p2p_port=6690, data_dir="./data", log_level="info"
 
-            if cli.chain_id == 2 {
-                cli.chain_id = cfg.chain_id;
-            }
-            if cli.rpc_port == 3001 {
-                if let Some(ref rpc_bind) = cfg.rpc_bind {
-                    // Extract port from "0.0.0.0:PORT" format
-                    if let Some(port_str) = rpc_bind.rsplit(':').next() {
-                        if let Ok(port) = port_str.parse::<u16>() {
-                            cli.rpc_port = port;
-                        }
+        if cli.chain_id == 2 {
+            cli.chain_id = cfg.chain_id;
+        }
+        if cli.rpc_port == 3001 {
+            if let Some(ref rpc_bind) = cfg.rpc_bind {
+                // Extract port from "0.0.0.0:PORT" format
+                if let Some(port_str) = rpc_bind.rsplit(':').next() {
+                    if let Ok(port) = port_str.parse::<u16>() {
+                        cli.rpc_port = port;
                     }
                 }
             }
-            if cli.p2p_port == 6690 {
-                cli.p2p_port = cfg.listen_port;
-            }
-            if cli.data_dir == "./data" {
-                cli.data_dir = cfg.data_dir.clone();
-            }
-            if cli.log_level == "info" {
-                cli.log_level = cfg.log_level.clone();
-            }
-            if cli.peers.is_empty() {
-                if let Some(ref peers_str) = cfg.peers {
-                    cli.peers = peers_str
-                        .split(',')
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty())
-                        .collect();
-                }
+        }
+        if cli.p2p_port == 6690 {
+            cli.p2p_port = cfg.listen_port;
+        }
+        if cli.data_dir == "./data" {
+            cli.data_dir = cfg.data_dir.clone();
+        }
+        if cli.log_level == "info" {
+            cli.log_level = cfg.log_level.clone();
+        }
+        if cli.peers.is_empty() {
+            if let Some(ref peers_str) = cfg.peers {
+                cli.peers = peers_str
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
             }
         }
+    }
 
     // Startup banner (printed to stderr so it appears before tracing init)
     eprintln!(
@@ -1160,11 +1160,9 @@ fn spawn_verify_stake_background(
         let epoch = *current_epoch.read().await;
         {
             let mut reg = registry.write().await;
-            if let Err(e) = reg.mark_stake_verified(
-                &validator_id,
-                signature.clone(),
-                Some(verified.amount),
-            ) {
+            if let Err(e) =
+                reg.mark_stake_verified(&validator_id, signature.clone(), Some(verified.amount))
+            {
                 tracing::warn!(
                     "verify_stake_background[{}]: mark_stake_verified failed: {}",
                     id_short,
@@ -1337,16 +1335,15 @@ async fn start_narwhal_node(
         staking_config.max_active_validators,
         if loaded_config.is_some() { "provided" } else { "none" },
     );
-    let lifecycle_bootstrap =
-        crate::validator_lifecycle_bootstrap::bootstrap_validator_lifecycle(
-            data_dir,
-            cli.chain_id,
-            staking_config.clone(),
-            &genesis_path,
-            "narwhal",
-            /* seed_on_fresh = */ false,
-        )
-        .await?;
+    let lifecycle_bootstrap = crate::validator_lifecycle_bootstrap::bootstrap_validator_lifecycle(
+        data_dir,
+        cli.chain_id,
+        staking_config.clone(),
+        &genesis_path,
+        "narwhal",
+        /* seed_on_fresh = */ false,
+    )
+    .await?;
     // narwhal path does not yet wire the store handle downstream (the
     // persist-on-shutdown path lives in `start_dag_node`); hold a binding
     // anyway so `install_global_store` stays referenced and the store
@@ -1357,8 +1354,7 @@ async fn start_narwhal_node(
     // mempool admission pipeline can filter stake txs against the same
     // StakingConfig the executor and registry see.
     let staking_config_arc = lifecycle_bootstrap.staking_config;
-    let current_epoch: Arc<RwLock<u64>> =
-        Arc::new(RwLock::new(lifecycle_bootstrap.current_epoch));
+    let current_epoch: Arc<RwLock<u64>> = Arc::new(RwLock::new(lifecycle_bootstrap.current_epoch));
     let _validator_epoch_progress = lifecycle_bootstrap.epoch_progress; // reserved for future β/γ wiring
 
     // 0.9.0 β-2: use `load()` (TOML only) + `build_committee_from_sources`.
@@ -1457,8 +1453,7 @@ async fn start_narwhal_node(
     // startup and skip the propose loop — invisible SR. `validator_id`
     // in the registry is the canonical SHA3-256(ML-DSA-65 pubkey), which
     // is bit-equivalent to `ValidatorIdentity::fingerprint()`.
-    let in_static_committee =
-        manifest.contains(authority_index, identity.public_key());
+    let in_static_committee = manifest.contains(authority_index, identity.public_key());
     let in_dynamic_committee = {
         let reg = validator_registry.read().await;
         is_dynamic_active_validator(&reg, &identity.fingerprint())
@@ -1512,9 +1507,9 @@ async fn start_narwhal_node(
         let registry_guard = validator_registry.read().await;
         crate::genesis_committee::build_committee_from_sources(&manifest, &registry_guard)?
     };
-    let committee_shared: std::sync::Arc<tokio::sync::RwLock<
-        misaka_dag::narwhal_types::committee::Committee,
-    >> = std::sync::Arc::new(tokio::sync::RwLock::new(committee.clone()));
+    let committee_shared: std::sync::Arc<
+        tokio::sync::RwLock<misaka_dag::narwhal_types::committee::Committee>,
+    > = std::sync::Arc::new(tokio::sync::RwLock::new(committee.clone()));
     info!("startup[2/6]: parsing validator keys...");
     let relay_public_key = identity.validator_public_key()?;
     let relay_secret_key = Arc::new(identity.validator_secret_key()?);
@@ -1585,9 +1580,12 @@ async fn start_narwhal_node(
         }
     }
 
-    info!("startup[4/6]: opening RocksDB at {}...", store_path.display());
+    info!(
+        "startup[4/6]: opening RocksDB at {}...",
+        store_path.display()
+    );
     let rocks_store = std::sync::Arc::new(
-        misaka_dag::narwhal_dag::rocksdb_store::RocksDbConsensusStore::open(&store_path)?
+        misaka_dag::narwhal_dag::rocksdb_store::RocksDbConsensusStore::open(&store_path)?,
     );
     let tx_index_store = rocks_store.clone();
     let tx_index_store_rpc = rocks_store.clone();
@@ -1785,7 +1783,8 @@ async fn start_narwhal_node(
     let block_cache: Arc<RwLock<BTreeMap<BlockRef, NarwhalBlock>>> =
         Arc::new(RwLock::new(BTreeMap::new()));
     let connected_peers: Arc<RwLock<BTreeSet<u32>>> = Arc::new(RwLock::new(BTreeSet::new()));
-    let observer_count: Arc<std::sync::atomic::AtomicU32> = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let observer_count: Arc<std::sync::atomic::AtomicU32> =
+        Arc::new(std::sync::atomic::AtomicU32::new(0));
     #[derive(Clone, serde::Serialize)]
     struct ObserverInfo {
         peer_id: String,
@@ -1845,8 +1844,9 @@ async fn start_narwhal_node(
 
     // Shared UtxoSet snapshot for RPC queries and mempool admission.
     // Both RPC and mempool share the same Arc to avoid duplicating ~600MB.
-    let shared_utxo_set: Arc<tokio::sync::RwLock<misaka_storage::utxo_set::UtxoSet>> =
-        Arc::new(tokio::sync::RwLock::new(misaka_storage::utxo_set::UtxoSet::new(36)));
+    let shared_utxo_set: Arc<tokio::sync::RwLock<misaka_storage::utxo_set::UtxoSet>> = Arc::new(
+        tokio::sync::RwLock::new(misaka_storage::utxo_set::UtxoSet::new(36)),
+    );
     let utxo_set_writer = shared_utxo_set.clone();
     let utxo_set_rpc = shared_utxo_set.clone();
 
@@ -1882,7 +1882,9 @@ async fn start_narwhal_node(
         fees: u64,
     }
     let recent_blocks: Arc<tokio::sync::RwLock<std::collections::VecDeque<BlockSummary>>> =
-        Arc::new(tokio::sync::RwLock::new(std::collections::VecDeque::with_capacity(64)));
+        Arc::new(tokio::sync::RwLock::new(
+            std::collections::VecDeque::with_capacity(64),
+        ));
     let recent_blocks_writer = recent_blocks.clone();
     let recent_blocks_rpc = recent_blocks.clone();
 
@@ -1925,8 +1927,9 @@ async fn start_narwhal_node(
     }
 
     // In-memory cache (bounded) + RocksDB for persistence
-    let committed_txs: Arc<tokio::sync::RwLock<std::collections::HashMap<[u8; 32], CommittedTxDetail>>> =
-        Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
+    let committed_txs: Arc<
+        tokio::sync::RwLock<std::collections::HashMap<[u8; 32], CommittedTxDetail>>,
+    > = Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
     let committed_txs_writer = committed_txs.clone();
     let committed_txs_rpc = committed_txs.clone();
 
@@ -3138,21 +3141,22 @@ async fn start_narwhal_node(
     // Track start time for uptime metric
     let start_time = std::time::Instant::now();
 
-    let shutdown_utxo_snapshot_path = std::path::Path::new(&cli.data_dir)
-        .join("narwhal_utxo_snapshot.json");
+    let shutdown_utxo_snapshot_path =
+        std::path::Path::new(&cli.data_dir).join("narwhal_utxo_snapshot.json");
 
     // Graceful shutdown: handle SIGINT + SIGTERM
     let shutdown_msg_tx = msg_tx.clone();
     let shutdown_handle = tokio::spawn(async move {
         #[cfg(unix)]
         {
-            let sigterm_result = tokio::signal::unix::signal(
-                tokio::signal::unix::SignalKind::terminate(),
-            );
+            let sigterm_result =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate());
             let mut sigterm = match sigterm_result {
                 Ok(s) => s,
                 Err(e) => {
-                    tracing::warn!("Failed to register SIGTERM handler: {e}; falling back to SIGINT only");
+                    tracing::warn!(
+                        "Failed to register SIGTERM handler: {e}; falling back to SIGINT only"
+                    );
                     tokio::signal::ctrl_c().await.ok();
                     let _ = shutdown_msg_tx.try_send(ConsensusMessage::Shutdown);
                     return;
@@ -5452,16 +5456,15 @@ async fn start_dag_node(
         staking_config.max_active_validators,
         if loaded_config.is_some() { "provided" } else { "none" },
     );
-    let lifecycle_bootstrap =
-        crate::validator_lifecycle_bootstrap::bootstrap_validator_lifecycle(
-            std::path::Path::new(&cli.data_dir),
-            cli.chain_id,
-            staking_config.clone(),
-            &genesis_path,
-            "Layer 6",
-            /* seed_on_fresh = */ true,
-        )
-        .await?;
+    let lifecycle_bootstrap = crate::validator_lifecycle_bootstrap::bootstrap_validator_lifecycle(
+        std::path::Path::new(&cli.data_dir),
+        cli.chain_id,
+        staking_config.clone(),
+        &genesis_path,
+        "Layer 6",
+        /* seed_on_fresh = */ true,
+    )
+    .await?;
     let validator_lifecycle_store = lifecycle_bootstrap.store;
     let validator_registry = lifecycle_bootstrap.registry;
     // γ-3.1: dag path uses misaka_dag::DagMempool (different mempool type
@@ -6166,7 +6169,10 @@ async fn start_dag_node(
             // to avoid holding write lock across external network calls.
             let (already_registered, min_validator_stake) = {
                 let registry = validator_registry.read().await;
-                (registry.get(&validator_id).is_some(), registry.config().min_validator_stake)
+                (
+                    registry.get(&validator_id).is_some(),
+                    registry.config().min_validator_stake,
+                )
             };
             let epoch = *current_epoch.read().await;
 
@@ -6239,11 +6245,7 @@ async fn start_dag_node(
                                     // 旧実装は verified=true を返しており、RPC タイムアウトや
                                     // 不正な signature でもバリデータが ACTIVE になれた。
                                     // 修正: 検証失敗時は LOCKED 状態で留まり、activate() を拒否する。
-                                    (
-                                        min_validator_stake,
-                                        false,
-                                        Some(sig.clone()),
-                                    )
+                                    (min_validator_stake, false, Some(sig.clone()))
                                 }
                             }
                         } else {
@@ -6263,11 +6265,7 @@ async fn start_dag_node(
                                  cannot verify stake. Set env var and restart."
                                 );
                             }
-                            (
-                                min_validator_stake,
-                                false,
-                                Some(sig.clone()),
-                            )
+                            (min_validator_stake, false, Some(sig.clone()))
                         }
                     } else {
                         // No signature provided — unverified
@@ -6280,26 +6278,25 @@ async fn start_dag_node(
                     if registry.get(&validator_id).is_some() {
                         drop(registry);
                     } else {
-
-                    match registry.register(
-                        validator_id,
-                        pubkey_bytes,
-                        stake_amount,
-                        500, // 5% default commission
-                        reward_address,
-                        epoch,
-                        [0u8; 32], // stake_tx_hash placeholder
-                        0,
-                        stake_verified,
-                        stake_sig.clone(),
-                        // 0.9.0: bootstrap path is the Solana/off-chain variant.
-                        // l1_stake_verified is written only by `utxo_executor`
-                        // when a L1 StakeDeposit tx is finalized (γ-3).
-                        false,
-                    ) {
-                        Ok(()) => {
-                            if stake_verified {
-                                info!(
+                        match registry.register(
+                            validator_id,
+                            pubkey_bytes,
+                            stake_amount,
+                            500, // 5% default commission
+                            reward_address,
+                            epoch,
+                            [0u8; 32], // stake_tx_hash placeholder
+                            0,
+                            stake_verified,
+                            stake_sig.clone(),
+                            // 0.9.0: bootstrap path is the Solana/off-chain variant.
+                            // l1_stake_verified is written only by `utxo_executor`
+                            // when a L1 StakeDeposit tx is finalized (γ-3).
+                            false,
+                        ) {
+                            Ok(()) => {
+                                if stake_verified {
+                                    info!(
                                     "SEC-STAKE: Local validator {} registered with verified stake \
                                  (amount={}, sig={}...)",
                                     hex::encode(validator_id),
@@ -6310,49 +6307,49 @@ async fn start_dag_node(
                                         .unwrap_or("?"),
                                 );
 
-                                // SEC-FIX [v9.1]: Solana 検証済みの実際の預入額を
-                                // ValidatorIdentity.stake_weight に反映する。
-                                //
-                                // 旧実装: stake_weight は keystore ファイルから読み込んだ値のまま
-                                // (デフォルト 1_000_000) で、Solana 上の実際の預入額と無関係だった。
-                                // つまり VRF 提案者選出も BFT クォーラムも全バリデータ等重みで
-                                // 動作しており、10M 預けても 100M 預けても同じ影響力だった。
-                                //
-                                // 修正: Solana 検証成功時に verified.amount を stake_weight に設定。
-                                // これにより VRF 選出確率とコンセンサス重みが預入枚数に比例する。
-                                {
-                                    let mut guard = shared_state.write().await;
-                                    if let Some(ref mut lv) = guard.local_validator {
-                                        let old_weight = lv.identity.stake_weight;
-                                        lv.identity.stake_weight = stake_amount as u128;
-                                        info!(
+                                    // SEC-FIX [v9.1]: Solana 検証済みの実際の預入額を
+                                    // ValidatorIdentity.stake_weight に反映する。
+                                    //
+                                    // 旧実装: stake_weight は keystore ファイルから読み込んだ値のまま
+                                    // (デフォルト 1_000_000) で、Solana 上の実際の預入額と無関係だった。
+                                    // つまり VRF 提案者選出も BFT クォーラムも全バリデータ等重みで
+                                    // 動作しており、10M 預けても 100M 預けても同じ影響力だった。
+                                    //
+                                    // 修正: Solana 検証成功時に verified.amount を stake_weight に設定。
+                                    // これにより VRF 選出確率とコンセンサス重みが預入枚数に比例する。
+                                    {
+                                        let mut guard = shared_state.write().await;
+                                        if let Some(ref mut lv) = guard.local_validator {
+                                            let old_weight = lv.identity.stake_weight;
+                                            lv.identity.stake_weight = stake_amount as u128;
+                                            info!(
                                             "SEC-STAKE: Updated local validator stake_weight: {} → {} \
                                          (consensus weight now reflects Solana deposit)",
                                             old_weight, lv.identity.stake_weight,
                                         );
+                                        }
+                                        // known_validators 内の自分のエントリも更新
+                                        if let Some(kv) = guard
+                                            .known_validators
+                                            .iter_mut()
+                                            .find(|v| v.validator_id == validator_id)
+                                        {
+                                            kv.stake_weight = stake_amount as u128;
+                                        }
                                     }
-                                    // known_validators 内の自分のエントリも更新
-                                    if let Some(kv) = guard
-                                        .known_validators
-                                        .iter_mut()
-                                        .find(|v| v.validator_id == validator_id)
-                                    {
-                                        kv.stake_weight = stake_amount as u128;
-                                    }
-                                }
-                            } else {
-                                warn!(
+                                } else {
+                                    warn!(
                                     "SEC-STAKE: Local validator {} registered WITHOUT stake proof. \
                                  Cannot activate until you stake at misakastake.com and restart \
                                  with --stake-signature <SOLANA_TX_SIG>",
                                     hex::encode(validator_id),
                                 );
+                                }
+                            }
+                            Err(e) => {
+                                warn!("SEC-STAKE: Failed to auto-register local validator: {}", e);
                             }
                         }
-                        Err(e) => {
-                            warn!("SEC-STAKE: Failed to auto-register local validator: {}", e);
-                        }
-                    }
                     } // end re-check else
                     drop(registry);
                 } // end if let Some(lv)
@@ -7910,7 +7907,7 @@ mod tests {
             0,
             fp,
             0,
-            true,  // solana_stake_verified — satisfies activate() OR-gate
+            true, // solana_stake_verified — satisfies activate() OR-gate
             Some("sig".into()),
             false,
         )
@@ -7952,8 +7949,17 @@ mod tests {
         // Bring the validator to Active.
         #[allow(deprecated)]
         reg.register(
-            fp, vec![0xCD; 1952], 20_000_000, 500, fp, 0, fp, 0, true,
-            Some("sig".into()), false,
+            fp,
+            vec![0xCD; 1952],
+            20_000_000,
+            500,
+            fp,
+            0,
+            fp,
+            0,
+            true,
+            Some("sig".into()),
+            false,
         )
         .expect("register");
         reg.update_score(&fp, 5000);
@@ -8030,8 +8036,7 @@ mod tests {
         assert_eq!(reg.get(&id).unwrap().uptime_bps, 0, "uptime set to 0");
 
         let stake_before = reg.get(&id).unwrap().stake_amount;
-        let (slashed, _reporter) =
-            reg.slash(&id, SlashSeverity::Minor, 2).expect("slash");
+        let (slashed, _reporter) = reg.slash(&id, SlashSeverity::Minor, 2).expect("slash");
         let stake_after = reg.get(&id).unwrap().stake_amount;
 
         // 1% of 20_000_000 = 200_000 base units.
@@ -8079,7 +8084,11 @@ mod tests {
             epoch_block_count += 1;
         }
         assert_eq!(propose_count.get(&v1).copied(), Some(5));
-        assert_eq!(propose_count.get(&v2).copied(), None, "epoch 1 tally was cleared");
+        assert_eq!(
+            propose_count.get(&v2).copied(),
+            None,
+            "epoch 1 tally was cleared"
+        );
         assert_eq!(epoch_block_count, 5);
 
         // v2 was not heard in epoch 2 → zero_uptime candidate.
@@ -8113,7 +8122,9 @@ mod phase10_smoke {
     use misaka_pqc::pq_sign::{ml_dsa_sign_raw, MlDsaKeypair};
     use misaka_storage::utxo_set::UtxoSet;
     use misaka_types::intent::AppId;
-    use misaka_types::utxo::{OutputRef, TxInput, TxOutput, TxType, UtxoTransaction, UTXO_TX_VERSION};
+    use misaka_types::utxo::{
+        OutputRef, TxInput, TxOutput, TxType, UtxoTransaction, UTXO_TX_VERSION,
+    };
     use misaka_types::validator_stake_tx::{
         RegisterParams, StakeInput, StakeMoreParams, StakeTxKind, StakeTxParams, ValidatorStakeTx,
     };
@@ -8301,7 +8312,10 @@ mod phase10_smoke {
         let mut ex = new_executor();
         let mut reg = StakingRegistry::new(smoke_staking_config());
 
-        let input_ref = OutputRef { tx_hash: [0xFF; 32], output_index: 0 };
+        let input_ref = OutputRef {
+            tx_hash: [0xFF; 32],
+            output_index: 0,
+        };
         seed_utxo(&mut ex, input_ref.clone(), 11_000);
 
         let env = make_register_envelope(&kp, vid, (input_ref.clone(), 11_000));
@@ -8333,11 +8347,19 @@ mod phase10_smoke {
         let mut reg = StakingRegistry::new(smoke_staking_config());
 
         // Register first.
-        let reg_input = OutputRef { tx_hash: [0xFF; 32], output_index: 0 };
+        let reg_input = OutputRef {
+            tx_hash: [0xFF; 32],
+            output_index: 0,
+        };
         seed_utxo(&mut ex, reg_input.clone(), 11_000);
         let reg_env = make_register_envelope(&kp, vid, (reg_input.clone(), 11_000));
-        let r1 =
-            ex.execute_committed(1, &[wrap_stake_deposit(&reg_env, &reg_input, vid)], None, Some(&mut reg), 0);
+        let r1 = ex.execute_committed(
+            1,
+            &[wrap_stake_deposit(&reg_env, &reg_input, vid)],
+            None,
+            Some(&mut reg),
+            0,
+        );
         assert_eq!(r1.txs_accepted, 1);
         let stake_before = reg.get(&vid).unwrap().stake_amount;
 
@@ -8347,10 +8369,12 @@ mod phase10_smoke {
 
         // StakeMore. Use a fresh input ref so it does not collide with the
         // already-consumed Register input.
-        let more_input = OutputRef { tx_hash: [0xEE; 32], output_index: 0 };
+        let more_input = OutputRef {
+            tx_hash: [0xEE; 32],
+            output_index: 0,
+        };
         seed_utxo(&mut ex, more_input.clone(), 6_000);
-        let more_env =
-            make_stake_more_envelope(&kp, vid, (more_input.clone(), 6_000), 5_000);
+        let more_env = make_stake_more_envelope(&kp, vid, (more_input.clone(), 6_000), 5_000);
         let r2 = ex.execute_committed(
             2,
             &[wrap_stake_deposit(&more_env, &more_input, vid)],
@@ -8378,15 +8402,27 @@ mod phase10_smoke {
         let mut reg = StakingRegistry::new(smoke_staking_config());
 
         // Register + activate so we can BeginExit.
-        let reg_input = OutputRef { tx_hash: [0xFF; 32], output_index: 0 };
+        let reg_input = OutputRef {
+            tx_hash: [0xFF; 32],
+            output_index: 0,
+        };
         seed_utxo(&mut ex, reg_input.clone(), 11_000);
         let reg_env = make_register_envelope(&kp, vid, (reg_input.clone(), 11_000));
-        ex.execute_committed(1, &[wrap_stake_deposit(&reg_env, &reg_input, vid)], None, Some(&mut reg), 0);
+        ex.execute_committed(
+            1,
+            &[wrap_stake_deposit(&reg_env, &reg_input, vid)],
+            None,
+            Some(&mut reg),
+            0,
+        );
         reg.auto_activate_locked(1);
         assert_eq!(reg.get(&vid).unwrap().state, ValidatorState::Active);
 
         // BeginExit.
-        let exit_input = OutputRef { tx_hash: [0xCD; 32], output_index: 0 };
+        let exit_input = OutputRef {
+            tx_hash: [0xCD; 32],
+            output_index: 0,
+        };
         seed_utxo(&mut ex, exit_input.clone(), 2_000);
         let exit_env = make_begin_exit_envelope(&kp, vid);
         let raw = wrap_stake_withdraw(&exit_env, &exit_input);
@@ -8429,11 +8465,13 @@ mod phase10_smoke {
 
         // NO enable_on_chain_staking_for_tests — simulates production default.
         let app_id = AppId::new(2, [0u8; 32]);
-        let mut ex =
-            crate::utxo_executor::UtxoExecutor::with_utxo_set(UtxoSet::new(1000), app_id);
+        let mut ex = crate::utxo_executor::UtxoExecutor::with_utxo_set(UtxoSet::new(1000), app_id);
         let mut reg = StakingRegistry::new(smoke_staking_config());
 
-        let input_ref = OutputRef { tx_hash: [0xFF; 32], output_index: 0 };
+        let input_ref = OutputRef {
+            tx_hash: [0xFF; 32],
+            output_index: 0,
+        };
         seed_utxo(&mut ex, input_ref.clone(), 11_000);
 
         let env = make_register_envelope(&kp, vid, (input_ref.clone(), 11_000));
@@ -8473,7 +8511,10 @@ mod phase10_smoke {
         // --- Seed a prior validator that's about to unlock -----------
         let kp_old = MlDsaKeypair::generate();
         let vid_old = validator_id_of(&kp_old);
-        let old_input = OutputRef { tx_hash: [0x10; 32], output_index: 0 };
+        let old_input = OutputRef {
+            tx_hash: [0x10; 32],
+            output_index: 0,
+        };
         seed_utxo(&mut ex, old_input.clone(), 11_000);
         ex.execute_committed(
             1,
@@ -8488,7 +8529,10 @@ mod phase10_smoke {
         );
         reg.auto_activate_locked(1);
         // Begin exit at epoch 10.
-        let exit_input = OutputRef { tx_hash: [0x11; 32], output_index: 0 };
+        let exit_input = OutputRef {
+            tx_hash: [0x11; 32],
+            output_index: 0,
+        };
         seed_utxo(&mut ex, exit_input.clone(), 2_000);
         ex.execute_committed(
             2,
@@ -8506,7 +8550,10 @@ mod phase10_smoke {
         ));
 
         // --- Register a new validator (LOCKED) -----------------------
-        let new_input = OutputRef { tx_hash: [0x20; 32], output_index: 0 };
+        let new_input = OutputRef {
+            tx_hash: [0x20; 32],
+            output_index: 0,
+        };
         seed_utxo(&mut ex, new_input.clone(), 11_000);
         ex.execute_committed(
             3,

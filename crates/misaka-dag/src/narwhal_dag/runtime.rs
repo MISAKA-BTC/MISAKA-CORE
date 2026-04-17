@@ -713,7 +713,14 @@ pub fn spawn_consensus_runtime_with_dispatcher(
     // Wrap msg_tx in a typed dispatcher
     let dispatcher = super::core_thread::CoreThreadDispatcher::from_consensus_channel(msg_tx);
 
-    (dispatcher, commit_rx, block_rx, metrics, backpressure, handle)
+    (
+        dispatcher,
+        commit_rx,
+        block_rx,
+        metrics,
+        backpressure,
+        handle,
+    )
 }
 
 #[cfg(test)]

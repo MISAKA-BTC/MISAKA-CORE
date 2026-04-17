@@ -110,7 +110,8 @@ impl MethodRateLimiter {
 
         // SEC-FIX N-M2: Reject if map is at capacity (prevents OOM from rotating client IDs)
         if !counters.contains_key(&key) && counters.len() >= MAX_RATE_LIMITER_ENTRIES {
-            self.rejections.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.rejections
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             return false;
         }
 
@@ -118,11 +119,13 @@ impl MethodRateLimiter {
         timestamps.retain(|&t| t > cutoff);
 
         if timestamps.len() >= max_count as usize {
-            self.rejections.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.rejections
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             false
         } else {
             timestamps.push(now);
-            self.accepts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.accepts
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             true
         }
     }

@@ -170,8 +170,7 @@ pub fn parse_v088_snapshot(raw: &[u8]) -> Result<(u64, Vec<InitialUtxoEntry>)> {
 /// point.
 pub fn run(input: &str, output: &str) -> Result<()> {
     println!("📥 Reading v0.8.8 snapshot: {}", input);
-    let raw = fs::read(input)
-        .with_context(|| format!("failed to read input {}", input))?;
+    let raw = fs::read(input).with_context(|| format!("failed to read input {}", input))?;
     println!("   File size: {} bytes", raw.len());
 
     let (height, utxos) = parse_v088_snapshot(&raw)?;
@@ -188,7 +187,10 @@ pub fn run(input: &str, output: &str) -> Result<()> {
     println!("   Unique addresses:      {}", unique_addrs.len());
     println!("   With spending_pubkey:  {}/{}", with_spk, utxos.len());
     println!("   Total amount:          {} base units", total_amount);
-    println!("   Total amount:          {:.6} MISAKA", total_amount as f64 / 1e9);
+    println!(
+        "   Total amount:          {:.6} MISAKA",
+        total_amount as f64 / 1e9
+    );
 
     let source_name = Path::new(input)
         .file_name()
@@ -202,10 +204,9 @@ pub fn run(input: &str, output: &str) -> Result<()> {
         total_amount,
         utxos,
     };
-    let json = serde_json::to_string_pretty(&out_file)
-        .context("failed to serialize output JSON")?;
-    fs::write(output, &json)
-        .with_context(|| format!("failed to write output {}", output))?;
+    let json =
+        serde_json::to_string_pretty(&out_file).context("failed to serialize output JSON")?;
+    fs::write(output, &json).with_context(|| format!("failed to write output {}", output))?;
 
     println!();
     println!("✅ Wrote {} ({} bytes)", output, json.len());
@@ -263,7 +264,10 @@ mod tests {
         assert_eq!(utxos.len(), 1);
         assert_eq!(utxos[0].address, hex::encode(&addr));
         assert_eq!(utxos[0].amount, 123_456_000);
-        assert_eq!(utxos[0].spending_pubkey.as_deref(), Some(hex::encode(&pk).as_str()));
+        assert_eq!(
+            utxos[0].spending_pubkey.as_deref(),
+            Some(hex::encode(&pk).as_str())
+        );
         assert_eq!(utxos[0].label, "migrated_0");
     }
 

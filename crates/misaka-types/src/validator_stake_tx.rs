@@ -328,8 +328,8 @@ impl ValidatorStakeTx {
     /// 全長が `MAX_STAKE_TX_EXTRA_SIZE` を超える場合は
     /// `EnvelopeTooLarge` を返す。
     pub fn encode_for_extra(&self) -> Result<Vec<u8>, StakeTxError> {
-        let body = borsh::to_vec(self)
-            .map_err(|e| StakeTxError::EnvelopeEncodeFailed(e.to_string()))?;
+        let body =
+            borsh::to_vec(self).map_err(|e| StakeTxError::EnvelopeEncodeFailed(e.to_string()))?;
         let total = STAKE_ENVELOPE_MAGIC.len() + body.len();
         if total > MAX_STAKE_TX_EXTRA_SIZE {
             return Err(StakeTxError::EnvelopeTooLarge {

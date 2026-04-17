@@ -230,24 +230,20 @@ mod tests {
         sign_and_wrap(tx, kp)
     }
 
-    fn preregister(
-        registry: &mut StakingRegistry,
-        kp: &MlDsaKeypair,
-        validator_id: [u8; 32],
-    ) {
+    fn preregister(registry: &mut StakingRegistry, kp: &MlDsaKeypair, validator_id: [u8; 32]) {
         registry
             .register(
                 validator_id,
                 kp.public_key.as_bytes().to_vec(),
-                10_000,   // stake_amount (≥ min 1_000)
-                500,      // commission_bps
+                10_000, // stake_amount (≥ min 1_000)
+                500,    // commission_bps
                 [9u8; 32],
-                0,        // current_epoch
+                0, // current_epoch
                 [0xEEu8; 32],
                 0,
-                true,     // solana_stake_verified — activate() gates on this
+                true, // solana_stake_verified — activate() gates on this
                 None,
-                true,     // l1_stake_verified — γ-3 writes true after stake deposit
+                true, // l1_stake_verified — γ-3 writes true after stake deposit
             )
             .expect("register");
     }
@@ -422,7 +418,10 @@ mod tests {
             Err(StakeVerifyError::InvalidStateForBeginExit { state }) => {
                 assert_eq!(state, "EXITING");
             }
-            other => panic!("expected InvalidStateForBeginExit(EXITING), got {:?}", other),
+            other => panic!(
+                "expected InvalidStateForBeginExit(EXITING), got {:?}",
+                other
+            ),
         }
     }
 }

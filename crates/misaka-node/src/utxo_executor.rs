@@ -14,8 +14,8 @@
 
 use borsh::BorshDeserialize;
 use misaka_consensus::protocol_upgrade::is_feature_active;
-use misaka_consensus::staking::StakingRegistry;
 use misaka_consensus::stake_tx_verify::verify_stake_tx_signature;
+use misaka_consensus::staking::StakingRegistry;
 use misaka_pqc::pq_sign::ml_dsa_verify_raw;
 use misaka_storage::utxo_set::{BlockDelta, UtxoSet};
 use misaka_types::intent::{AppId, IntentMessage, IntentScope};
@@ -485,10 +485,8 @@ impl UtxoExecutor {
                 ) {
                     Ok(()) => {
                         if let Some(endpoint) = params.p2p_endpoint.clone() {
-                            let _ = registry.set_network_address(
-                                &stake_tx.validator_id,
-                                Some(endpoint),
-                            );
+                            let _ = registry
+                                .set_network_address(&stake_tx.validator_id, Some(endpoint));
                         }
                         // Record the locked receipt marker (outputs[0]).
                         let outref = OutputRef {
@@ -719,8 +717,7 @@ impl UtxoExecutor {
         savepoint: StakeTxDeltaSavepoint,
     ) {
         // 1. Remove change outputs added by this tx.
-        let created_to_undo: Vec<OutputRef> =
-            delta.created[savepoint.created_len..].to_vec();
+        let created_to_undo: Vec<OutputRef> = delta.created[savepoint.created_len..].to_vec();
         for outref in &created_to_undo {
             utxo_set.remove_output(outref);
         }
@@ -743,8 +740,7 @@ impl UtxoExecutor {
                 Ok(()) => {
                     // Re-register the spending_pubkey if the original had one.
                     if let Some(ref spk) = output.spending_pubkey {
-                        let _ = utxo_set
-                            .register_spending_key(outref.clone(), spk.clone());
+                        let _ = utxo_set.register_spending_key(outref.clone(), spk.clone());
                     }
                 }
                 Err(e) => {
@@ -852,10 +848,13 @@ impl UtxoExecutor {
                     fallback_pk = tx.extra.clone();
                     &fallback_pk[..]
                 }
-                None => return Err(TxExecutionError::SignatureInvalid {
-                    input_index: i,
-                    reason: "spending key not found in UTXO set and not provided in tx.extra".into(),
-                }),
+                None => {
+                    return Err(TxExecutionError::SignatureInvalid {
+                        input_index: i,
+                        reason: "spending key not found in UTXO set and not provided in tx.extra"
+                            .into(),
+                    })
+                }
             };
 
             // §4.2 step 5b: P2PKH pubkey match
@@ -872,7 +871,8 @@ impl UtxoExecutor {
                 }
 
                 // §4.4: 300-block maturity for emission outputs
-                if utxo_entry.is_emission && self.height < utxo_entry.created_at.saturating_add(EMISSION_MATURITY)
+                if utxo_entry.is_emission
+                    && self.height < utxo_entry.created_at.saturating_add(EMISSION_MATURITY)
                 {
                     return Err(TxExecutionError::EmissionNotMature {
                         created_at: utxo_entry.created_at,
@@ -1045,7 +1045,9 @@ impl UtxoExecutor {
                     ))
                 })?;
             if let Some(ref spk) = output.spending_pubkey {
-                let _ = self.utxo_set.register_spending_key(outref.clone(), spk.clone());
+                let _ = self
+                    .utxo_set
+                    .register_spending_key(outref.clone(), spk.clone());
             }
             delta.created.push(outref);
         }
@@ -1100,13 +1102,12 @@ impl UtxoExecutor {
             self.utxo_set
                 .add_output(outref.clone(), output.clone(), self.height, false)
                 .map_err(|e| {
-                    TxExecutionError::StructuralInvalid(format!(
-                        "Faucet output add failed: {}",
-                        e
-                    ))
+                    TxExecutionError::StructuralInvalid(format!("Faucet output add failed: {}", e))
                 })?;
             if let Some(ref spk) = output.spending_pubkey {
-                let _ = self.utxo_set.register_spending_key(outref.clone(), spk.clone());
+                let _ = self
+                    .utxo_set
+                    .register_spending_key(outref.clone(), spk.clone());
             }
             delta.created.push(outref);
         }
@@ -1260,11 +1261,7 @@ impl UtxoExecutor {
     /// second time and `UtxoSet::add_output` would return
     /// `OutputAlreadyExists`; we surface that as a `warn!` rather than
     /// bubbling an error, matching `generate_block_reward`'s tolerance.
-    pub fn apply_settled_unlocks(
-        &mut self,
-        settled: &[([u8; 32], u64, [u8; 32])],
-        epoch: u64,
-    ) {
+    pub fn apply_settled_unlocks(&mut self, settled: &[([u8; 32], u64, [u8; 32])], epoch: u64) {
         for (validator_id, amount, reward_address) in settled {
             if *reward_address == [0u8; 32] {
                 warn!(
@@ -1320,10 +1317,12 @@ impl UtxoExecutor {
                 spending_pubkey: None,
             };
 
-            match self
-                .utxo_set
-                .add_output(outref.clone(), output, self.height, /* is_emission = */ false)
-            {
+            match self.utxo_set.add_output(
+                outref.clone(),
+                output,
+                self.height,
+                /* is_emission = */ false,
+            ) {
                 Ok(()) => {
                     info!(
                         "γ-5 apply_settled_unlocks: created unlock UTXO tx={} amount={} to={} (validator={})",
@@ -1426,8 +1425,7 @@ mod tests {
     fn malformed_borsh_gracefully_rejected() {
         let mut executor = UtxoExecutor::new(test_app_id());
         executor.enable_on_chain_staking_for_tests(0);
-        let result =
-            executor.execute_committed(1, &[b"not valid borsh".to_vec()], None, None, 0);
+        let result = executor.execute_committed(1, &[b"not valid borsh".to_vec()], None, None, 0);
         // Must NOT panic — graceful rejection
         assert_eq!(result.txs_accepted, 0);
         assert_eq!(result.txs_rejected, 1);
@@ -1831,7 +1829,10 @@ mod tests {
         // Do NOT seed the input; simulates the UTXO having been spent earlier.
         let r = executor.execute_committed(1, &[raw], None, Some(&mut registry), 0);
         assert_eq!(r.txs_accepted, 0);
-        assert_eq!(r.txs_rejected, 1, "stake tx with unknown input must be rejected");
+        assert_eq!(
+            r.txs_rejected, 1,
+            "stake tx with unknown input must be rejected"
+        );
         // Registry must NOT have been mutated
         assert!(
             registry.get(&vid).is_none(),
@@ -1922,11 +1923,7 @@ mod tests {
         result.expect("apply ok");
         // delta.spent[0] shape: (tx_hash, OutputRef, TxOutput) — matches
         // the `UtxoSet::apply_transaction` convention used by TransparentTransfer.
-        assert_eq!(
-            delta.spent.len(),
-            1,
-            "exactly one input should be spent",
-        );
+        assert_eq!(delta.spent.len(), 1, "exactly one input should be spent",);
         assert_eq!(delta.spent[0].0, input_ref.tx_hash);
         assert_eq!(delta.spent[0].1, input_ref);
     }
@@ -1935,10 +1932,7 @@ mod tests {
     fn test_stake_deposit_delta_created_skips_receipt_marker() {
         let kp = MlDsaKeypair::generate();
         let vid = validator_id_from_kp(&kp);
-        let tx = build_stake_deposit_tx_with_change(
-            make_register_envelope(&kp, vid),
-            3_000,
-        );
+        let tx = build_stake_deposit_tx_with_change(make_register_envelope(&kp, vid), 3_000);
         let raw = borsh::to_vec(&tx).unwrap();
         let tx_hash = tx.tx_hash();
         let mut executor = UtxoExecutor::new(test_app_id());
@@ -1992,8 +1986,7 @@ mod tests {
         executor.execute_committed(1, &[reg_raw], None, Some(&mut registry), 0);
         registry.activate(&vid, 1).expect("activate");
 
-        let (result, delta) =
-            run_single_tx_for_delta(&mut executor, &mut registry, &exit_raw);
+        let (result, delta) = run_single_tx_for_delta(&mut executor, &mut registry, &exit_raw);
         result.expect("begin_exit ok");
         assert_eq!(
             delta.spent.len(),
@@ -2040,7 +2033,10 @@ mod tests {
         assert_eq!(spent.0, input_ref.tx_hash, "spent.0 == input_ref.tx_hash");
         assert_eq!(spent.1, input_ref, "spent.1 == full OutputRef");
         // spent.2 is TxOutput — we seeded amount=11_000 above.
-        assert_eq!(spent.2.amount, 11_000, "spent.2 carries the original TxOutput");
+        assert_eq!(
+            spent.2.amount, 11_000,
+            "spent.2 carries the original TxOutput"
+        );
     }
 
     // ─── Group 1: feature-gate tests ──────────────────────────────────
@@ -2072,7 +2068,10 @@ mod tests {
             other => panic!("expected FeatureNotActive, got {:?}", other),
         }
         // Registry must be left untouched when the gate rejects.
-        assert!(registry.get(&vid).is_none(), "gate must reject before registry mutation");
+        assert!(
+            registry.get(&vid).is_none(),
+            "gate must reject before registry mutation"
+        );
     }
 
     #[test]
@@ -2133,7 +2132,10 @@ mod tests {
 
         let (result, _delta) = run_single_tx_for_delta(&mut executor, &mut registry, &raw);
         assert!(
-            matches!(result, Err(TxExecutionError::FeatureNotActive { height: 1, .. })),
+            matches!(
+                result,
+                Err(TxExecutionError::FeatureNotActive { height: 1, .. })
+            ),
             "expected FeatureNotActive at height=1, got {:?}",
             result
         );
@@ -2154,8 +2156,15 @@ mod tests {
         let mut registry = StakingRegistry::new(test_staking_config());
 
         let (result, _delta) = run_single_tx_for_delta(&mut executor, &mut registry, &raw);
-        assert!(result.is_ok(), "expected StakeDeposit accepted at h=1, got {:?}", result);
-        assert!(registry.get(&vid).is_some(), "registry must have the registered validator");
+        assert!(
+            result.is_ok(),
+            "expected StakeDeposit accepted at h=1, got {:?}",
+            result
+        );
+        assert!(
+            registry.get(&vid).is_some(),
+            "registry must have the registered validator"
+        );
     }
 
     // ─── γ-5: apply_settled_unlocks tests ─────────────────────────────
@@ -2185,10 +2194,7 @@ mod tests {
         // Call settle. amount is whatever the registry would have returned.
         let epoch = 42u64;
         let amount = 7_654_321u64;
-        executor.apply_settled_unlocks(
-            &[(validator_id, amount, reward_address)],
-            epoch,
-        );
+        executor.apply_settled_unlocks(&[(validator_id, amount, reward_address)], epoch);
 
         // 1. receipt entry is gone.
         assert!(
@@ -2310,10 +2316,7 @@ mod tests {
 
         // Confirm the input is present before the tx.
         assert!(
-            executor
-                .utxo_set
-                .get(&stake_deposit_input_ref())
-                .is_some(),
+            executor.utxo_set.get(&stake_deposit_input_ref()).is_some(),
             "precondition: input seeded"
         );
 
@@ -2324,14 +2327,14 @@ mod tests {
         // γ-4 preflight: input must still be present because consume was
         // never called.
         assert!(
-            executor
-                .utxo_set
-                .get(&stake_deposit_input_ref())
-                .is_some(),
+            executor.utxo_set.get(&stake_deposit_input_ref()).is_some(),
             "γ-4: preflight rejection must not consume the input UTXO"
         );
         // Registry remains empty.
-        assert!(registry.get(&vid).is_none(), "no validator should have registered");
+        assert!(
+            registry.get(&vid).is_none(),
+            "no validator should have registered"
+        );
     }
 
     /// Rollback path: use StakeMore whose validator is in EXITING state so
@@ -2385,8 +2388,12 @@ mod tests {
         let b_output = executor.utxo_set.get(&input_b).unwrap().output.clone();
         executor.utxo_set.remove_output(&input_a);
         executor.utxo_set.remove_output(&input_b);
-        delta.spent.push((input_a.tx_hash, input_a.clone(), a_output));
-        delta.spent.push((input_b.tx_hash, input_b.clone(), b_output));
+        delta
+            .spent
+            .push((input_a.tx_hash, input_a.clone(), a_output));
+        delta
+            .spent
+            .push((input_b.tx_hash, input_b.clone(), b_output));
 
         // - add change output C; push to delta.created
         let change_ref = OutputRef {
@@ -2414,11 +2421,7 @@ mod tests {
         assert!(executor.utxo_set.get(&change_ref).is_some());
 
         // Roll back.
-        UtxoExecutor::rollback_stake_tx_utxo_side(
-            &mut executor.utxo_set,
-            &mut delta,
-            savepoint,
-        );
+        UtxoExecutor::rollback_stake_tx_utxo_side(&mut executor.utxo_set, &mut delta, savepoint);
 
         // Post-rollback: UTXO set matches pre state.
         assert_eq!(
@@ -2480,10 +2483,7 @@ mod tests {
         // γ-4 preflight: the fee input for the replay attempt must still
         // be present (never consumed).
         assert!(
-            executor
-                .utxo_set
-                .get(&stake_deposit_input_ref())
-                .is_some(),
+            executor.utxo_set.get(&stake_deposit_input_ref()).is_some(),
             "γ-4: preflight rejection of replay must not consume the fee input"
         );
     }
@@ -2526,10 +2526,7 @@ mod tests {
 
         // γ-4 preflight: BeginExit fee input must still be present.
         assert!(
-            executor
-                .utxo_set
-                .get(&stake_withdraw_input_ref())
-                .is_some(),
+            executor.utxo_set.get(&stake_withdraw_input_ref()).is_some(),
             "γ-4: preflight rejection of exit must not consume the fee input"
         );
         // Validator state unchanged.

@@ -40,9 +40,7 @@ struct WalletKeyFile {
 
 /// Decrypt the validator keystore; re-uses `stake_deposit`'s helper via
 /// a thin private shim (same semantics).
-fn load_validator_consensus_key(
-    validator_key_path: &str,
-) -> Result<(MlDsaSecretKey, [u8; 32])> {
+fn load_validator_consensus_key(validator_key_path: &str) -> Result<(MlDsaSecretKey, [u8; 32])> {
     use misaka_crypto::keystore::{decrypt_keystore, load_keystore};
     use misaka_crypto::validator_sig::ValidatorPqPublicKey;
 
@@ -53,14 +51,16 @@ fn load_validator_consensus_key(
         .unwrap_or_default()
         .into_bytes();
     if passphrase.is_empty() {
-        eprintln!("   ⚠  MISAKA_VALIDATOR_PASSPHRASE is empty — assuming empty-passphrase keystore.");
+        eprintln!(
+            "   ⚠  MISAKA_VALIDATOR_PASSPHRASE is empty — assuming empty-passphrase keystore."
+        );
     }
-    let sk_bytes = decrypt_keystore(&keystore, &passphrase)
-        .context("failed to decrypt validator keystore")?;
+    let sk_bytes =
+        decrypt_keystore(&keystore, &passphrase).context("failed to decrypt validator keystore")?;
     let sk = MlDsaSecretKey::from_bytes(&sk_bytes)
         .map_err(|e| anyhow::anyhow!("invalid ML-DSA-65 secret key: {}", e))?;
-    let pk_bytes = hex::decode(&keystore.public_key_hex)
-        .context("keystore public_key_hex not valid hex")?;
+    let pk_bytes =
+        hex::decode(&keystore.public_key_hex).context("keystore public_key_hex not valid hex")?;
     let pq_pk = ValidatorPqPublicKey::from_bytes(&pk_bytes)
         .map_err(|e| anyhow::anyhow!("ValidatorPqPublicKey::from_bytes failed: {}", e))?;
     Ok((sk, pq_pk.to_canonical_id()))
@@ -91,8 +91,7 @@ pub async fn run_begin_exit(
     let key_json = fs::read_to_string(wallet_key_path).context("failed to read wallet key file")?;
     let wallet: WalletKeyFile =
         serde_json::from_str(&key_json).context("failed to parse wallet key file")?;
-    let mut state =
-        WalletState::load_or_create(wallet_key_path, &wallet.name, &wallet.address)?;
+    let mut state = WalletState::load_or_create(wallet_key_path, &wallet.name, &wallet.address)?;
     sync_wallet_from_chain(&client, &mut state).await?;
 
     // BeginExit has no stake_inputs in the envelope — validate_structure
@@ -109,7 +108,9 @@ pub async fn run_begin_exit(
         signature: Vec::new(),
     };
     sign_envelope(&mut envelope, &consensus_sk)?;
-    envelope.validate_structure().context("BeginExit envelope invalid")?;
+    envelope
+        .validate_structure()
+        .context("BeginExit envelope invalid")?;
 
     let extra = envelope
         .encode_for_extra()
@@ -213,7 +214,9 @@ pub async fn run_begin_exit(
     if computed_ki != first_ki {
         bail!(
             "key image mismatch for child #{} (expected {}, got {})",
-            first_child, first_ki, computed_ki
+            first_child,
+            first_ki,
+            computed_ki
         );
     }
     let outer_sig = ml_dsa_sign_raw(&spending.ml_dsa_sk, &digest)
@@ -288,7 +291,14 @@ async fn sync_wallet_from_chain(client: &RpcClient, state: &mut WalletState) -> 
                 .iter()
                 .any(|u| u.tx_hash == tx_hash && u.output_index == output_index)
             {
-                state.register_utxo(tx_hash, output_index, amount_val, 0, spend_id_val, &master_addr);
+                state.register_utxo(
+                    tx_hash,
+                    output_index,
+                    amount_val,
+                    0,
+                    spend_id_val,
+                    &master_addr,
+                );
             }
         }
     }
@@ -334,11 +344,12 @@ mod tests {
 
         // Non-empty stake_inputs must be rejected.
         let mut bad = envelope.clone();
-        bad.stake_inputs.push(misaka_types::validator_stake_tx::StakeInput {
-            tx_hash: [0; 32],
-            output_index: 0,
-            amount: 1,
-        });
+        bad.stake_inputs
+            .push(misaka_types::validator_stake_tx::StakeInput {
+                tx_hash: [0; 32],
+                output_index: 0,
+                amount: 1,
+            });
         // Re-sign so missing-signature doesn't mask the structural failure.
         sign_envelope(&mut bad, &kp.secret_key).unwrap();
         assert!(bad.validate_structure().is_err());

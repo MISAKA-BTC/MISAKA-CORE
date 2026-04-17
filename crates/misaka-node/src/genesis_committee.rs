@@ -273,9 +273,8 @@ impl GenesisCommitteeManifest {
         let mut out = Vec::with_capacity(parsed.utxos.len());
         let mut sum: u64 = 0;
         for (i, u) in parsed.utxos.iter().enumerate() {
-            let addr_bytes = hex::decode(&u.address).map_err(|e| {
-                ManifestError::Parse(format!("utxo[{i}] address decode: {e}"))
-            })?;
+            let addr_bytes = hex::decode(&u.address)
+                .map_err(|e| ManifestError::Parse(format!("utxo[{i}] address decode: {e}")))?;
             if addr_bytes.len() != 32 {
                 return Err(ManifestError::Parse(format!(
                     "utxo[{i}] address length {} (expected 32)",
@@ -300,9 +299,9 @@ impl GenesisCommitteeManifest {
                 }
                 None => None,
             };
-            sum = sum.checked_add(u.amount).ok_or_else(|| {
-                ManifestError::Parse(format!("utxo[{i}] amount overflow at sum"))
-            })?;
+            sum = sum
+                .checked_add(u.amount)
+                .ok_or_else(|| ManifestError::Parse(format!("utxo[{i}] amount overflow at sum")))?;
             out.push(SeedUtxo {
                 address,
                 amount: u.amount,
@@ -329,9 +328,7 @@ impl GenesisCommitteeManifest {
             .join("registered_validators.json");
         if reg_path.exists() {
             if let Ok(data) = std::fs::read_to_string(&reg_path) {
-                if let Ok(registered) =
-                    serde_json::from_str::<Vec<RegisteredValidator>>(&data)
-                {
+                if let Ok(registered) = serde_json::from_str::<Vec<RegisteredValidator>>(&data) {
                     let existing_pks: HashSet<String> = manifest
                         .validators
                         .iter()
@@ -741,7 +738,8 @@ pub fn build_sr21_committee(
             Err(e) => {
                 tracing::warn!(
                     "SR21 committee build: skip invalid pubkey (hostname={}): {}",
-                    auth.hostname, e
+                    auth.hostname,
+                    e
                 );
                 continue;
             }
@@ -761,8 +759,7 @@ pub fn build_sr21_committee(
     // Step 3: run SR21 election. `run_election_for_chain` uses the chain's
     // effective min stake floor (mainnet=10M, testnet=1M) and caps at
     // MAX_SR_COUNT (=21).
-    let election =
-        crate::sr21_election::run_election_for_chain(&identities, chain_id, epoch);
+    let election = crate::sr21_election::run_election_for_chain(&identities, chain_id, epoch);
 
     // Fallback: if every candidate failed the min-stake floor, keep the
     // pre-filter committee. An empty Committee::new panics on BFT
@@ -781,8 +778,7 @@ pub fn build_sr21_committee(
     }
 
     // Step 4: rebuild the committee in election order.
-    let mut elected_authorities: Vec<Authority> =
-        Vec::with_capacity(election.active_srs.len());
+    let mut elected_authorities: Vec<Authority> = Vec::with_capacity(election.active_srs.len());
     for sr in &election.active_srs {
         match by_id.get(&sr.validator_id) {
             Some(auth) => elected_authorities.push(auth.clone()),
@@ -1303,7 +1299,10 @@ network_address = "127.0.0.1:16111"
 
         let m = GenesisCommitteeManifest::load_with_registered(&genesis_path).unwrap();
         assert_eq!(m.validators.len(), 2);
-        assert!(m.validate().is_ok(), "merged manifest should pass validation");
+        assert!(
+            m.validate().is_ok(),
+            "merged manifest should pass validation"
+        );
         let committee = m.to_committee().unwrap();
         assert_eq!(committee.size(), 2);
     }
@@ -1401,7 +1400,11 @@ network_address = "127.0.0.1:16111"
     /// network_address — mirrors the post-auto_activate_locked snapshot.
     #[cfg(test)]
     #[allow(deprecated)]
-    fn registry_with_active(id_byte: u8, stake: u64, addr: &str) -> misaka_consensus::staking::StakingRegistry {
+    fn registry_with_active(
+        id_byte: u8,
+        stake: u64,
+        addr: &str,
+    ) -> misaka_consensus::staking::StakingRegistry {
         use misaka_consensus::staking::{StakingConfig, StakingRegistry};
         let config = StakingConfig {
             min_validator_stake: 10_000_000,
@@ -1482,15 +1485,12 @@ network_address = "127.0.0.1:16111"
             ValidatorState::Exiting { .. }
         ));
 
-        let after = build_committee_from_sources(&manifest, &reg)
-            .expect("build committee after exit");
+        let after =
+            build_committee_from_sources(&manifest, &reg).expect("build committee after exit");
 
         // Back to 3 genesis authorities only.
         assert_eq!(after.size(), 3, "EXITING validator must be dropped");
-        let dropped = after
-            .authorities
-            .iter()
-            .all(|a| a.hostname != exiting_addr);
+        let dropped = after.authorities.iter().all(|a| a.hostname != exiting_addr);
         assert!(dropped, "EXITING validator's hostname must not appear");
     }
 
@@ -1605,8 +1605,8 @@ network_address = "127.0.0.1:16111"
             StakingRegistry::new(StakingConfig::testnet())
         };
 
-        let committee = build_sr21_committee(&manifest, &empty_reg, 2, 1)
-            .expect("build sr21 committee");
+        let committee =
+            build_sr21_committee(&manifest, &empty_reg, 2, 1).expect("build sr21 committee");
         assert_eq!(committee.size(), 5);
 
         // Every authority's stake is above the chain floor.
@@ -1614,7 +1614,9 @@ network_address = "127.0.0.1:16111"
             assert!(
                 (auth.stake as u128) >= (floor as u128),
                 "authority {} stake {} is below SR21 floor {}",
-                i, auth.stake, floor,
+                i,
+                auth.stake,
+                floor,
             );
         }
 
@@ -1622,12 +1624,7 @@ network_address = "127.0.0.1:16111"
         // assigns stake = base + i so validator i=4 has the highest stake.
         // The elected committee's first authority must therefore have the
         // highest stake in the candidate set.
-        let max_candidate_stake = manifest
-            .validators
-            .iter()
-            .map(|v| v.stake)
-            .max()
-            .unwrap();
+        let max_candidate_stake = manifest.validators.iter().map(|v| v.stake).max().unwrap();
         assert_eq!(
             committee.authorities[0].stake, max_candidate_stake,
             "SR_0 must be the highest-staked candidate"
@@ -1654,15 +1651,11 @@ network_address = "127.0.0.1:16111"
         let reg = registry_with_active_stake(big_byte, big_stake, big_addr);
 
         // 22 candidates total, cap is 21 → the lowest genesis drops.
-        let committee = build_sr21_committee(&manifest, &reg, 2, 1)
-            .expect("build sr21 committee");
+        let committee = build_sr21_committee(&manifest, &reg, 2, 1).expect("build sr21 committee");
         assert_eq!(committee.size(), 21);
 
         // The high-stake registry validator is in.
-        let contains_registry = committee
-            .authorities
-            .iter()
-            .any(|a| a.hostname == big_addr);
+        let contains_registry = committee.authorities.iter().any(|a| a.hostname == big_addr);
         assert!(
             contains_registry,
             "high-stake registry validator must displace the lowest genesis"
@@ -1689,15 +1682,16 @@ network_address = "127.0.0.1:16111"
     // Exercises `GenesisCommitteeManifest::load_initial_utxos` against
     // on-disk JSON files produced in the `migrate-utxo-snapshot` shape.
 
-    fn write_initial_utxos_json(dir: &std::path::Path, body: &serde_json::Value) -> std::path::PathBuf {
+    fn write_initial_utxos_json(
+        dir: &std::path::Path,
+        body: &serde_json::Value,
+    ) -> std::path::PathBuf {
         let path = dir.join("initial_utxos.json");
         std::fs::write(&path, serde_json::to_string_pretty(body).unwrap()).unwrap();
         path
     }
 
-    fn make_manifest_with_utxo_source(
-        source: std::path::PathBuf,
-    ) -> GenesisCommitteeManifest {
+    fn make_manifest_with_utxo_source(source: std::path::PathBuf) -> GenesisCommitteeManifest {
         GenesisCommitteeManifest {
             epoch: 0,
             validators: sample_manifest(3).validators,
@@ -1768,8 +1762,11 @@ network_address = "127.0.0.1:16111"
         let manifest = make_manifest_with_utxo_source(source);
         let err = manifest.load_initial_utxos().unwrap_err();
         let msg = format!("{}", err);
-        assert!(msg.contains("total_amount") || msg.contains("total"),
-            "error must mention total mismatch, got: {}", msg);
+        assert!(
+            msg.contains("total_amount") || msg.contains("total"),
+            "error must mention total mismatch, got: {}",
+            msg
+        );
     }
 
     #[test]
@@ -1872,10 +1869,7 @@ source = "initial_utxos.json"
         let manifest = GenesisCommitteeManifest::load(&toml_path).expect("load");
         assert!(manifest.initial_utxos_source.is_some());
         // Relative path must resolve to dir/initial_utxos.json.
-        assert_eq!(
-            manifest.initial_utxos_source.as_ref().unwrap(),
-            &json_path,
-        );
+        assert_eq!(manifest.initial_utxos_source.as_ref().unwrap(), &json_path,);
         // Loader can read it.
         let seeds = manifest
             .load_initial_utxos()

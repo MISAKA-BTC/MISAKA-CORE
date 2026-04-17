@@ -166,9 +166,7 @@ pub fn is_active_sr(result: &ElectionResult, validator_id: &[u8; 32]) -> bool {
 /// `u128`. `ValidatorPublicKey` is cloned from the registry's stored
 /// ML-DSA-65 public key bytes (1952 bytes). `is_active` is always `true`
 /// here by construction (we already filter on `state == Active`).
-pub fn registry_to_validator_identities(
-    registry: &StakingRegistry,
-) -> Vec<ValidatorIdentity> {
+pub fn registry_to_validator_identities(registry: &StakingRegistry) -> Vec<ValidatorIdentity> {
     registry
         .all_validators()
         .filter(|v| v.state == ValidatorState::Active)

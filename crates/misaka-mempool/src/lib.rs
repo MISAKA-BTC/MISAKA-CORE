@@ -78,9 +78,7 @@ pub enum MempoolError {
     StakeEnvelopeDecode(String),
     #[error("stake structural validation failed: {0}")]
     StakeStructural(String),
-    #[error(
-        "stake below min validator stake: net_stake={net_stake}, required={required}"
-    )]
+    #[error("stake below min validator stake: net_stake={net_stake}, required={required}")]
     StakeBelowMinValidatorStake { net_stake: u64, required: u64 },
     #[error("stake kind mismatch: tx_type={tx_type}, envelope_kind={envelope_kind}")]
     StakeKindMismatch {
@@ -216,8 +214,7 @@ impl UtxoMempool {
         // the DAG relay.
         if matches!(
             tx.tx_type,
-            misaka_types::utxo::TxType::StakeDeposit
-                | misaka_types::utxo::TxType::StakeWithdraw
+            misaka_types::utxo::TxType::StakeDeposit | misaka_types::utxo::TxType::StakeWithdraw
         ) {
             Self::admit_stake_tx(&tx, self.staking_config.as_deref())?;
         }
@@ -694,10 +691,7 @@ mod tests {
 
     /// Build a `TxType::StakeDeposit` UtxoTransaction carrying `envelope`
     /// in `extra`. The UTXO input references the pre-seeded tx_hash=0xAB.
-    fn stake_utxo_tx(
-        tx_type: TxType,
-        envelope: &ValidatorStakeTx,
-    ) -> UtxoTransaction {
+    fn stake_utxo_tx(tx_type: TxType, envelope: &ValidatorStakeTx) -> UtxoTransaction {
         UtxoTransaction {
             version: UTXO_TX_VERSION,
             tx_type,
@@ -775,7 +769,10 @@ mod tests {
         let envelope = make_register_envelope(/* net_stake = */ 5_000);
         let tx = stake_utxo_tx(TxType::StakeDeposit, &envelope);
         match pool.admit(tx, &utxo_set, 1000) {
-            Err(MempoolError::StakeBelowMinValidatorStake { net_stake, required }) => {
+            Err(MempoolError::StakeBelowMinValidatorStake {
+                net_stake,
+                required,
+            }) => {
                 assert_eq!(net_stake, 5_000);
                 assert_eq!(required, 10_000);
             }
@@ -818,7 +815,10 @@ mod tests {
                 );
             }
             Err(MempoolError::StakeEnvelopeDecode(_)) => {}
-            other => panic!("expected envelope-related error, got {:?}", other.map(|_| "Ok")),
+            other => panic!(
+                "expected envelope-related error, got {:?}",
+                other.map(|_| "Ok")
+            ),
         }
     }
 
@@ -841,7 +841,10 @@ mod tests {
                 );
             }
             Err(MempoolError::StakeKindMismatch { .. }) => {}
-            other => panic!("expected kind-mismatch error, got {:?}", other.map(|_| "Ok")),
+            other => panic!(
+                "expected kind-mismatch error, got {:?}",
+                other.map(|_| "Ok")
+            ),
         }
     }
 
@@ -856,10 +859,7 @@ mod tests {
         let tx = stake_utxo_tx(TxType::StakeDeposit, &envelope);
         match pool.admit(tx, &utxo_set, 1000) {
             Err(MempoolError::StakeConfigMissing) => {}
-            other => panic!(
-                "expected StakeConfigMissing, got {:?}",
-                other.map(|_| "Ok")
-            ),
+            other => panic!("expected StakeConfigMissing, got {:?}", other.map(|_| "Ok")),
         }
     }
 }

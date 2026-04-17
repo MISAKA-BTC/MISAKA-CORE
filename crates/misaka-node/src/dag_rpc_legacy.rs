@@ -1853,7 +1853,11 @@ async fn dag_submit_checkpoint_vote(
                 .map(|proof| proof.target.blue_score);
             let known_validator_count = state.known_validators.len();
             let validator_count = state.validator_count;
-            let quorum_reached = state.latest_checkpoint_finality.as_ref().map(|proof| proof.target == target).unwrap_or(false);
+            let quorum_reached = state
+                .latest_checkpoint_finality
+                .as_ref()
+                .map(|proof| proof.target == target)
+                .unwrap_or(false);
 
             // R3-H3 FIX: Drop node write lock BEFORE acquiring runtime_recovery
             // write lock to prevent potential deadlock from nested lock ordering.

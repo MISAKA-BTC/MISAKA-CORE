@@ -78,10 +78,12 @@ fn load_validator_consensus_key(
         .unwrap_or_default()
         .into_bytes();
     if passphrase.is_empty() {
-        eprintln!("   ⚠  MISAKA_VALIDATOR_PASSPHRASE is empty — assuming empty-passphrase keystore.");
+        eprintln!(
+            "   ⚠  MISAKA_VALIDATOR_PASSPHRASE is empty — assuming empty-passphrase keystore."
+        );
     }
-    let sk_bytes = decrypt_keystore(&keystore, &passphrase)
-        .context("failed to decrypt validator keystore")?;
+    let sk_bytes =
+        decrypt_keystore(&keystore, &passphrase).context("failed to decrypt validator keystore")?;
     let sk = MlDsaSecretKey::from_bytes(&sk_bytes)
         .map_err(|e| anyhow::anyhow!("invalid ML-DSA-65 secret key in keystore: {}", e))?;
 
@@ -161,7 +163,8 @@ async fn submit_stake_deposit(
     });
 
     // Prepare change if any (requires a fresh child key).
-    let master_sk_bytes = hex::decode(&wallet.ml_dsa_sk).context("invalid hex in wallet ml_dsa_sk")?;
+    let master_sk_bytes =
+        hex::decode(&wallet.ml_dsa_sk).context("invalid hex in wallet ml_dsa_sk")?;
     let change_info: Option<(u32, String, String)> = if change > 0 {
         let idx = state.next_child();
         let child = SpendingKeypair::derive_child(&master_sk_bytes, idx)
@@ -247,7 +250,9 @@ async fn submit_stake_deposit(
     if computed_ki != first_ki {
         bail!(
             "key image mismatch for child #{} (expected {}, got {})",
-            first_child, first_ki, computed_ki
+            first_child,
+            first_ki,
+            computed_ki
         );
     }
     let outer_sig = ml_dsa_sign_raw(&spending.ml_dsa_sk, &digest)
@@ -334,8 +339,7 @@ pub async fn run_register(
     let key_json = fs::read_to_string(wallet_key_path).context("failed to read wallet key file")?;
     let wallet: WalletKeyFile =
         serde_json::from_str(&key_json).context("failed to parse wallet key file")?;
-    let mut state =
-        WalletState::load_or_create(wallet_key_path, &wallet.name, &wallet.address)?;
+    let mut state = WalletState::load_or_create(wallet_key_path, &wallet.name, &wallet.address)?;
     sync_wallet_from_chain(&client, &mut state).await?;
     println!(
         "   Wallet:      {} ({} UTXOs, {} MISAKA total)",
@@ -428,8 +432,7 @@ pub async fn run_stake_more(
     let key_json = fs::read_to_string(wallet_key_path).context("failed to read wallet key file")?;
     let wallet: WalletKeyFile =
         serde_json::from_str(&key_json).context("failed to parse wallet key file")?;
-    let mut state =
-        WalletState::load_or_create(wallet_key_path, &wallet.name, &wallet.address)?;
+    let mut state = WalletState::load_or_create(wallet_key_path, &wallet.name, &wallet.address)?;
     sync_wallet_from_chain(&client, &mut state).await?;
 
     let stake_inputs: Vec<StakeInput> = state
@@ -463,9 +466,7 @@ pub async fn run_stake_more(
         // side (keyed by the L1 tx_hash of this envelope).
         nonce: 1,
         memo: None,
-        params: StakeTxParams::StakeMore(StakeMoreParams {
-            additional_amount,
-        }),
+        params: StakeTxParams::StakeMore(StakeMoreParams { additional_amount }),
         signature: Vec::new(),
     };
     sign_envelope(&mut envelope, &consensus_sk)?;
@@ -520,7 +521,14 @@ async fn sync_wallet_from_chain(client: &RpcClient, state: &mut WalletState) -> 
                 .iter()
                 .any(|u| u.tx_hash == tx_hash && u.output_index == output_index)
             {
-                state.register_utxo(tx_hash, output_index, amount_val, 0, spend_id_val, &master_addr);
+                state.register_utxo(
+                    tx_hash,
+                    output_index,
+                    amount_val,
+                    0,
+                    spend_id_val,
+                    &master_addr,
+                );
             }
         }
     }
@@ -590,7 +598,11 @@ mod tests {
             signature: Vec::new(),
         };
         sign_envelope(&mut envelope, &kp.secret_key).expect("sign");
-        assert_eq!(envelope.signature.len(), 3309, "ML-DSA-65 signature is 3309 bytes");
+        assert_eq!(
+            envelope.signature.len(),
+            3309,
+            "ML-DSA-65 signature is 3309 bytes"
+        );
         envelope.validate_structure().expect("valid structure");
 
         // Roundtrip via extra.
@@ -621,10 +633,9 @@ mod tests {
         };
         sign_envelope(&mut envelope, &kp.secret_key).expect("sign");
         envelope.validate_structure().expect("valid StakeMore");
-        let decoded = ValidatorStakeTx::decode_from_extra(
-            &envelope.encode_for_extra().expect("encode"),
-        )
-        .expect("decode");
+        let decoded =
+            ValidatorStakeTx::decode_from_extra(&envelope.encode_for_extra().expect("encode"))
+                .expect("decode");
         assert!(matches!(decoded.params, StakeTxParams::StakeMore(_)));
     }
 

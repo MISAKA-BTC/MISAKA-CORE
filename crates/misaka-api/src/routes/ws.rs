@@ -46,9 +46,8 @@ impl WsBroadcaster {
         let tx = self.tx.clone();
         tokio::spawn(async move {
             let mut last_height: Option<u64> = None;
-            let mut interval = tokio::time::interval(
-                tokio::time::Duration::from_millis(POLL_INTERVAL_MS),
-            );
+            let mut interval =
+                tokio::time::interval(tokio::time::Duration::from_millis(POLL_INTERVAL_MS));
             loop {
                 interval.tick().await;
                 let info = match proxy.get("/api/get_chain_info").await {
@@ -79,10 +78,7 @@ pub fn router() -> Router<AppState> {
     Router::new().route("/ws", get(ws_handler))
 }
 
-async fn ws_handler(
-    ws: WebSocketUpgrade,
-    State(state): State<AppState>,
-) -> impl IntoResponse {
+async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
     // R7 M-6: Acquire connection permit before upgrade
     let sem = state.ws_broadcaster.conn_semaphore.clone();
     let permit = match sem.try_acquire_owned() {

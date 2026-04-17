@@ -38,8 +38,7 @@ pub fn execute_block(
     // not carry a registry reference. The DAG-mode utxo_executor (γ-3) wires
     // the registry through so that StakeDeposit / StakeWithdraw txs get their
     // signature + state verified before the validator account is mutated.
-    let delta =
-        block_validation::validate_and_apply_block(block, utxo_set, validator_set, None)?;
+    let delta = block_validation::validate_and_apply_block(block, utxo_set, validator_set, None)?;
 
     // SEC-FIX: Use checked_add to prevent silent overflow in release builds.
     // 256 txs with fee near u64::MAX would wrap to a small number.

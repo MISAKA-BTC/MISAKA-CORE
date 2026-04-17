@@ -521,8 +521,8 @@ async fn main() -> Result<()> {
                     }
                     let wk_raw = std::fs::read_to_string(&wallet)
                         .context("failed to read wallet for reward_address default")?;
-                    let wk: WK = serde_json::from_str(&wk_raw)
-                        .context("failed to parse wallet key file")?;
+                    let wk: WK =
+                        serde_json::from_str(&wk_raw).context("failed to parse wallet key file")?;
                     misaka_types::address::decode_address(&wk.address, chain_id)
                         .map_err(|e| anyhow::anyhow!("wallet address decode failed: {}", e))?
                 }
@@ -589,9 +589,7 @@ async fn main() -> Result<()> {
             .await?
         }
 
-        Commands::MigrateUtxoSnapshot { input, output } => {
-            migrate_snapshot::run(&input, &output)?
-        }
+        Commands::MigrateUtxoSnapshot { input, output } => migrate_snapshot::run(&input, &output)?,
 
         Commands::BeginExit {
             wallet,

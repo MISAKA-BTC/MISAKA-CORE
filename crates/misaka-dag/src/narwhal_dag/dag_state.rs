@@ -820,7 +820,8 @@ impl DagState {
             self.last_block_round.resize(new_size, 0);
             self.last_committed_rounds.resize(new_size, 0);
             for _ in old_size..new_size {
-                self.blocks_per_authority.push(std::collections::BTreeMap::new());
+                self.blocks_per_authority
+                    .push(std::collections::BTreeMap::new());
             }
         }
         self.committee = new_committee;

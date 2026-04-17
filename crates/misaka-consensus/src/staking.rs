@@ -687,10 +687,7 @@ impl StakingRegistry {
     /// Idempotency: after the first call unlocks a validator, subsequent
     /// calls in the same or later epoch skip it because `state` is no longer
     /// `Exiting` and `can_unlock()` returns `false`.
-    pub fn settle_unlocks(
-        &mut self,
-        current_epoch: u64,
-    ) -> Vec<([u8; 32], u64, [u8; 32])> {
+    pub fn settle_unlocks(&mut self, current_epoch: u64) -> Vec<([u8; 32], u64, [u8; 32])> {
         // Collect candidate ids up front so we release the borrow on
         // `self.validators` before mutating via `self.unlock(..)`.
         let candidates: Vec<[u8; 32]> = self
@@ -1190,10 +1187,7 @@ impl StakingRegistry {
     /// Returns `Err(StakingError::InvalidTransition)` if the validator is
     /// `Active`, `Exiting`, or `Unlocked` — those paths must go through
     /// `exit()` / `unlock()` respectively.
-    pub fn force_remove_locked(
-        &mut self,
-        validator_id: &[u8; 32],
-    ) -> Result<(), StakingError> {
+    pub fn force_remove_locked(&mut self, validator_id: &[u8; 32]) -> Result<(), StakingError> {
         let state = self
             .validators
             .get(validator_id)
@@ -1381,12 +1375,7 @@ mod tests {
     /// solana_stake_verified = false). Complementary to the Solana-only
     /// `register_and_activate` fixture above — mirrors what `utxo_executor`
     /// does when a `StakeDeposit::Register` tx is finalized.
-    fn preregister_l1(
-        reg: &mut StakingRegistry,
-        id: [u8; 32],
-        pubkey: Vec<u8>,
-        stake_amount: u64,
-    ) {
+    fn preregister_l1(reg: &mut StakingRegistry, id: [u8; 32], pubkey: Vec<u8>, stake_amount: u64) {
         reg.register(
             id,
             pubkey,
@@ -1499,8 +1488,20 @@ mod tests {
     fn test_exit_from_locked_fails() {
         let mut reg = StakingRegistry::new(test_config());
         let id = make_id(1);
-        reg.register(id, vec![], 10_000_000, 500, id, 0, [1; 32], 0, true, None, false)
-            .unwrap();
+        reg.register(
+            id,
+            vec![],
+            10_000_000,
+            500,
+            id,
+            0,
+            [1; 32],
+            0,
+            true,
+            None,
+            false,
+        )
+        .unwrap();
         assert!(reg.exit(&id, 10).is_err());
     }
 
@@ -1977,7 +1978,8 @@ mod tests {
         let id = make_id(1);
         preregister_l1(&mut reg, id, vec![1; 1952], 10_000_000);
         // activation should pass even though solana_stake_verified=false
-        reg.activate(&id, 1).expect("activate with only l1_stake_verified");
+        reg.activate(&id, 1)
+            .expect("activate with only l1_stake_verified");
         let acc = reg.get(&id).expect("validator present");
         assert_eq!(acc.state, ValidatorState::Active);
         assert!(acc.l1_stake_verified);
@@ -2043,8 +2045,7 @@ mod tests {
     fn test_rewire_config_arc_after_deserialize() {
         let original = StakingRegistry::new(test_config());
         let json = serde_json::to_string(&original).expect("serialize");
-        let mut decoded: StakingRegistry =
-            serde_json::from_str(&json).expect("deserialize");
+        let mut decoded: StakingRegistry = serde_json::from_str(&json).expect("deserialize");
         // config_arc after deserialize is an orphan Arc; rewire to canonical
         let canonical = std::sync::Arc::new(test_config());
         decoded.rewire_config_arc(canonical.clone());
@@ -2075,7 +2076,10 @@ mod tests {
         let settled = reg.settle_unlocks(110);
         assert_eq!(settled.len(), 1);
         assert_eq!(settled[0].0, id);
-        assert_eq!(settled[0].1, 20_000_000, "returned amount == original stake");
+        assert_eq!(
+            settled[0].1, 20_000_000,
+            "returned amount == original stake"
+        );
         assert_eq!(settled[0].2, id, "reward_address matches register()");
         assert_eq!(
             reg.get(&id).unwrap().state,
@@ -2142,7 +2146,11 @@ mod tests {
         reg.exit(&v3, 25).unwrap();
 
         let settled = reg.settle_unlocks(120);
-        assert_eq!(settled.len(), 2, "only the two fully-unbonded validators settle");
+        assert_eq!(
+            settled.len(),
+            2,
+            "only the two fully-unbonded validators settle"
+        );
         let settled_ids: std::collections::HashSet<[u8; 32]> =
             settled.iter().map(|(id, _, _)| *id).collect();
         assert!(settled_ids.contains(&v1));
@@ -2288,17 +2296,8 @@ mod tests {
         // rejected as replay AND the validator_id must be rejected as
         // already-registered. Use register_l1_native so the replay check
         // hits the tx_hash-hex entry that can_register_l1_native inspects.
-        reg.register_l1_native(
-            vid,
-            vec![1; 1952],
-            20_000_000,
-            500,
-            vid,
-            0,
-            tx_hash,
-            0,
-        )
-        .expect("register_l1_native");
+        reg.register_l1_native(vid, vec![1; 1952], 20_000_000, 500, vid, 0, tx_hash, 0)
+            .expect("register_l1_native");
 
         // Replay of same tx_hash.
         match reg.can_register_l1_native(&make_id(92), 20_000_000, 500, &tx_hash) {
@@ -2323,17 +2322,8 @@ mod tests {
         // Register first so StakeMore has a target. Use register_l1_native
         // so the stake_tx_hash-hex lands in used_stake_signatures — the
         // same replay namespace can_stake_more inspects.
-        reg.register_l1_native(
-            vid,
-            vec![1; 1952],
-            20_000_000,
-            500,
-            vid,
-            0,
-            initial_hash,
-            0,
-        )
-        .expect("register_l1_native");
+        reg.register_l1_native(vid, vec![1; 1952], 20_000_000, 500, vid, 0, initial_hash, 0)
+            .expect("register_l1_native");
 
         // Happy path on a LOCKED validator.
         let more_hash = [0x94u8; 32];
