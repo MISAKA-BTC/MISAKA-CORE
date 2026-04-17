@@ -185,6 +185,7 @@ async fn get_tx_status(
 // ═══════════════════════════════════════════════════════════════
 
 #[derive(Deserialize)]
+#[allow(dead_code)] // parsed for API compatibility; forwarded when node supports ?limit=
 struct BlocksQuery {
     #[serde(default = "default_limit")]
     limit: usize,
@@ -196,10 +197,8 @@ fn default_limit() -> usize {
 /// `GET /api/v1/explorer/blocks?limit=20`
 async fn get_recent_blocks(
     State(state): State<AppState>,
-    Query(q): Query<BlocksQuery>,
+    Query(_q): Query<BlocksQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let limit = q.limit.clamp(1, 100);
-
     state
         .proxy
         .get("/api/get_recent_blocks")

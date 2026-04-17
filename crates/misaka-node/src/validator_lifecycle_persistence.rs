@@ -329,6 +329,12 @@ impl ValidatorLifecycleStore {
         Ok(())
     }
 
+    /// γ-3: production callers should prefer
+    /// [`crate::validator_lifecycle_bootstrap::bootstrap_validator_lifecycle`]
+    /// which shares one `Arc<StakingConfig>` across executor / api state.
+    /// This helper is retained for test convenience; the internal
+    /// `StakingRegistry::new` call is deprecated-but-allowed here.
+    #[allow(deprecated)]
     pub async fn load_or_default(
         &self,
         config: StakingConfig,
@@ -428,6 +434,7 @@ pub async fn persist_global_state(
 }
 
 #[cfg(test)]
+#[allow(deprecated)] // γ-3: existing tests still call `StakingRegistry::new`
 mod tests {
     use super::*;
     use misaka_types::constants::EPOCH_LENGTH;
@@ -467,6 +474,7 @@ mod tests {
                 0,
                 true,
                 None,
+                false,
             )
             .expect("register");
 
@@ -521,6 +529,7 @@ mod tests {
                 0,
                 true,
                 None,
+                false,
             )
             .expect("register");
 

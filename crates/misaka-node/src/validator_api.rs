@@ -379,6 +379,11 @@ async fn handle_register(
             0,
             solana_verified,
             solana_sig,
+            // 0.9.0: REST path (handle_register) is the Solana/off-chain path.
+            // L1 native verification is only set by `utxo_executor` when a
+            // `TxType::StakeDeposit` tx with a valid `ValidatorStakeTx` is
+            // finalized (wired in γ-3). Never set here.
+            false,
         )
         .map_err(|e| ApiResult::err(e.to_string()))?;
 
@@ -603,6 +608,7 @@ async fn handle_get_status(
 }
 
 #[cfg(test)]
+#[allow(deprecated)] // γ-3: existing tests still call `StakingRegistry::new`
 mod tests {
     use super::*;
     use crate::rpc_auth::ApiKeyState;

@@ -139,14 +139,35 @@ impl From<TomlConfig> for NodeConfig {
             metrics_bind: defaults.metrics_bind,
             faucet_enabled: t.faucet.enabled.unwrap_or(defaults.faucet_enabled),
             faucet_amount: t.faucet.amount.unwrap_or(defaults.faucet_amount),
-            faucet_cooldown_secs: t.faucet.cooldown_secs.unwrap_or(defaults.faucet_cooldown_secs),
+            faucet_cooldown_secs: t
+                .faucet
+                .cooldown_secs
+                .unwrap_or(defaults.faucet_cooldown_secs),
             staking_min_stake: t.staking.min_stake.unwrap_or(defaults.staking_min_stake),
-            staking_unbonding_period: t.staking.unbonding_period.unwrap_or(defaults.staking_unbonding_period),
-            staking_max_validators: t.staking.max_validators.unwrap_or(defaults.staking_max_validators),
-            consensus_fast_block_time_secs: t.consensus.fast_block_time_secs.unwrap_or(defaults.consensus_fast_block_time_secs),
-            consensus_zkp_block_time_secs: t.consensus.zkp_block_time_secs.unwrap_or(defaults.consensus_zkp_block_time_secs),
-            dag_retention_rounds: t.consensus.retention_rounds.unwrap_or(defaults.dag_retention_rounds),
-            security_require_encrypted_keystore: t.security.require_encrypted_keystore.unwrap_or(defaults.security_require_encrypted_keystore),
+            staking_unbonding_period: t
+                .staking
+                .unbonding_period
+                .unwrap_or(defaults.staking_unbonding_period),
+            staking_max_validators: t
+                .staking
+                .max_validators
+                .unwrap_or(defaults.staking_max_validators),
+            consensus_fast_block_time_secs: t
+                .consensus
+                .fast_block_time_secs
+                .unwrap_or(defaults.consensus_fast_block_time_secs),
+            consensus_zkp_block_time_secs: t
+                .consensus
+                .zkp_block_time_secs
+                .unwrap_or(defaults.consensus_zkp_block_time_secs),
+            dag_retention_rounds: t
+                .consensus
+                .retention_rounds
+                .unwrap_or(defaults.dag_retention_rounds),
+            security_require_encrypted_keystore: t
+                .security
+                .require_encrypted_keystore
+                .unwrap_or(defaults.security_require_encrypted_keystore),
         }
     }
 }

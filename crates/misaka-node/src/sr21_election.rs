@@ -14,7 +14,8 @@
 //! SR_0 = highest stake, SR_20 = lowest stake among active set.
 //! If a local validator is in the active set, its `sr_index` is updated.
 
-use misaka_types::validator::ValidatorIdentity;
+use misaka_consensus::staking::{StakingRegistry, ValidatorState};
+use misaka_types::validator::{ValidatorIdentity, ValidatorPublicKey};
 use tracing::info;
 
 /// Minimum stake to be eligible for SR21 (in base units).
@@ -152,6 +153,34 @@ pub fn is_active_sr(result: &ElectionResult, validator_id: &[u8; 32]) -> bool {
     find_sr_index(result, validator_id).is_some()
 }
 
+/// Group 2: Project a `StakingRegistry` snapshot into the
+/// `ValidatorIdentity` vector that the election functions expect.
+///
+/// Only `ValidatorState::Active` validators are included — LOCKED / EXITING
+/// / UNLOCKED validators have not met the stake-verification gate (or have
+/// stepped out) and must not influence committee selection. Caller should
+/// run `StakingRegistry::auto_activate_locked` BEFORE this if they want
+/// newly-verified validators to appear in this epoch's election.
+///
+/// `stake_weight` comes from `ValidatorAccount::stake_amount` widened to
+/// `u128`. `ValidatorPublicKey` is cloned from the registry's stored
+/// ML-DSA-65 public key bytes (1952 bytes). `is_active` is always `true`
+/// here by construction (we already filter on `state == Active`).
+pub fn registry_to_validator_identities(registry: &StakingRegistry) -> Vec<ValidatorIdentity> {
+    registry
+        .all_validators()
+        .filter(|v| v.state == ValidatorState::Active)
+        .map(|v| ValidatorIdentity {
+            validator_id: v.validator_id,
+            stake_weight: v.stake_amount as u128,
+            public_key: ValidatorPublicKey {
+                bytes: v.pubkey.clone(),
+            },
+            is_active: true,
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -231,5 +260,100 @@ mod tests {
         let result = run_election_for_chain(&validators, 2, 1);
         assert_eq!(result.num_active, 1);
         assert_eq!(result.active_srs[0].validator_id, [1u8; 32]);
+    }
+
+    // ─── Group 2: registry_to_validator_identities test ───────────
+    #[test]
+    #[allow(deprecated)]
+    fn registry_to_identities_includes_only_active() {
+        use misaka_consensus::staking::{StakingConfig, StakingRegistry, ValidatorState};
+
+        // Force min stake to 10_000_000 so the existing register() gate is
+        // easy to satisfy with fixture stake = 50M.
+        let config = StakingConfig {
+            min_validator_stake: 10_000_000,
+            max_active_validators: 10,
+            ..StakingConfig::testnet()
+        };
+        let mut reg = StakingRegistry::new(config);
+
+        // Seed via the public API so we don't depend on crate-private
+        // struct fields:
+        //   v1, v2 → register + activate  (ACTIVE)
+        //   v3     → register only        (LOCKED)
+        //   v4     → register + activate + exit (EXITING)
+        let register_and_activate = |reg: &mut StakingRegistry, id: [u8; 32], stake: u64| {
+            reg.register(
+                id,
+                vec![id[0]; 1952],
+                stake,
+                500,
+                id,
+                0,
+                [id[0]; 32],
+                0,
+                true,
+                Some(format!("sig_{}", id[0])),
+                false,
+            )
+            .expect("register");
+            reg.activate(&id, 1).expect("activate");
+        };
+
+        let v1 = [0x01u8; 32];
+        let v2 = [0x02u8; 32];
+        let v3 = [0x03u8; 32];
+        let v4 = [0x04u8; 32];
+
+        register_and_activate(&mut reg, v1, 50_000_000);
+        register_and_activate(&mut reg, v2, 30_000_000);
+        // v3 registered but NOT activated → stays LOCKED.
+        reg.register(
+            v3,
+            vec![v3[0]; 1952],
+            20_000_000,
+            500,
+            v3,
+            0,
+            [v3[0]; 32],
+            0,
+            true,
+            Some("sig_3".into()),
+            false,
+        )
+        .expect("register v3");
+        // v4 registered + activated + exited → EXITING.
+        register_and_activate(&mut reg, v4, 25_000_000);
+        reg.exit(&v4, 5).expect("exit v4");
+
+        // Sanity check on the seed before projecting.
+        assert_eq!(reg.get(&v1).unwrap().state, ValidatorState::Active);
+        assert_eq!(reg.get(&v2).unwrap().state, ValidatorState::Active);
+        assert_eq!(reg.get(&v3).unwrap().state, ValidatorState::Locked);
+        assert!(matches!(
+            reg.get(&v4).unwrap().state,
+            ValidatorState::Exiting { .. }
+        ));
+
+        let ids = registry_to_validator_identities(&reg);
+        assert_eq!(ids.len(), 2, "only ACTIVE validators survive projection");
+
+        let seen: std::collections::HashSet<[u8; 32]> =
+            ids.iter().map(|v| v.validator_id).collect();
+        assert!(seen.contains(&v1));
+        assert!(seen.contains(&v2));
+        assert!(!seen.contains(&v3), "LOCKED must not appear");
+        assert!(!seen.contains(&v4), "EXITING must not appear");
+
+        for v in &ids {
+            assert!(v.is_active);
+            assert!(v.stake_weight > 0);
+            assert_eq!(v.public_key.bytes.len(), 1952);
+        }
+
+        // Feed projection straight into the election; the shape contract
+        // must hold end-to-end.
+        let election = run_election_with_min_stake(&ids, 0u128, 42);
+        assert_eq!(election.num_active, 2);
     }
 }

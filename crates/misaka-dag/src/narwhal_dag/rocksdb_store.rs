@@ -41,6 +41,10 @@ const CF_LAST_COMMITTED: &str = "narwhal_last_committed";
 const CF_EQUIVOCATION_EVIDENCE: &str = "narwhal_equivocation_evidence";
 #[cfg(feature = "rocksdb")]
 const CF_COMMITTED_TX_FILTER: &str = "narwhal_committed_tx_filter";
+#[cfg(feature = "rocksdb")]
+const CF_TX_INDEX: &str = "narwhal_tx_index";
+#[cfg(feature = "rocksdb")]
+const CF_ADDR_INDEX: &str = "narwhal_addr_index";
 
 // ─── Meta keys ───────────────────────────────────────────────
 #[cfg(feature = "rocksdb")]
@@ -114,6 +118,18 @@ impl RocksDbConsensusStore {
             o
         };
 
+        let tx_index_opts = {
+            let mut o = rocksdb::Options::default();
+            o.set_compression_type(rocksdb::DBCompressionType::Snappy);
+            o
+        };
+        let addr_index_opts = {
+            let mut o = rocksdb::Options::default();
+            o.set_compression_type(rocksdb::DBCompressionType::Snappy);
+            o.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(64));
+            o
+        };
+
         let cfs = vec![
             rocksdb::ColumnFamilyDescriptor::new(CF_BLOCKS, block_opts),
             rocksdb::ColumnFamilyDescriptor::new(CF_COMMITS, commit_opts),
@@ -121,6 +137,8 @@ impl RocksDbConsensusStore {
             rocksdb::ColumnFamilyDescriptor::new(CF_LAST_COMMITTED, last_committed_opts),
             rocksdb::ColumnFamilyDescriptor::new(CF_EQUIVOCATION_EVIDENCE, equivocation_opts),
             rocksdb::ColumnFamilyDescriptor::new(CF_COMMITTED_TX_FILTER, tx_filter_opts),
+            rocksdb::ColumnFamilyDescriptor::new(CF_TX_INDEX, tx_index_opts),
+            rocksdb::ColumnFamilyDescriptor::new(CF_ADDR_INDEX, addr_index_opts),
         ];
 
         let db = rocksdb::DB::open_cf_descriptors(&opts, path, cfs)
@@ -186,6 +204,72 @@ impl RocksDbConsensusStore {
                 CF_COMMITTED_TX_FILTER
             ))
         })
+    }
+
+    fn cf_tx_index(&self) -> Result<&rocksdb::ColumnFamily, StoreError> {
+        self.db.cf_handle(CF_TX_INDEX).ok_or_else(|| {
+            StoreError::Corrupted(format!(
+                "column family '{}' missing — DB may be corrupted",
+                CF_TX_INDEX
+            ))
+        })
+    }
+
+    fn cf_addr_index(&self) -> Result<&rocksdb::ColumnFamily, StoreError> {
+        self.db.cf_handle(CF_ADDR_INDEX).ok_or_else(|| {
+            StoreError::Corrupted(format!(
+                "column family '{}' missing — DB may be corrupted",
+                CF_ADDR_INDEX
+            ))
+        })
+    }
+
+    // ─── TX index persistence ─────────────────────────────────
+
+    /// Store a committed transaction detail (JSON bytes).
+    pub fn put_tx_detail(&self, tx_hash: &[u8; 32], detail: &[u8]) -> Result<(), StoreError> {
+        self.db
+            .put_cf(self.cf_tx_index()?, tx_hash, detail)
+            .map_err(|e| StoreError::Corrupted(format!("RocksDB put tx_index failed: {}", e)))
+    }
+
+    /// Retrieve a committed transaction detail by hash.
+    pub fn get_tx_detail(&self, tx_hash: &[u8; 32]) -> Result<Option<Vec<u8>>, StoreError> {
+        self.db
+            .get_cf(self.cf_tx_index()?, tx_hash)
+            .map_err(|e| StoreError::Corrupted(format!("RocksDB get tx_index failed: {}", e)))
+    }
+
+    /// Store an address index entry. Key format: `{address_hex}:{height_be8}:{tx_hash_hex}`.
+    pub fn put_addr_entry(&self, key: &[u8], entry: &[u8]) -> Result<(), StoreError> {
+        self.db
+            .put_cf(self.cf_addr_index()?, key, entry)
+            .map_err(|e| StoreError::Corrupted(format!("RocksDB put addr_index failed: {}", e)))
+    }
+
+    /// Retrieve all address index entries for a given address (prefix scan).
+    pub fn get_addr_entries(&self, address_hex: &str) -> Result<Vec<Vec<u8>>, StoreError> {
+        let cf = self.cf_addr_index()?;
+        let prefix = address_hex.as_bytes();
+        let mut results = Vec::new();
+        let iter = self.db.prefix_iterator_cf(cf, prefix);
+        for item in iter {
+            match item {
+                Ok((k, v)) => {
+                    if !k.starts_with(prefix) {
+                        break;
+                    }
+                    results.push(v.to_vec());
+                }
+                Err(e) => {
+                    return Err(StoreError::Corrupted(format!(
+                        "RocksDB addr_index iterator failed: {}",
+                        e
+                    )));
+                }
+            }
+        }
+        Ok(results)
     }
 
     // ─── Committed TX filter persistence ─────────────────────

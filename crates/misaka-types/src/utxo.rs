@@ -188,7 +188,13 @@ pub struct UtxoTransaction {
 pub const UTXO_TX_VERSION: u8 = 0x02;
 
 /// Maximum extra data length.
-pub const MAX_EXTRA_LEN: usize = 1024;
+///
+/// γ-1: bumped from 2048 to 8192 to accommodate the `ValidatorStakeTx`
+/// wire envelope on `TxType::StakeDeposit / StakeWithdraw`. A Register
+/// envelope alone is ~2.1 KiB (1952-byte ML-DSA-65 consensus_pubkey +
+/// metadata + 24-byte magic). Other tx types are unaffected — the bound is
+/// only an upper limit.
+pub const MAX_EXTRA_LEN: usize = 8 * 1024;
 /// Maximum inputs per transaction.
 pub const MAX_INPUTS: usize = 16;
 /// Maximum outputs per transaction.
@@ -247,6 +253,42 @@ impl UtxoTransaction {
                     return Err(MisakaError::DeserializationError(format!(
                         "{:?} tx must have at least one input",
                         self.tx_type
+                    )));
+                }
+                // ── γ-1: ValidatorStakeTx envelope must round-trip out of `extra` ──
+                let stake_tx =
+                    crate::validator_stake_tx::ValidatorStakeTx::decode_from_extra(&self.extra)
+                        .map_err(|e| {
+                            MisakaError::DeserializationError(format!(
+                                "{:?} tx: invalid stake envelope: {}",
+                                self.tx_type, e
+                            ))
+                        })?;
+                stake_tx.validate_structure().map_err(|e| {
+                    MisakaError::DeserializationError(format!(
+                        "{:?} tx: stake envelope structure invalid: {}",
+                        self.tx_type, e
+                    ))
+                })?;
+                // tx_type と envelope kind の整合性チェック
+                let envelope_kind = stake_tx.kind;
+                let kind_ok = match self.tx_type {
+                    TxType::StakeDeposit => matches!(
+                        envelope_kind,
+                        crate::validator_stake_tx::StakeTxKind::Register
+                            | crate::validator_stake_tx::StakeTxKind::StakeMore
+                    ),
+                    TxType::StakeWithdraw => matches!(
+                        envelope_kind,
+                        crate::validator_stake_tx::StakeTxKind::BeginExit
+                    ),
+                    _ => unreachable!("outer match guarded by StakeDeposit | StakeWithdraw"),
+                };
+                if !kind_ok {
+                    return Err(MisakaError::DeserializationError(format!(
+                        "{:?} tx: envelope kind {} not allowed for this tx_type",
+                        self.tx_type,
+                        envelope_kind.as_str(),
                     )));
                 }
             }
@@ -486,5 +528,132 @@ mod tests {
     fn test_tx_hash_deterministic() {
         let tx = make_utxo_tx();
         assert_eq!(tx.tx_hash(), tx.tx_hash());
+    }
+
+    // ─── γ-1: stake envelope wiring through validate_structure ────────────
+
+    #[allow(clippy::expect_used)]
+    fn make_register_envelope_extra() -> Vec<u8> {
+        use crate::validator_stake_tx::{
+            RegisterParams, StakeInput, StakeTxKind, StakeTxParams, ValidatorStakeTx,
+        };
+        let tx = ValidatorStakeTx {
+            kind: StakeTxKind::Register,
+            validator_id: [1u8; 32],
+            stake_inputs: vec![StakeInput {
+                tx_hash: [0xABu8; 32],
+                output_index: 0,
+                amount: 10_001_000,
+            }],
+            fee: 1_000,
+            nonce: 0,
+            memo: None,
+            params: StakeTxParams::Register(RegisterParams {
+                consensus_pubkey: vec![0u8; 1952],
+                reward_address: [2u8; 32],
+                commission_bps: 500,
+                p2p_endpoint: None,
+                moniker: None,
+            }),
+            signature: vec![0u8; 32],
+        };
+        tx.encode_for_extra().expect("encode register envelope")
+    }
+
+    #[allow(clippy::expect_used)]
+    fn make_begin_exit_envelope_extra() -> Vec<u8> {
+        use crate::validator_stake_tx::{StakeTxKind, StakeTxParams, ValidatorStakeTx};
+        let tx = ValidatorStakeTx {
+            kind: StakeTxKind::BeginExit,
+            validator_id: [1u8; 32],
+            stake_inputs: vec![],
+            fee: 1_000,
+            nonce: 1,
+            memo: None,
+            params: StakeTxParams::BeginExit,
+            signature: vec![0u8; 32],
+        };
+        tx.encode_for_extra().expect("encode begin_exit envelope")
+    }
+
+    fn make_stake_tx(tx_type: TxType, extra: Vec<u8>) -> UtxoTransaction {
+        UtxoTransaction {
+            version: UTXO_TX_VERSION,
+            tx_type,
+            inputs: vec![TxInput {
+                utxo_refs: vec![OutputRef {
+                    tx_hash: [1; 32],
+                    output_index: 0,
+                }],
+                proof: vec![0xAA; 16],
+            }],
+            outputs: vec![TxOutput {
+                amount: 1,
+                address: [0x11; 32],
+                // spending_pubkey は None または PQ_PK_SIZE (1952) ぴったり
+                spending_pubkey: None,
+            }],
+            fee: 100,
+            extra,
+            expiry: 0,
+        }
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn validate_structure_stake_deposit_register_ok() {
+        let extra = make_register_envelope_extra();
+        let tx = make_stake_tx(TxType::StakeDeposit, extra);
+        tx.validate_structure()
+            .expect("valid stake deposit register");
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn validate_structure_stake_withdraw_begin_exit_ok() {
+        let extra = make_begin_exit_envelope_extra();
+        let tx = make_stake_tx(TxType::StakeWithdraw, extra);
+        tx.validate_structure()
+            .expect("valid stake withdraw begin_exit");
+    }
+
+    #[test]
+    fn validate_structure_stake_deposit_with_begin_exit_envelope_rejected() {
+        let extra = make_begin_exit_envelope_extra();
+        let tx = make_stake_tx(TxType::StakeDeposit, extra);
+        match tx.validate_structure() {
+            Err(MisakaError::DeserializationError(ref s)) if s.contains("envelope kind") => {}
+            other => panic!("expected envelope kind error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn validate_structure_stake_withdraw_with_register_envelope_rejected() {
+        let extra = make_register_envelope_extra();
+        let tx = make_stake_tx(TxType::StakeWithdraw, extra);
+        match tx.validate_structure() {
+            Err(MisakaError::DeserializationError(ref s)) if s.contains("envelope kind") => {}
+            other => panic!("expected envelope kind error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn validate_structure_stake_deposit_bad_magic_rejected() {
+        let mut extra = make_register_envelope_extra();
+        extra[0] ^= 0xFF;
+        let tx = make_stake_tx(TxType::StakeDeposit, extra);
+        match tx.validate_structure() {
+            Err(MisakaError::DeserializationError(ref s)) if s.contains("magic") => {}
+            other => panic!("expected magic error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn validate_structure_stake_deposit_empty_extra_rejected() {
+        let tx = make_stake_tx(TxType::StakeDeposit, vec![]);
+        match tx.validate_structure() {
+            Err(MisakaError::DeserializationError(ref s)) if s.contains("too short") => {}
+            other => panic!("expected too short error, got {:?}", other),
+        }
     }
 }

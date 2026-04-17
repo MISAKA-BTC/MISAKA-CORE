@@ -107,7 +107,7 @@ impl NarwhalBridge {
         };
 
         // Spawn consensus runtime
-        let (msg_tx, commit_rx, block_rx, metrics, runtime_handle) =
+        let (msg_tx, commit_rx, block_rx, metrics, _backpressure, runtime_handle) =
             spawn_consensus_runtime(config, signer, Some(store), chain_ctx);
 
         // Epoch manager

@@ -122,6 +122,12 @@ impl BlockVerifier {
         }
     }
 
+    /// Hot-reload the committee and epoch for dynamic validator changes.
+    pub fn update_committee(&mut self, new_committee: Committee, new_epoch: u64) {
+        self.committee = new_committee;
+        self.epoch = new_epoch;
+    }
+
     /// Set sync mode — when true, past-drift timestamp checks are skipped
     /// to allow catch-up from peers with older blocks.
     pub fn set_syncing(&self, syncing: bool) {

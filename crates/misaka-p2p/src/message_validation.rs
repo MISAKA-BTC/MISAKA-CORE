@@ -179,11 +179,7 @@ impl NonceTracker {
         }
         // R7 M-4: Hard cap — if retain didn't free enough, evict oldest
         while self.seen.len() >= self.max_entries {
-            let oldest_key = self
-                .seen
-                .iter()
-                .min_by_key(|(_, t)| *t)
-                .map(|(k, _)| *k);
+            let oldest_key = self.seen.iter().min_by_key(|(_, t)| *t).map(|(k, _)| *k);
             if let Some(k) = oldest_key {
                 self.seen.remove(&k);
             } else {

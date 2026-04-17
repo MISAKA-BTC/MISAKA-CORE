@@ -259,11 +259,8 @@ impl Transaction {
         }
 
         // ── Signature size check ──
-        let expected_sig_size = match self.signature.scheme {
-            crate::scheme::SignatureScheme::MlDsa65 => MLDSA65_SIG_SIZE,
-            _ => 0, // other schemes validated elsewhere
-        };
-        if expected_sig_size > 0 && self.signature.bytes.len() != expected_sig_size {
+        let expected_sig_size = self.signature.scheme.max_sig_size();
+        if self.signature.bytes.len() != expected_sig_size {
             return Err(MisakaError::SignatureSizeMismatch {
                 expected: expected_sig_size,
                 got: self.signature.bytes.len(),

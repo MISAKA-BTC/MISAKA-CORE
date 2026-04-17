@@ -153,13 +153,11 @@ pub async fn run(args: SendArgs) -> Result<()> {
             arr.copy_from_slice(&bytes);
             arr
         }
-        None => {
-            fetch_genesis_hash(&args.rpc_url).await.unwrap_or_else(|e| {
-                eprintln!("Warning: could not fetch genesis hash from node: {e}");
-                eprintln!("  Using zero hash — pass --genesis-hash explicitly if needed");
-                [0u8; 32]
-            })
-        }
+        None => fetch_genesis_hash(&args.rpc_url).await.unwrap_or_else(|e| {
+            eprintln!("Warning: could not fetch genesis hash from node: {e}");
+            eprintln!("  Using zero hash — pass --genesis-hash explicitly if needed");
+            [0u8; 32]
+        }),
     };
 
     // ── Dispatch ──

@@ -374,7 +374,8 @@ const BLOCK_EVENT_CHANNEL_CAPACITY: usize = 4096;
 impl BlockEventLogger {
     /// Create and start the logger. Events are batched every `interval`.
     pub fn start(bps: usize) -> Self {
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<BlockLogEvent>(BLOCK_EVENT_CHANNEL_CAPACITY);
+        let (tx, mut rx) =
+            tokio::sync::mpsc::channel::<BlockLogEvent>(BLOCK_EVENT_CHANNEL_CAPACITY);
         let chunk_limit = bps.max(1) * 10;
 
         let handle = tokio::spawn(async move {

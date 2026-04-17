@@ -48,12 +48,17 @@ pub fn calculate_tx_mass(params: &MassParams, data: &TxMassData) -> u64 {
     // On overflow, mass saturates to u64::MAX, guaranteeing the transaction
     // will be rejected by any fee threshold check.
     let mut mass = params.base_mass;
-    mass = mass.saturating_add((data.serialized_size as u64).saturating_mul(params.mass_per_tx_byte));
+    mass =
+        mass.saturating_add((data.serialized_size as u64).saturating_mul(params.mass_per_tx_byte));
     mass = mass.saturating_add((data.input_count as u64).saturating_mul(params.mass_per_input));
     mass = mass.saturating_add((data.output_count as u64).saturating_mul(params.mass_per_output));
     mass = mass.saturating_add((data.sig_op_count as u64).saturating_mul(params.mass_per_sig_op));
-    mass = mass.saturating_add((data.pq_sig_op_count as u64).saturating_mul(params.mass_per_pq_sig_op));
-    mass = mass.saturating_add((data.total_script_pub_key_bytes as u64).saturating_mul(params.mass_per_script_pub_key_byte));
+    mass = mass
+        .saturating_add((data.pq_sig_op_count as u64).saturating_mul(params.mass_per_pq_sig_op));
+    mass = mass.saturating_add(
+        (data.total_script_pub_key_bytes as u64)
+            .saturating_mul(params.mass_per_script_pub_key_byte),
+    );
     mass
 }
 

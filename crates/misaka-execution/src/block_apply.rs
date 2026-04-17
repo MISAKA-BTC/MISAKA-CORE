@@ -28,13 +28,17 @@ pub struct BlockResult {
 /// ALL validation (including proposer sig, block hash binding, tx validation)
 /// is delegated to `validate_and_apply_block`. This function does NOT
 /// duplicate any checks — it is a thin orchestration layer.
+#[allow(deprecated)]
 pub fn execute_block(
     block: &BlockCandidate,
     utxo_set: &mut UtxoSet,
     validator_set: Option<&ValidatorSet>,
 ) -> Result<BlockResult, BlockError> {
-    // Single entry point for all validation — no duplicate proposer check.
-    let delta = block_validation::validate_and_apply_block(block, utxo_set, validator_set)?;
+    // γ-2: pass `None` for staking_registry — the legacy block_apply path does
+    // not carry a registry reference. The DAG-mode utxo_executor (γ-3) wires
+    // the registry through so that StakeDeposit / StakeWithdraw txs get their
+    // signature + state verified before the validator account is mutated.
+    let delta = block_validation::validate_and_apply_block(block, utxo_set, validator_set, None)?;
 
     // SEC-FIX: Use checked_add to prevent silent overflow in release builds.
     // 256 txs with fee near u64::MAX would wrap to a small number.

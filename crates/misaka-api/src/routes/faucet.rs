@@ -13,13 +13,14 @@
 //! The API endpoint validates and enqueues; the background worker
 //! processes requests sequentially to avoid UTXO locking conflicts.
 //!
-//! # Rate Limiting
+//! # Rate Limiting (optional)
 //!
-//! Two independent limits:
-//! - **Per-IP**: 1 request per `cooldown_secs` (default 24h).
+//! When `cooldown_secs > 0`, two independent limits apply:
+//! - **Per-IP**: 1 request per `cooldown_secs`.
 //! - **Per-address**: 1 request per `cooldown_secs`.
 //!
-//! Both must pass for the request to be accepted.
+//! Default `cooldown_secs` is **0** (disabled). Override with `MISAKA_FAUCET_COOLDOWN_SECS`.
+//! HTTP-layer rate limiting for `/faucet` routes is disabled in the API middleware.
 
 use axum::{
     extract::{ConnectInfo, State},
@@ -66,7 +67,7 @@ impl Default for FaucetConfig {
     fn default() -> Self {
         Self {
             drip_amount: 10_000_000_000, // 10 MISAKA (9 decimals)
-            cooldown_secs: 300,          // 5 minutes (testnet default)
+            cooldown_secs: 0,            // 0 = no per-IP / per-address cooldown
             max_queue_depth: 100,
         }
     }
@@ -113,6 +114,10 @@ impl FaucetRateLimiter {
         }
     }
 
+    fn cooldown_disabled(&self) -> bool {
+        self.cooldown.is_zero()
+    }
+
     /// SEC-FIX: Atomic check-and-record to prevent TOCTOU race condition.
     ///
     /// Previously, `check()` and `record()` were separate operations with
@@ -125,6 +130,9 @@ impl FaucetRateLimiter {
     /// `check_only` verifies cooldown without consuming the slot.
     /// `record` is called AFTER successful queue reservation.
     pub async fn check_only(&self, ip: &str, address: &str) -> Result<(), u64> {
+        if self.cooldown_disabled() {
+            return Ok(());
+        }
         let now = Instant::now();
         let state = self.state.lock().await;
         let (ref ip_map, ref addr_map) = *state;
@@ -148,6 +156,9 @@ impl FaucetRateLimiter {
 
     /// Record cooldown after successful queue acceptance.
     pub async fn record(&self, ip: &str, address: &str) {
+        if self.cooldown_disabled() {
+            return;
+        }
         let now = Instant::now();
         let mut state = self.state.lock().await;
         let (ref mut ip_map, ref mut addr_map) = *state;
@@ -157,6 +168,9 @@ impl FaucetRateLimiter {
 
     /// Periodic cleanup of expired entries.
     pub async fn cleanup(&self) {
+        if self.cooldown_disabled() {
+            return;
+        }
         let cutoff = Instant::now() - self.cooldown * 2;
         let mut state = self.state.lock().await;
         state.0.retain(|_, v| *v > cutoff);
@@ -171,6 +185,8 @@ impl FaucetRateLimiter {
 #[derive(Debug, Deserialize)]
 pub struct FaucetRequest {
     pub address: String,
+    #[serde(default, alias = "spendingPubkey")]
+    pub spending_pubkey: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -194,6 +210,7 @@ pub struct FaucetResponse {
 #[derive(Debug)]
 struct FaucetQueueItem {
     address: String,
+    spending_pubkey: Option<String>,
     /// Channel to send the result back to the HTTP handler.
     response_tx: tokio::sync::oneshot::Sender<FaucetWorkerResult>,
 }
@@ -239,7 +256,14 @@ impl FaucetState {
         };
 
         tokio::spawn(async move {
-            faucet_worker(queue_rx, worker_proxy, worker_depth, drip_amount, worker_rate_limiter).await;
+            faucet_worker(
+                queue_rx,
+                worker_proxy,
+                worker_depth,
+                drip_amount,
+                worker_rate_limiter,
+            )
+            .await;
         });
 
         state
@@ -256,7 +280,13 @@ async fn faucet_worker(
 ) {
     let mut items_since_cleanup: u64 = 0;
     while let Some(item) = rx.recv().await {
-        let result = process_drip(&proxy, &item.address, drip_amount).await;
+        let result = process_drip(
+            &proxy,
+            &item.address,
+            drip_amount,
+            item.spending_pubkey.as_deref(),
+        )
+        .await;
         {
             let mut d = depth.lock().await;
             *d = d.saturating_sub(1);
@@ -277,15 +307,20 @@ async fn process_drip(
     proxy: &crate::proxy::NodeProxy,
     address: &str,
     amount: u64,
+    spending_pubkey: Option<&str>,
 ) -> FaucetWorkerResult {
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "address": address,
         "amount": amount,
     });
+    if let Some(pk) = spending_pubkey {
+        body["spendingPubkey"] = serde_json::Value::String(pk.to_string());
+    }
 
     match proxy.post("/api/faucet", &body).await {
         Ok(resp) => {
-            let success = resp["success"].as_bool()
+            let success = resp["success"]
+                .as_bool()
                 .or_else(|| resp["accepted"].as_bool())
                 .unwrap_or(false);
             if success {
@@ -331,17 +366,30 @@ pub fn router() -> Router<AppState> {
 /// `POST /api/v1/faucet/request`
 async fn handle_faucet_request(
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
     maybe_addr: Option<ConnectInfo<SocketAddr>>,
     Json(req): Json<FaucetRequest>,
 ) -> (StatusCode, Json<FaucetResponse>) {
     let faucet = state.faucet;
-    // SEC-FIX-2: If ConnectInfo is unavailable, reject the request instead
-    // of falling back to "unknown". Otherwise all users share one cooldown
-    // bucket, making the faucet a global lock after a single request.
-    let ip = match maybe_addr {
-        Some(addr) => addr.0.ip().to_string(),
+    // Use X-Real-IP / X-Forwarded-For from the reverse proxy first,
+    // then fall back to the TCP peer address.  Without this, all users
+    // behind nginx share the same 127.0.0.1 cooldown bucket.
+    let ip = headers
+        .get("x-real-ip")
+        .and_then(|v| v.to_str().ok())
+        .or_else(|| {
+            headers
+                .get("x-forwarded-for")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.split(',').next())
+                .map(|s| s.trim())
+        })
+        .map(|s| s.to_string())
+        .or_else(|| maybe_addr.map(|a| a.0.ip().to_string()));
+    let ip = match ip {
+        Some(ip) => ip,
         None => {
-            tracing::warn!("Faucet: ConnectInfo unavailable, rejecting request");
+            tracing::warn!("Faucet: cannot determine client IP, rejecting request");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(FaucetResponse {
@@ -434,6 +482,7 @@ async fn handle_faucet_request(
     let (response_tx, response_rx) = tokio::sync::oneshot::channel();
     let item = FaucetQueueItem {
         address: address.to_string(),
+        spending_pubkey: req.spending_pubkey.clone(),
         response_tx,
     };
 
@@ -598,7 +647,11 @@ mod tests {
             },
             proxy.clone(),
         );
-        AppState { proxy, faucet }
+        AppState {
+            proxy,
+            faucet,
+            ws_broadcaster: crate::routes::ws::WsBroadcaster::new(),
+        }
     }
 
     async fn test_proxy() -> Arc<crate::proxy::NodeProxy> {
@@ -756,7 +809,11 @@ mod tests {
                 ..FaucetConfig::default()
             },
         };
-        let app = router().with_state(AppState { proxy, faucet });
+        let app = router().with_state(AppState {
+            proxy,
+            faucet,
+            ws_broadcaster: crate::routes::ws::WsBroadcaster::new(),
+        });
 
         let resp = app
             .oneshot({
@@ -790,7 +847,11 @@ mod tests {
             queue_depth: queue_depth.clone(),
             config: FaucetConfig::default(),
         };
-        let app = router().with_state(AppState { proxy, faucet });
+        let app = router().with_state(AppState {
+            proxy,
+            faucet,
+            ws_broadcaster: crate::routes::ws::WsBroadcaster::new(),
+        });
 
         let resp = app
             .oneshot({
@@ -832,7 +893,11 @@ mod tests {
             queue_depth: queue_depth.clone(),
             config: FaucetConfig::default(),
         };
-        let app = router().with_state(AppState { proxy, faucet });
+        let app = router().with_state(AppState {
+            proxy,
+            faucet,
+            ws_broadcaster: crate::routes::ws::WsBroadcaster::new(),
+        });
 
         let request = {
             let mut req = faucet_request(&test_address(0x66));

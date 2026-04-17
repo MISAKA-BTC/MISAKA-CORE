@@ -999,10 +999,7 @@ impl PeerRegistry {
     }
 
     /// R4-M4 FIX: Snapshot peer senders so callers can drop the lock before sending.
-    fn snapshot_senders(
-        &self,
-        target: Option<&misaka_p2p::PeerId>,
-    ) -> Vec<mpsc::Sender<Vec<u8>>> {
+    fn snapshot_senders(&self, target: Option<&misaka_p2p::PeerId>) -> Vec<mpsc::Sender<Vec<u8>>> {
         match target {
             Some(id) => self.peers.get(id).cloned().into_iter().collect(),
             None => self.peers.values().cloned().collect(),

@@ -202,9 +202,9 @@ impl Wallet {
 
     /// Get total balance across all accounts.
     pub fn total_balance(&self) -> u64 {
-        self.accounts
-            .keys()
-            .fold(0u64, |acc, id| acc.saturating_add(self.get_balance(*id).total))
+        self.accounts.keys().fold(0u64, |acc, id| {
+            acc.saturating_add(self.get_balance(*id).total)
+        })
     }
 
     /// Register a newly discovered UTXO.

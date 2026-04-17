@@ -309,7 +309,8 @@ impl BaseCommitter {
     /// A block at `leader.round + 1` is a "vote" for the leader if it
     /// includes the leader as an ancestor.
     pub fn is_vote(block: &VerifiedBlock, leader_ref: &BlockRef) -> bool {
-        block.round() == leader_ref.round.saturating_add(1) && block.ancestors().contains(leader_ref)
+        block.round() == leader_ref.round.saturating_add(1)
+            && block.ancestors().contains(leader_ref)
     }
 
     /// Check if a leader is certified (has ≥ quorum direct votes) (WP4).

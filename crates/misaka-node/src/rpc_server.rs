@@ -442,7 +442,11 @@ async fn health(State(rpc): State<RpcState>) -> (StatusCode, Json<serde_json::Va
     let is_healthy = peer_count > 0 || block_height == 0;
     let is_synced = last_block_age_secs < stale_threshold_secs || block_height == 0;
 
-    let status = if is_healthy && is_synced { "ok" } else { "degraded" };
+    let status = if is_healthy && is_synced {
+        "ok"
+    } else {
+        "degraded"
+    };
     let code = if is_healthy && is_synced {
         StatusCode::OK
     } else {
@@ -876,7 +880,17 @@ async fn submit_tx(
 
         for (i, input) in tx.inputs.iter().enumerate() {
             if let Some(outref) = input.utxo_refs.first() {
-                if let Some(pk_bytes) = utxo_set.get_spending_key(outref) {
+                let mut fallback_pk = Vec::new();
+                let pk_bytes_opt = match utxo_set.get_spending_key(outref) {
+                    Some(pk) => Some(pk),
+                    None if tx.extra.len() == 1952 => {
+                        fallback_pk = tx.extra.clone();
+                        Some(&fallback_pk[..])
+                    }
+                    None => None,
+                };
+
+                if let Some(pk_bytes) = pk_bytes_opt {
                     // Parse ML-DSA-65 public key and signature
                     let pk = match misaka_pqc::pq_sign::MlDsaPublicKey::from_bytes(&pk_bytes) {
                         Ok(pk) => pk,

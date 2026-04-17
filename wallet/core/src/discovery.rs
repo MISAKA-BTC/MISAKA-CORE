@@ -171,7 +171,10 @@ impl DiscoveryManager {
             state.total_utxos_found += result.utxos_found.len();
             // R7 M-8: saturating_add to prevent overflow
             state.total_balance_found = state.total_balance_found.saturating_add(
-                result.utxos_found.iter().fold(0u64, |a, u| a.saturating_add(u.amount)),
+                result
+                    .utxos_found
+                    .iter()
+                    .fold(0u64, |a, u| a.saturating_add(u.amount)),
             );
 
             // Update highest used indices

@@ -4,7 +4,7 @@
 //! has been removed. MISAKA uses a PoS emission model where block rewards
 //! are controlled by `UtxoExecutor::validate_system_emission()` with:
 //! - Per-block cap: `PHASE2_MAX_COINBASE_PER_BLOCK` (50 MISAKA)
-//! - Total supply cap: `MAX_TOTAL_SUPPLY` (21B MISAKA)
+//! - Total supply cap: `MAX_TOTAL_SUPPLY` (10B MISAKA)
 //! - Proposer address verification: `leader_address` binding
 //!
 //! The `CoinbaseManager` and `calc_block_reward()` with PoW-style halving

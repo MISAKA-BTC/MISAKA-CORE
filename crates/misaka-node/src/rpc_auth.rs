@@ -205,8 +205,8 @@ pub async fn require_api_key(
         match auth_header {
             Some(value) if value.starts_with("Bearer ") => {
                 let token = &value[7..];
-                use sha3::{Digest, Sha3_256};
                 use secrecy::ExposeSecret;
+                use sha3::{Digest, Sha3_256};
                 let token_hash = Sha3_256::digest(token.as_bytes());
                 let expected_hash = Sha3_256::digest(expected_key.expose_secret().as_bytes());
                 if !misaka_security::constant_time::ct_eq(&token_hash, &expected_hash) {

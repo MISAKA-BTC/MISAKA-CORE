@@ -119,12 +119,13 @@ impl AuthorityNode {
         let runtime_config = config.runtime_config.clone();
 
         // Spawn the consensus runtime
-        let (msg_tx, commit_rx, block_rx, metrics, runtime_handle) = spawn_consensus_runtime(
-            runtime_config,
-            context.signer.clone(),
-            store,
-            context.chain_ctx.clone(),
-        );
+        let (msg_tx, commit_rx, block_rx, metrics, _backpressure, runtime_handle) =
+            spawn_consensus_runtime(
+                runtime_config,
+                context.signer.clone(),
+                store,
+                context.chain_ctx.clone(),
+            );
 
         let node = Self {
             context,

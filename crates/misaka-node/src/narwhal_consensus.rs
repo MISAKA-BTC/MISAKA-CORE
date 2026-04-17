@@ -97,7 +97,7 @@ impl NarwhalConsensusAdapter {
 #[cfg(feature = "dag")]
 #[derive(Clone)]
 pub struct NarwhalMempoolIngress {
-    mempool: Arc<Mutex<UtxoMempool>>,
+    pub(crate) mempool: Arc<Mutex<UtxoMempool>>,
     /// R7 C-2: Shared canonical UtxoSet — same instance used by the
     /// executor so admission checks see committed state.
     utxo_set: Arc<tokio::sync::RwLock<UtxoSet>>,
@@ -112,12 +112,32 @@ impl NarwhalMempoolIngress {
         utxo_set: UtxoSet,
         relay_tx: tokio::sync::mpsc::Sender<Vec<u8>>,
         app_id: misaka_types::intent::AppId,
+        staking_config: Arc<misaka_consensus::staking::StakingConfig>,
     ) -> Self {
-        let mut mempool = UtxoMempool::new(max_size);
+        // γ-3.1: construct with StakingConfig so the mempool admit pipeline
+        // can run L1-native stake tx checks (see UtxoMempool::admit_stake_tx).
+        let mut mempool = UtxoMempool::with_staking_config(max_size, staking_config);
         mempool.set_narwhal_relay(relay_tx);
         Self {
             mempool: Arc::new(Mutex::new(mempool)),
             utxo_set: Arc::new(tokio::sync::RwLock::new(utxo_set)),
+            app_id,
+        }
+    }
+
+    pub fn new_with_shared_utxo(
+        max_size: usize,
+        utxo_set: Arc<tokio::sync::RwLock<UtxoSet>>,
+        relay_tx: tokio::sync::mpsc::Sender<Vec<u8>>,
+        app_id: misaka_types::intent::AppId,
+        staking_config: Arc<misaka_consensus::staking::StakingConfig>,
+    ) -> Self {
+        // γ-3.1: same Arc<StakingConfig> threading as `new`.
+        let mut mempool = UtxoMempool::with_staking_config(max_size, staking_config);
+        mempool.set_narwhal_relay(relay_tx);
+        Self {
+            mempool: Arc::new(Mutex::new(mempool)),
+            utxo_set,
             app_id,
         }
     }
@@ -205,6 +225,9 @@ impl NarwhalMempoolIngress {
         spending_pubkey: Option<Vec<u8>>,
         amount: u64,
     ) -> serde_json::Value {
+        let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+        let mut extra = b"faucet:".to_vec();
+        extra.extend_from_slice(&now_ms.to_le_bytes());
         let faucet_tx = UtxoTransaction {
             version: misaka_types::utxo::UTXO_TX_VERSION,
             tx_type: misaka_types::utxo::TxType::Faucet,
@@ -215,12 +238,11 @@ impl NarwhalMempoolIngress {
                 spending_pubkey,
             }],
             fee: 0,
-            extra: b"faucet".to_vec(),
+            extra,
             expiry: 0,
         };
 
         let tx_hash = hex::encode(faucet_tx.tx_hash());
-        let now_ms = chrono::Utc::now().timestamp_millis() as u64;
         let mut mempool = self.mempool.lock().await;
         match mempool.admit_system_tx(faucet_tx, now_ms) {
             Ok(_) => serde_json::json!({
@@ -259,9 +281,20 @@ impl NarwhalMempoolIngress {
                 return Err(format!("input {} has no UTXO refs", i));
             }
             let outref = &input.utxo_refs[0];
-            let pk_bytes = utxo_guard
-                .get_spending_key(outref)
-                .ok_or_else(|| format!("spending key not found for input {}", i))?;
+            let mut fallback_pk = Vec::new();
+            let pk_bytes = match utxo_guard.get_spending_key(outref) {
+                Some(pk) => pk,
+                None if tx.extra.len() == 1952 => {
+                    fallback_pk = tx.extra.clone();
+                    &fallback_pk[..]
+                }
+                None => {
+                    return Err(format!(
+                    "spending key not found for input {} in UTXO set and not provided in tx.extra",
+                    i
+                ))
+                }
+            };
 
             let pk = MlDsaPublicKey::from_bytes(pk_bytes)
                 .map_err(|e| format!("input {} invalid pubkey: {}", i, e))?;
@@ -301,6 +334,10 @@ pub struct ProposeLoopConfig {
     pub max_block_txs: usize,
     /// Status poll interval for threshold-clock round advancement.
     pub status_poll_ms: u64,
+    /// Shared backpressure flag from the consensus runtime. When set,
+    /// the propose loop sleeps instead of producing new proposals so
+    /// the commit pipeline can drain.
+    pub backpressure: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[cfg(feature = "dag")]
@@ -309,6 +346,7 @@ impl Default for ProposeLoopConfig {
         Self {
             max_block_txs: 1000,
             status_poll_ms: 100,
+            backpressure: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 }
@@ -378,6 +416,15 @@ pub fn spawn_propose_loop(
                     pending_txs.clear();
                     continue;
                 }
+            }
+
+            if config
+                .backpressure
+                .load(std::sync::atomic::Ordering::Relaxed)
+            {
+                tracing::debug!("Propose loop: commit backpressure detected, throttling 500ms");
+                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                continue;
             }
 
             let (status_tx, status_rx) = tokio::sync::oneshot::channel();
@@ -555,7 +602,11 @@ mod tests {
 
         let (relay_tx, mut relay_rx) = mempool_propose_channel(4);
         let test_app_id = AppId::new(2, [0u8; 32]);
-        let ingress = NarwhalMempoolIngress::new(16, utxo_set, relay_tx, test_app_id.clone());
+        // γ-3.1: stake_config is not exercised by this test (tx_type=TransparentTransfer)
+        // but the constructor now requires it; pass testnet() for fixture.
+        let stake_config = std::sync::Arc::new(misaka_consensus::staking::StakingConfig::testnet());
+        let ingress =
+            NarwhalMempoolIngress::new(16, utxo_set, relay_tx, test_app_id.clone(), stake_config);
         let tx = signed_sample_tx(&kp, outref, &test_app_id, [0xAB; 32]);
         let response = ingress
             .submit_tx(&serde_json::to_vec(&tx).expect("serialize tx"))

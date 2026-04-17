@@ -123,9 +123,7 @@ impl NodeConfig {
             errors.push(ConfigError::Custom("max_mempool_size must be > 0".into()));
         }
         if self.max_msg_size == 0 || self.max_msg_size > 16_777_216 {
-            errors.push(ConfigError::Custom(
-                "max_msg_size must be 1..16MiB".into(),
-            ));
+            errors.push(ConfigError::Custom("max_msg_size must be 1..16MiB".into()));
         }
         if self.dag_retention_rounds == 0 {
             errors.push(ConfigError::Custom(

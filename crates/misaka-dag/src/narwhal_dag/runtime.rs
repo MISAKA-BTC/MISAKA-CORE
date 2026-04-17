@@ -11,6 +11,8 @@
 //! - Emits committed transactions for execution
 //! - Handles timeouts for liveness
 
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error, info, warn};
@@ -63,6 +65,9 @@ pub enum ConsensusMessage {
         /// freshly-detected equivocation against a prior vote.
         reply: oneshot::Sender<bool>,
     },
+    /// Hot-reload the committee without restarting the node.
+    /// Triggered by `/api/register_validator` or `/api/deregister_validator`.
+    ReloadCommittee(Committee),
 }
 
 /// Consensus status snapshot.
@@ -143,6 +148,14 @@ pub struct ConsensusRuntime {
     commit_tx: mpsc::Sender<LinearizedOutput>,
     /// Channel to broadcast proposed blocks (bounded for backpressure).
     block_broadcast_tx: mpsc::Sender<VerifiedBlock>,
+    /// Shared backpressure signal: set when the commit channel is full,
+    /// cleared when the pending buffer drains. The propose loop reads
+    /// this to throttle block production.
+    backpressure: Arc<AtomicBool>,
+    /// Local buffer for commits that could not be sent immediately.
+    /// Drained at the top of every event-loop iteration so committed
+    /// data is never silently dropped.
+    pending_commits: VecDeque<LinearizedOutput>,
     /// v0.5.12 audit Mid 5 fix: per-round CommitVote tracker used to
     /// detect vote equivocation. Maps (round, author) → first observed
     /// digest. If a second CommitVote arrives with a different digest
@@ -165,6 +178,7 @@ impl ConsensusRuntime {
         metrics: Arc<ConsensusMetrics>,
         commit_tx: mpsc::Sender<LinearizedOutput>,
         block_broadcast_tx: mpsc::Sender<VerifiedBlock>,
+        backpressure: Arc<AtomicBool>,
         chain_ctx: misaka_types::chain_context::ChainContext,
     ) -> Self {
         let committee = config.committee.clone();
@@ -226,7 +240,61 @@ impl ConsensusRuntime {
             metrics,
             commit_tx,
             block_broadcast_tx,
+            backpressure,
+            pending_commits: VecDeque::new(),
             commit_vote_tracker: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Upper bound on the local pending-commit buffer to prevent OOM.
+    const MAX_PENDING_COMMITS: usize = 10_000;
+
+    /// Buffer a commit output for delivery. If the channel has space the
+    /// output is sent immediately; otherwise it is queued locally and will
+    /// be retried at the top of the next event-loop iteration. The
+    /// backpressure flag is set/cleared accordingly.
+    fn enqueue_commit(&mut self, output: LinearizedOutput) {
+        match self.commit_tx.try_send(output) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(output)) => {
+                self.backpressure.store(true, Ordering::Relaxed);
+                if self.pending_commits.len() >= Self::MAX_PENDING_COMMITS {
+                    error!(
+                        "CRITICAL: pending commit buffer full ({}) — dropping oldest commit",
+                        Self::MAX_PENDING_COMMITS
+                    );
+                    self.pending_commits.pop_front();
+                }
+                self.pending_commits.push_back(output);
+                warn!(
+                    "Commit channel full — backpressure (buffered: {})",
+                    self.pending_commits.len()
+                );
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                warn!("Commit channel closed");
+            }
+        }
+    }
+
+    /// Drain the local pending-commit buffer into the channel.
+    /// Called at the top of every event-loop iteration.
+    fn drain_pending_commits(&mut self) {
+        while let Some(output) = self.pending_commits.front().cloned() {
+            match self.commit_tx.try_send(output) {
+                Ok(()) => {
+                    self.pending_commits.pop_front();
+                }
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    break;
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    self.pending_commits.pop_front();
+                }
+            }
+        }
+        if self.pending_commits.is_empty() {
+            self.backpressure.store(false, Ordering::Relaxed);
         }
     }
 
@@ -243,6 +311,8 @@ impl ConsensusRuntime {
         let mut commits_since_checkpoint = 0u64;
 
         loop {
+            self.drain_pending_commits();
+
             let timeout_ms = self.timeout.timeout_ms();
             let timeout_duration = tokio::time::Duration::from_millis(timeout_ms);
 
@@ -257,15 +327,7 @@ impl ConsensusRuntime {
                                 ConsensusMetrics::inc(&self.metrics.transactions_committed);
                             }
                             for output in outputs {
-                                match self.commit_tx.try_send(output) {
-                                    Ok(()) => {}
-                                    Err(mpsc::error::TrySendError::Full(_)) => {
-                                        warn!("Commit channel full — backpressure");
-                                    }
-                                    Err(mpsc::error::TrySendError::Closed(_)) => {
-                                        warn!("Commit channel closed");
-                                    }
-                                }
+                                self.enqueue_commit(output);
                             }
 
                             // Update DAG gauge metrics
@@ -287,15 +349,7 @@ impl ConsensusRuntime {
                                 ConsensusMetrics::inc(&self.metrics.transactions_committed);
                             }
                             for output in processed.outputs {
-                                match self.commit_tx.try_send(output) {
-                                    Ok(()) => {}
-                                    Err(mpsc::error::TrySendError::Full(_)) => {
-                                        warn!("Commit channel full — backpressure");
-                                    }
-                                    Err(mpsc::error::TrySendError::Closed(_)) => {
-                                        warn!("Commit channel closed");
-                                    }
-                                }
+                                self.enqueue_commit(output);
                             }
 
                             ConsensusMetrics::set(&self.metrics.dag_size_blocks, self.dag_state.num_blocks() as u64);
@@ -335,15 +389,7 @@ impl ConsensusRuntime {
                                 );
                             }
                             for output in post_propose.outputs {
-                                match self.commit_tx.try_send(output) {
-                                    Ok(()) => {}
-                                    Err(mpsc::error::TrySendError::Full(_)) => {
-                                        warn!("Commit channel full — backpressure");
-                                    }
-                                    Err(mpsc::error::TrySendError::Closed(_)) => {
-                                        warn!("Commit channel closed");
-                                    }
-                                }
+                                self.enqueue_commit(output);
                             }
                             ConsensusMetrics::set(
                                 &self.metrics.dag_size_blocks,
@@ -403,6 +449,9 @@ impl ConsensusRuntime {
                             };
                             let _ = reply.send(is_equivocation);
                         }
+                        Some(ConsensusMessage::ReloadCommittee(new_committee)) => {
+                            self.reload_committee(new_committee);
+                        }
                         Some(ConsensusMessage::Shutdown) | None => {
                             info!("Consensus runtime shutting down");
                             self.flush_to_store();
@@ -422,6 +471,23 @@ impl ConsensusRuntime {
         }
 
         info!("Consensus runtime stopped");
+    }
+
+    /// Hot-reload the committee across all consensus subsystems.
+    fn reload_committee(&mut self, new_committee: Committee) {
+        let old_size = self.committee.size();
+        let new_size = new_committee.size();
+        info!(
+            "Hot-reloading committee: {} -> {} validators",
+            old_size, new_size,
+        );
+        self.core.change_epoch(new_committee.clone());
+        self.dag_state.update_committee(new_committee.clone());
+        self.block_manager.update_committee(new_committee.clone());
+        self.threshold_clock = ThresholdClock::new(new_committee.clone());
+        self.committee = new_committee.clone();
+        self.config.committee = new_committee;
+        info!("Committee hot-reload complete");
     }
 
     /// Handle a new block from the network.
@@ -558,6 +624,7 @@ pub const CONSENSUS_MSG_CHANNEL_CAPACITY: usize = 10_000;
 /// - commit_rx: receive committed outputs (bounded, backpressure)
 /// - block_rx: receive proposed blocks for broadcast (bounded, backpressure)
 /// - metrics: shared metrics for Prometheus export
+/// - backpressure: shared flag — `true` when the commit channel is full
 /// - handle: JoinHandle for the runtime task
 ///
 /// Task A: Also returns a `CoreThreadDispatcher` that wraps the msg_tx channel,
@@ -572,6 +639,7 @@ pub fn spawn_consensus_runtime(
     mpsc::Receiver<LinearizedOutput>,
     mpsc::Receiver<VerifiedBlock>,
     Arc<ConsensusMetrics>,
+    Arc<AtomicBool>,
     tokio::task::JoinHandle<()>,
 ) {
     // SEC-FIX CRITICAL: Verify WAL store is provided in production.
@@ -602,6 +670,7 @@ pub fn spawn_consensus_runtime(
     let (commit_tx, commit_rx) = mpsc::channel(COMMIT_CHANNEL_CAPACITY);
     let (block_tx, block_rx) = mpsc::channel(BLOCK_BROADCAST_CHANNEL_CAPACITY);
     let metrics = Arc::new(ConsensusMetrics::new());
+    let backpressure = Arc::new(AtomicBool::new(false));
 
     let runtime = ConsensusRuntime::new(
         config,
@@ -610,13 +679,14 @@ pub fn spawn_consensus_runtime(
         metrics.clone(),
         commit_tx,
         block_tx,
+        backpressure.clone(),
         chain_ctx,
     );
     let handle = tokio::spawn(async move {
         runtime.run(msg_rx).await;
     });
 
-    (msg_tx, commit_rx, block_rx, metrics, handle)
+    (msg_tx, commit_rx, block_rx, metrics, backpressure, handle)
 }
 
 /// Task A: Convenience wrapper that also returns a CoreThreadDispatcher.
@@ -634,15 +704,23 @@ pub fn spawn_consensus_runtime_with_dispatcher(
     mpsc::Receiver<LinearizedOutput>,
     mpsc::Receiver<VerifiedBlock>,
     Arc<ConsensusMetrics>,
+    Arc<AtomicBool>,
     tokio::task::JoinHandle<()>,
 ) {
-    let (msg_tx, commit_rx, block_rx, metrics, handle) =
+    let (msg_tx, commit_rx, block_rx, metrics, backpressure, handle) =
         spawn_consensus_runtime(config, signer, store, chain_ctx);
 
     // Wrap msg_tx in a typed dispatcher
     let dispatcher = super::core_thread::CoreThreadDispatcher::from_consensus_channel(msg_tx);
 
-    (dispatcher, commit_rx, block_rx, metrics, handle)
+    (
+        dispatcher,
+        commit_rx,
+        block_rx,
+        metrics,
+        backpressure,
+        handle,
+    )
 }
 
 #[cfg(test)]
@@ -668,7 +746,7 @@ mod tests {
     async fn test_runtime_shutdown() {
         let config = test_config(4);
         let signer: Arc<dyn BlockSigner> = Arc::new(MlDsa65TestSigner::generate());
-        let (msg_tx, commit_rx, _block_rx, _metrics, handle) =
+        let (msg_tx, commit_rx, _block_rx, _metrics, _bp, handle) =
             spawn_consensus_runtime(config, signer, None, TestValidatorSet::chain_ctx());
 
         msg_tx.try_send(ConsensusMessage::Shutdown).unwrap();
@@ -685,7 +763,7 @@ mod tests {
     async fn test_runtime_status() {
         let config = test_config(4);
         let signer: Arc<dyn BlockSigner> = Arc::new(MlDsa65TestSigner::generate());
-        let (msg_tx, _commit_rx, _block_rx, _metrics, handle) =
+        let (msg_tx, _commit_rx, _block_rx, _metrics, _bp, handle) =
             spawn_consensus_runtime(config, signer, None, TestValidatorSet::chain_ctx());
 
         let (reply_tx, reply_rx) = oneshot::channel();
@@ -707,7 +785,7 @@ mod tests {
         let mut config = test_config(4);
         config.timeout_base_ms = 60_000; // long timeout to avoid interference
         let signer: Arc<dyn BlockSigner> = Arc::new(MlDsa65TestSigner::generate());
-        let (msg_tx, _commit_rx, mut block_rx, metrics, handle) =
+        let (msg_tx, _commit_rx, mut block_rx, metrics, _bp, handle) =
             spawn_consensus_runtime(config, signer, None, TestValidatorSet::chain_ctx());
 
         // Propose a block
