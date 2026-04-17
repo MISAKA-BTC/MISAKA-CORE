@@ -1458,6 +1458,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "misaka-authority-aggregation"
+version = "0.9.0"
+dependencies = [
+ "async-trait",
+ "misaka-protocol-config",
+ "misaka-types",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "misaka-cli"
 version = "0.9.0"
 dependencies = [
@@ -1624,6 +1636,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "misaka-genesis-builder"
+version = "0.9.0"
+dependencies = [
+ "bincode",
+ "hex",
+ "misaka-crypto",
+ "misaka-dag",
+ "misaka-protocol-config",
+ "misaka-types",
+ "serde",
+ "serde_json",
+ "sha3",
+ "tempfile",
+ "thiserror 1.0.69",
+ "toml",
+]
+
+[[package]]
 name = "misaka-governance"
 version = "0.9.0"
 dependencies = [
@@ -1646,6 +1676,28 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_with",
+]
+
+[[package]]
+name = "misaka-loadgen"
+version = "0.9.0"
+dependencies = [
+ "async-trait",
+ "bincode",
+ "borsh",
+ "clap",
+ "hex",
+ "misaka-crypto",
+ "misaka-pqc",
+ "misaka-protocol-config",
+ "misaka-types",
+ "rand 0.8.5",
+ "serde",
+ "serde_json",
+ "sha3",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -1882,6 +1934,19 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "misaka-smt"
+version = "0.9.0"
+dependencies = [
+ "borsh",
+ "criterion",
+ "hex",
+ "once_cell",
+ "serde",
+ "sha3",
+ "thiserror 1.0.69",
 ]
 
 [[package]]

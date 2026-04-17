@@ -1,0 +1,27 @@
+[package]
+name = "misaka-sdk"
+description = "MISAKA eUTXO client SDK — TxBuilder, ScriptBuilder, script templates"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["eutxo"]
+eutxo = [
+    "misaka-types/eutxo-v1-types",
+    "misaka-protocol-config/eutxo-v2-params",
+]
+
+[dependencies]
+misaka-types = { path = "../misaka-types" }
+misaka-protocol-config = { path = "../misaka-protocol-config" }
+misaka-pqc = { path = "../misaka-pqc" }
+borsh = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+hex = { workspace = true }
+sha3 = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

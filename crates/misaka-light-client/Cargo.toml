@@ -1,0 +1,22 @@
+[package]
+name = "misaka-light-client"
+description = "Trust-minimized PQ light client for MISAKA Network — ML-DSA-65 verification only"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+misaka-types           = { path = "../misaka-types" }
+misaka-crypto          = { path = "../misaka-crypto" }
+misaka-protocol-config = { path = "../misaka-protocol-config" }
+sha3      = { workspace = true }
+thiserror = { workspace = true }
+serde     = { workspace = true }
+bincode   = { workspace = true }
+hex       = { workspace = true }
+
+[dev-dependencies]
+misaka-pqc = { path = "../misaka-pqc" }
+
+[lints]
+workspace = true

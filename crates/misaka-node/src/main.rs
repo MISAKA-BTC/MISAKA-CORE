@@ -6460,13 +6460,12 @@ async fn start_dag_node(
                     // γ-persistence: snapshot after auto-register so that a
                     // Solana-verified local validator survives a restart
                     // without re-running the full bootstrap path.
-                    if let Err(e) =
-                        crate::validator_lifecycle_persistence::persist_global_state(
-                            &validator_registry,
-                            &current_epoch,
-                            &epoch_progress,
-                        )
-                        .await
+                    if let Err(e) = crate::validator_lifecycle_persistence::persist_global_state(
+                        &validator_registry,
+                        &current_epoch,
+                        &epoch_progress,
+                    )
+                    .await
                     {
                         warn!(
                             "SEC-STAKE: persist_global_state after auto-register                              failed (change stays in-memory): {}",
@@ -6506,13 +6505,12 @@ async fn start_dag_node(
                 // γ-persistence: if mark_stake_verified fired, durably
                 // snapshot the registry so the verification survives a
                 // restart without re-reading the CLI --stake-signature.
-                if let Err(e) =
-                    crate::validator_lifecycle_persistence::persist_global_state(
-                        &validator_registry,
-                        &current_epoch,
-                        &epoch_progress,
-                    )
-                    .await
+                if let Err(e) = crate::validator_lifecycle_persistence::persist_global_state(
+                    &validator_registry,
+                    &current_epoch,
+                    &epoch_progress,
+                )
+                .await
                 {
                     warn!(
                         "SEC-STAKE: persist_global_state after                          mark_stake_verified failed (change stays in-memory): {}",

@@ -31,6 +31,17 @@ members = [
     "crates/misaka-utils",
     "crates/misaka-security",
     "crates/misaka-txscript",
+    # ── v0.8.0 merged adoption (Phase 1 = dead code only, wiring comes in PR C/D) ──
+    # These crates are part of the misaka-test-net-merged v0.8.0 snapshot that
+    # ships the eUTXO / SMT / SDK / audit layer. They build standalone but are
+    # NOT referenced by misaka-node in Phase 1 mainnet, so their output is not
+    # compiled into the production node. Phase 1 ships pure UTXO + self-stake.
+    # v0.9.0 hard fork wires misaka-smt into utxo_set state root.
+    # v2.0 hard fork wires eUTXO execution (misaka-eutxo-audit, sdk, etc.).
+    "crates/misaka-smt",
+    "crates/misaka-genesis-builder",
+    "crates/misaka-authority-aggregation",
+    "crates/misaka-loadgen",
     # misaka-vm: DELETED (Phase 25). VM is not implemented.
     # See docs/design/VM_ROADMAP.md for v1.1 plan.
     "components/addressmanager",
@@ -98,6 +109,12 @@ time = "=0.3.36"
 # non-test code paths via RUSTFLAGS). Grade-A promotion to "deny" + a
 # #![cfg_attr(test, allow(clippy::unwrap_used))] per-crate sweep is
 # tracked separately.
+# Added for v0.8.0 merged crates adoption (PR A dead code).
+once_cell = "1"
+async-trait = "0.1"
+chacha20 = "0.9"
+num-bigint = "0.4"
+
 [workspace.lints.clippy]
 unwrap_used = "warn"
 expect_used = "warn"  # Grade A target: promote to "deny" after systematic removal
