@@ -40,7 +40,15 @@ fn make_block(round: Round, author: AuthorityIndex, ancestors: Vec<BlockRef>) ->
         author,
         timestamp_ms: round as u64 * 1000 + author as u64,
         ancestors,
-        transactions: vec![vec![round as u8, author as u8; 100]], // 100-byte tx
+        transactions: vec![{
+            // 100-byte tx: alternating round, author
+            let mut tx = Vec::with_capacity(100);
+            for _ in 0..50 {
+                tx.push(round as u8);
+                tx.push(author as u8);
+            }
+            tx
+        }],
         commit_votes: vec![],
         tx_reject_votes: vec![],
         state_root: [0u8; 32],
@@ -53,10 +61,10 @@ fn make_block(round: Round, author: AuthorityIndex, ancestors: Vec<BlockRef>) ->
 fn build_dag(committee_size: usize, rounds: u32) -> (DagState, Vec<Vec<BlockRef>>) {
     let committee = Committee::new_for_test(committee_size);
     let mut dag = DagState::new(committee, DagStateConfig::default());
-    let mut all_refs = Vec::new();
+    let mut all_refs: Vec<Vec<BlockRef>> = Vec::new();
 
     for round in 1..=rounds {
-        let prev = if round == 1 {
+        let prev: Vec<BlockRef> = if round == 1 {
             vec![]
         } else {
             all_refs.last().unwrap().clone()

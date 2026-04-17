@@ -361,6 +361,7 @@ pub enum SigningError {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
 

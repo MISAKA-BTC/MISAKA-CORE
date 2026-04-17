@@ -16,7 +16,7 @@
 
 use misaka_muhash::MuHash;
 use misaka_types::utxo::{OutputRef, TxOutput, TxType, UtxoTransaction};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 /// A stored UTXO entry.
 #[derive(Debug, Clone)]
@@ -136,7 +136,6 @@ pub struct UtxoSet {
 /// Phase 3 C6: Compute the canonical byte representation of a UTXO element
 /// for MuHash accumulation. Uses borsh encoding for determinism.
 fn utxo_element_bytes(outref: &OutputRef, output: &TxOutput, height: u64) -> Vec<u8> {
-    use borsh::BorshSerialize;
     let mut buf = Vec::with_capacity(128);
     buf.extend_from_slice(b"MISAKA:muhash:utxo:v1:");
     // SEC-FIX CRITICAL: borsh failures MUST panic, not silently skip.

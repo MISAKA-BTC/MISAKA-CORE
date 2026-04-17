@@ -300,15 +300,12 @@ fn validate_and_apply_block_inner(
 
             // ── ML-DSA-65 direct signature verification (transparent mode) ──
             {
-                let raw_sig = match &vtx.ring_proofs[in_idx] {
-                    VerifiedProof::Transparent { raw_sig } => raw_sig.clone(),
-                    _ => {
-                        return Err(BlockError::TxRingSig {
-                            index: tx_idx,
-                            reason: "transparent tx requires VerifiedProof::Transparent".into(),
-                        });
-                    }
-                };
+                // Phase 2c-B removed the LRS / LogRing variants; the only
+                // surviving  variant is , so
+                // destructure directly. A future variant would need to be
+                // handled here explicitly — the compiler will complain.
+                let VerifiedProof::Transparent { raw_sig } = &vtx.ring_proofs[in_idx];
+                let raw_sig = raw_sig.clone();
 
                 // Get ML-DSA-65 public key from resolved spending key
                 let ml_dsa_pk_bytes = &vtx.raw_spending_keys[in_idx];
