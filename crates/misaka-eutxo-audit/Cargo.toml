@@ -1,0 +1,37 @@
+[package]
+name = "misaka-eutxo-audit"
+description = "eUTXO integration tests, fuzz testing, and cost model benchmarks (E8)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["full"]
+full = [
+    "misaka-types/eutxo-v1-types",
+    "misaka-protocol-config/eutxo-v2-params",
+    "misaka-txscript/eutxo-v1-vm",
+    "misaka-storage/eutxo-v1-state",
+    "misaka-mempool/eutxo-v1-vm",
+]
+
+[dependencies]
+misaka-types = { path = "../misaka-types", features = ["eutxo-v1-types"] }
+misaka-protocol-config = { path = "../misaka-protocol-config", features = ["eutxo-v2-params"] }
+misaka-txscript = { path = "../misaka-txscript", features = ["eutxo-v1-vm"] }
+misaka-storage = { path = "../misaka-storage", features = ["eutxo-v1-state"] }
+misaka-mempool = { path = "../misaka-mempool", features = ["eutxo-v1-vm"] }
+misaka-muhash = { path = "../misaka-muhash" }
+misaka-pqc = { path = "../misaka-pqc" }
+misaka-sdk = { path = "../misaka-sdk" }
+borsh = { workspace = true }
+hex = { workspace = true }
+sha3 = { workspace = true }
+thiserror = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+proptest = "1"
+
+[lints]
+workspace = true

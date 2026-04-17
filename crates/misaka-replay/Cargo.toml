@@ -1,0 +1,32 @@
+[package]
+name = "misaka-replay"
+description = "Forensic replay engine for MISAKA — re-execute past transactions, detect state anomalies"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+cli = ["dep:clap"]
+differential = []  # Phase 5-1.5: differential execution mode
+
+[dependencies]
+misaka-types           = { path = "../misaka-types" }
+misaka-protocol-config = { path = "../misaka-protocol-config" }
+misaka-crypto          = { path = "../misaka-crypto" }
+misaka-storage         = { path = "../misaka-storage" }
+misaka-execution       = { path = "../misaka-execution" }
+sha3       = { workspace = true }
+thiserror  = { workspace = true }
+serde      = { workspace = true }
+bincode    = { workspace = true }
+tracing    = { workspace = true }
+hex        = { workspace = true }
+borsh      = { workspace = true }
+clap       = { workspace = true, optional = true }
+
+[dev-dependencies]
+misaka-pqc = { path = "../misaka-pqc" }
+
+[lints]
+workspace = true

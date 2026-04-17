@@ -1,0 +1,33 @@
+[package]
+name = "misaka-genesis-builder"
+description = "MISAKA Network genesis block builder — deterministic, auditable"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+# Enables to_committee() conversion — pulls in misaka-dag types.
+dag = ["dep:misaka-dag"]
+# Test placeholder generators (deterministic fake validators).
+# compile_error! prevents shipping in release builds.
+test-utils = []
+
+[dependencies]
+misaka-types           = { path = "../misaka-types" }
+misaka-protocol-config = { path = "../misaka-protocol-config" }
+misaka-crypto          = { path = "../misaka-crypto" }
+misaka-dag             = { path = "../misaka-dag", optional = true }
+sha3      = { workspace = true }
+hex       = { workspace = true }
+bincode   = { workspace = true }
+serde     = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+toml      = "0.8"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true
