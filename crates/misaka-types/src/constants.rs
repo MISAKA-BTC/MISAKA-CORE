@@ -49,7 +49,16 @@ pub const QUORUM_THRESHOLD_BPS: u16 = 6667; // 2/3 (15 of 21)
 pub const SR_ROUND_SIZE: u64 = NUM_SUPER_REPRESENTATIVES as u64;
 
 // ═══ Dual-Lane Block Timing ═══
-pub const FAST_LANE_BLOCK_TIME_SECS: u64 = 2;
+//
+// v0.8.9 (Phase 0.5a + BLOCKER M): fast lane raised from 2 → 10 seconds
+// to cut per-day storage 5× and log volume ~5×. All depth constants below
+// are written as `fast_depth(wall_secs)` and therefore scale automatically
+// to preserve wall-clock semantics — epoch remains 24h, finality remains
+// 60s, coinbase maturity remains 10 min, pruning remains 7 days.
+// The genesis hash does NOT include timing (see genesis.rs::compute_genesis_hash),
+// so this change does not fork the chain; an atomic reset is still needed
+// because on-disk state layout for RocksDB changes (see BLOCKER M).
+pub const FAST_LANE_BLOCK_TIME_SECS: u64 = 10;
 pub const ZKP_LANE_BLOCK_TIME_SECS: u64 = 30;
 pub const DEFAULT_BPS: u64 = 1;
 pub const TARGET_BLOCK_INTERVAL_MS: u64 = FAST_LANE_BLOCK_TIME_SECS * 1000;
@@ -71,10 +80,10 @@ pub const fn zkp_depth(wall_secs: u64) -> u64 {
 
 // ═══ Finality & Maturity (time-based) ═══
 pub const FINALITY_TIME_SECS: u64 = TIME_1_MIN;
-pub const FINALITY_DEPTH_FAST: u64 = fast_depth(FINALITY_TIME_SECS); // 30
+pub const FINALITY_DEPTH_FAST: u64 = fast_depth(FINALITY_TIME_SECS); // v0.8.9: 30 → 6 (same 60 s wall-clock)
 pub const FINALITY_DEPTH_ZKP: u64 = zkp_depth(FINALITY_TIME_SECS); // 2
 pub const MATURITY_TIME_SECS: u64 = TIME_10_MIN;
-pub const COINBASE_MATURITY_FAST: u64 = fast_depth(MATURITY_TIME_SECS); // 300
+pub const COINBASE_MATURITY_FAST: u64 = fast_depth(MATURITY_TIME_SECS); // v0.8.9: 300 → 60 (same 10 min wall-clock)
 pub const COINBASE_MATURITY_ZKP: u64 = zkp_depth(MATURITY_TIME_SECS); // 20
 pub const FINALITY_DEPTH: u64 = FINALITY_DEPTH_FAST;
 pub const COINBASE_MATURITY: u64 = COINBASE_MATURITY_FAST;
@@ -89,9 +98,9 @@ pub const RECOVERY_DEPTH_ZKP: u64 = zkp_depth(RECOVERY_TIME_SECS); // 720
 
 // ═══ Pruning & Epoch (time-based) ═══
 pub const PRUNING_TIME_SECS: u64 = TIME_7_DAYS;
-pub const PRUNING_DEPTH: u64 = fast_depth(PRUNING_TIME_SECS); // 302400
+pub const PRUNING_DEPTH: u64 = fast_depth(PRUNING_TIME_SECS); // v0.8.9: 302400 → 60480 (same 7-day wall-clock)
 pub const EPOCH_TIME_SECS: u64 = TIME_24_HOURS;
-pub const EPOCH_LENGTH: u64 = fast_depth(EPOCH_TIME_SECS); // 43200
+pub const EPOCH_LENGTH: u64 = fast_depth(EPOCH_TIME_SECS); // v0.8.9: 43200 → 8640 (same 24 h wall-clock)
 
 // ═══ Shielded Anchor Age (time-based) ═══
 pub const SHIELDED_ANCHOR_AGE_TIME_SECS: u64 = TIME_1_HOUR;
@@ -171,11 +180,13 @@ const _: () = {
     assert!(MAX_BLOCK_MASS > ESTIMATED_STD_TX_MASS * 10);
     assert!(MAX_TX_MASS < MAX_BLOCK_MASS);
     assert!(PQ_SIG_OVERHEAD < MAX_TX_SIZE);
-    assert!(FINALITY_DEPTH_FAST == 30);
+    // v0.8.9 Phase 0.5a: FAST_LANE_BLOCK_TIME_SECS 2 → 10 cascades here.
+    // Depth values drop 5×, ZKP-lane values unchanged (ZKP_LANE_BLOCK_TIME_SECS = 30).
+    assert!(FINALITY_DEPTH_FAST == 6);
     assert!(FINALITY_DEPTH_ZKP == 2);
-    assert!(COINBASE_MATURITY_FAST == 300);
-    assert!(fast_depth(TIME_24_HOURS) == 43200);
+    assert!(COINBASE_MATURITY_FAST == 60);
+    assert!(fast_depth(TIME_24_HOURS) == 8640);
     assert!(zkp_depth(TIME_24_HOURS) == 2880);
-    assert!(fast_depth(TIME_7_DAYS) == 302400);
+    assert!(fast_depth(TIME_7_DAYS) == 60480);
     assert!(zkp_depth(TIME_7_DAYS) == 20160);
 };

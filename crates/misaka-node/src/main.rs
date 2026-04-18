@@ -353,7 +353,11 @@ struct Cli {
     dag_k: u64,
 
     /// DAG checkpoint interval (blue_score units).
-    #[arg(long, default_value = "50")]
+    ///
+    /// v0.8.9 Phase 0.5a: default dropped 50 → 10 so the wall-clock
+    /// cadence (~500 s) stays close to pre-change after
+    /// `FAST_LANE_BLOCK_TIME_SECS 2 → 10`.
+    #[arg(long, default_value = "10")]
     dag_checkpoint_interval: u64,
 
     /// Maximum transactions per DAG block.
@@ -1760,7 +1764,9 @@ async fn start_narwhal_node(
         timeout_base_ms: 2000,
         timeout_max_ms: 60_000,
         dag_config: DagStateConfig::default(),
-        checkpoint_interval: 100,
+        // v0.8.9 Phase 0.5a: 100 → 20 to preserve ~200 s checkpoint wall-clock
+        // cadence after FAST_LANE_BLOCK_TIME_SECS 2 → 10.
+        checkpoint_interval: 20,
         custom_verifier: None, // production MlDsa65Verifier (default)
         retention_rounds: 10_000,
     };

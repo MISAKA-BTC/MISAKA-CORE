@@ -18,7 +18,14 @@ use super::{Checkpoint, CheckpointDigest, CheckpointVote, FinalizedCheckpoint};
 use crate::narwhal_types::block::SignatureVerifier;
 
 /// Checkpoint interval — create checkpoint every N commits.
-pub const CHECKPOINT_INTERVAL: u64 = 100;
+///
+/// v0.8.9 (Phase 0.5a): lowered 100 → 20 alongside the
+/// `FAST_LANE_BLOCK_TIME_SECS: 2 → 10` change to preserve the
+/// ~200 s wall-clock checkpoint cadence. This is a raw commit
+/// counter (not derived via `fast_depth`); folding it into the
+/// `fast_depth(TIME_200_SECS)` family is left as a Phase 2
+/// retrofit — cf. docs/investigations/round-interval-10s-impact.md.
+pub const CHECKPOINT_INTERVAL: u64 = 20;
 
 /// Manages checkpoint lifecycle.
 pub struct CheckpointManager {

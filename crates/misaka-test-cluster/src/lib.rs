@@ -61,7 +61,8 @@ impl TestClusterBuilder {
             epoch_duration_ms: 10_000,
             leader_round_wave: 2,
             timeout_base_ms: 2_000,
-            checkpoint_interval: 100,
+            // v0.8.9 Phase 0.5a: 100 → 20 — see CHECKPOINT_INTERVAL in narwhal_finality
+            checkpoint_interval: 20,
         }
     }
 

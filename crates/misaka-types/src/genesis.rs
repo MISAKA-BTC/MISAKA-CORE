@@ -33,7 +33,7 @@ impl ChainProfile {
             ki_proof_required: true,
             min_ring_size: 4,
             max_anonymity_set: 16,
-            block_time_secs: 2, // Fast lane default (ZKP lane: 30s)
+            block_time_secs: crate::constants::FAST_LANE_BLOCK_TIME_SECS, // Fast lane default (ZKP lane: 30s)
             max_txs_per_block: 1000,
         }
     }
@@ -47,7 +47,7 @@ impl ChainProfile {
             ki_proof_required: true,
             min_ring_size: 4,
             max_anonymity_set: 16,
-            block_time_secs: 2, // Fast lane default (ZKP lane: 30s)
+            block_time_secs: crate::constants::FAST_LANE_BLOCK_TIME_SECS, // Fast lane default (ZKP lane: 30s)
             max_txs_per_block: 1000,
         }
     }
