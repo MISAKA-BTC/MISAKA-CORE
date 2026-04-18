@@ -29,22 +29,28 @@ use crate::narwhal_types::block::*;
 use crate::narwhal_types::commit::*;
 
 // ─── Column family names ─────────────────────────────────────
+//
+// CF names live in `super::columns::NarwhalCf`. The aliases below keep
+// existing call sites compiling without churn; the enum owns the
+// canonical source of truth and is tested against these literals.
 #[cfg(feature = "rocksdb")]
-const CF_BLOCKS: &str = "narwhal_blocks";
+use super::columns::NarwhalCf;
 #[cfg(feature = "rocksdb")]
-const CF_COMMITS: &str = "narwhal_commits";
+const CF_BLOCKS: &str = NarwhalCf::Blocks.name();
 #[cfg(feature = "rocksdb")]
-const CF_META: &str = "narwhal_meta";
+const CF_COMMITS: &str = NarwhalCf::Commits.name();
 #[cfg(feature = "rocksdb")]
-const CF_LAST_COMMITTED: &str = "narwhal_last_committed";
+const CF_META: &str = NarwhalCf::Meta.name();
 #[cfg(feature = "rocksdb")]
-const CF_EQUIVOCATION_EVIDENCE: &str = "narwhal_equivocation_evidence";
+const CF_LAST_COMMITTED: &str = NarwhalCf::LastCommitted.name();
 #[cfg(feature = "rocksdb")]
-const CF_COMMITTED_TX_FILTER: &str = "narwhal_committed_tx_filter";
+const CF_EQUIVOCATION_EVIDENCE: &str = NarwhalCf::EquivocationEvidence.name();
 #[cfg(feature = "rocksdb")]
-const CF_TX_INDEX: &str = "narwhal_tx_index";
+const CF_COMMITTED_TX_FILTER: &str = NarwhalCf::CommittedTxFilter.name();
 #[cfg(feature = "rocksdb")]
-const CF_ADDR_INDEX: &str = "narwhal_addr_index";
+const CF_TX_INDEX: &str = NarwhalCf::TxIndex.name();
+#[cfg(feature = "rocksdb")]
+const CF_ADDR_INDEX: &str = NarwhalCf::AddrIndex.name();
 
 // ─── Meta keys ───────────────────────────────────────────────
 #[cfg(feature = "rocksdb")]
