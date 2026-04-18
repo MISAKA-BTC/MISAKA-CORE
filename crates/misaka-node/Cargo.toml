@@ -13,7 +13,6 @@ license.workspace = true
 default = ["dag"]
 dag = ["misaka-dag", "misaka-dag/rocksdb", "misaka-mempool/dag"]
 # GhostDAG compatibility layer (legacy — being phased out)
-ghostdag-compat = ["dag"]
 # Legacy feature alias retained for older builds that still reference it.
 experimental_dag = ["dag"]
 # REMOVED: Q-DAG-CT — deprecated in v1.0.

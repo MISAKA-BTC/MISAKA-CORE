@@ -105,21 +105,21 @@ pub mod sync;
 #[cfg(not(feature = "dag"))]
 pub mod sync_relay_transport;
 
-// ── v2 modules (DAG — GhostDAG compat, being phased out) ──
-#[cfg(all(feature = "dag", feature = "ghostdag-compat"))]
-pub mod dag_narwhal_dissemination_service;
-#[cfg(all(feature = "dag", feature = "ghostdag-compat"))]
-pub mod dag_p2p_network;
-#[cfg(all(feature = "dag", feature = "ghostdag-compat"))]
-pub mod dag_p2p_surface;
-#[cfg(all(feature = "dag", feature = "ghostdag-compat"))]
-pub mod dag_p2p_transport;
-#[cfg(all(feature = "dag", feature = "ghostdag-compat"))]
-pub mod dag_rpc;
-#[cfg(all(feature = "dag", feature = "ghostdag-compat"))]
-pub mod dag_rpc_service;
-#[cfg(all(feature = "dag", feature = "ghostdag-compat"))]
-pub mod dag_tx_dissemination_service;
+// ── v2 modules (DAG — GhostDAG compat, REMOVED in BLOCKER E cleanup) ──
+//
+// The `ghostdag-compat` feature was retained after 0.9.0 β-2 as a legacy
+// compile path, but its source files (`dag_narwhal_dissemination_service`,
+// `dag_p2p_network` / surface / transport, `dag_rpc`, `dag_rpc_service`,
+// `dag_tx_dissemination_service`) broke against the narwhal-only code
+// elsewhere in the tree. `cargo build --workspace --all-features` failed
+// with 64 errors as of PR E.
+//
+// Cleanup for mainnet readiness (BLOCKER E):
+//   1. Deleted the 6 dead source files (~16 KLOC).
+//   2. Dropped the `ghostdag-compat` feature from Cargo.toml.
+//   3. Removed the gated `pub mod` declarations that used to live here.
+//
+// Active DAG path is the `narwhal_*` modules below (feature = "dag" only).
 #[cfg(feature = "dag")]
 pub mod narwhal_block_relay_transport;
 #[cfg(feature = "dag")]
@@ -127,8 +127,9 @@ pub mod narwhal_consensus;
 #[cfg(feature = "dag")]
 pub mod narwhal_runtime_bridge;
 // Phase 2c-B D1: narwhal_tx_executor deleted (replaced by utxo_executor)
-#[cfg(all(feature = "dag", feature = "ghostdag-compat"))]
-pub mod jsonrpc;
+// BLOCKER E: `jsonrpc` module was also gated on `ghostdag-compat`; dropped
+// alongside the other legacy modules. If a production JSON-RPC surface is
+// needed it should be re-added via the narwhal-native RPC path.
 #[cfg(feature = "dag")]
 pub mod utxo_executor;
 pub mod ws;
