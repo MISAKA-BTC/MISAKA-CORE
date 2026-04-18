@@ -381,7 +381,7 @@ mod tests {
 
         let commits = committer.try_commit(
             &dag,
-            &crate::narwhal_dag::slot_equivocation_ledger::SlotEquivocationLedger::new(),
+            &crate::narwhal_dag::slot_equivocation_ledger::SlotEquivocationLedger::new(u32::MAX),
         );
         assert_eq!(commits.len(), 1);
         assert!(commits[0].is_direct);
@@ -409,7 +409,7 @@ mod tests {
 
         let commits = committer.try_commit(
             &dag,
-            &crate::narwhal_dag::slot_equivocation_ledger::SlotEquivocationLedger::new(),
+            &crate::narwhal_dag::slot_equivocation_ledger::SlotEquivocationLedger::new(u32::MAX),
         );
         // With 2 slots, we can potentially commit 2 leaders per wave
         // Leader(round=2, slot=0) = (2*2+0)%4 = 0

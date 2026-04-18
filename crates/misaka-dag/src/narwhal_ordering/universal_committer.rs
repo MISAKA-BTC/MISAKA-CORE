@@ -346,7 +346,7 @@ mod tests {
 
         let commits = committer.try_commit(
             &dag,
-            &crate::narwhal_dag::slot_equivocation_ledger::SlotEquivocationLedger::new(),
+            &crate::narwhal_dag::slot_equivocation_ledger::SlotEquivocationLedger::new(u32::MAX),
         );
         assert_eq!(commits.len(), 1);
         assert!(commits[0].is_direct);
@@ -376,7 +376,7 @@ mod tests {
 
         let commits = committer.try_commit(
             &dag,
-            &crate::narwhal_dag::slot_equivocation_ledger::SlotEquivocationLedger::new(),
+            &crate::narwhal_dag::slot_equivocation_ledger::SlotEquivocationLedger::new(u32::MAX),
         );
         assert_eq!(commits.len(), 2);
         assert!(!commits[0].is_direct); // indirect via anchor
@@ -396,7 +396,7 @@ mod tests {
 
         let commits = committer.try_commit(
             &dag,
-            &crate::narwhal_dag::slot_equivocation_ledger::SlotEquivocationLedger::new(),
+            &crate::narwhal_dag::slot_equivocation_ledger::SlotEquivocationLedger::new(u32::MAX),
         );
         assert!(commits.is_empty());
     }
@@ -413,7 +413,7 @@ mod tests {
 
         let commits = committer.try_commit(
             &dag,
-            &crate::narwhal_dag::slot_equivocation_ledger::SlotEquivocationLedger::new(),
+            &crate::narwhal_dag::slot_equivocation_ledger::SlotEquivocationLedger::new(u32::MAX),
         );
         if commits.len() >= 2 {
             let first_digest = commits[0].digest();

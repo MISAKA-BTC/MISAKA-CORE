@@ -59,7 +59,7 @@ impl SimNode {
             dag: DagState::new(committee.clone(), DagStateConfig::default()),
             block_manager: BlockManager::new(committee.clone()),
             committer: UniversalCommitter::new(committee.clone(), ls, 1, 2),
-            ledger: SlotEquivocationLedger::new(),
+            ledger: SlotEquivocationLedger::new(u32::MAX),
             linearizer: Linearizer::new(),
             finalizer: CommitFinalizer::new(),
             clock: ThresholdClock::new(committee.clone()),
@@ -458,7 +458,7 @@ fn test_pipelined_committer_dual_slot() {
         prev = refs;
     }
 
-    let ledger = SlotEquivocationLedger::new();
+    let ledger = SlotEquivocationLedger::new(u32::MAX);
     let commits = committer.try_commit(&dag, &ledger);
     assert!(
         !commits.is_empty(),

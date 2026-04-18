@@ -65,7 +65,7 @@ fuzz_target!(|data: &[u8]| {
         let leader_ref = leader.reference();
 
         // Direct decide — must not panic
-        let ledger = misaka_dag::narwhal_dag::slot_equivocation_ledger::SlotEquivocationLedger::new();
+        let ledger = misaka_dag::narwhal_dag::slot_equivocation_ledger::SlotEquivocationLedger::new(u32::MAX);
         let _decision = committer.try_direct_decide(&leader_ref, &dag, &ledger);
 
         // Indirect decide with anchor — must not panic

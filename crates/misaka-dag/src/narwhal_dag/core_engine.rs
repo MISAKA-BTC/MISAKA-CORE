@@ -237,7 +237,13 @@ impl CoreEngine {
             app_id: misaka_types::intent::AppId::new(chain_ctx.chain_id, chain_ctx.genesis_hash),
             committee,
             chain_ctx,
-            ledger: SlotEquivocationLedger::new(),
+            // B3-a: bind the ledger to our own authority index so that
+            // post-wipe peer-cache replays of our own pre-restart block
+            // are filtered out of the self-ban path. The node's
+            // `authority_index` is the same value passed to the
+            // `BlockSigner`, so both sides of a replay can agree on
+            // identity.
+            ledger: SlotEquivocationLedger::new(authority_index),
             rejected_tx_digests: std::collections::HashSet::new(),
             leader_last_committed_round: std::collections::HashMap::new(),
             slow_leaders: std::collections::HashSet::new(),

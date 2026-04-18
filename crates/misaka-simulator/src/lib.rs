@@ -217,7 +217,10 @@ impl SimNode {
             dag: DagState::new(committee.clone(), DagStateConfig::default()),
             block_manager: BlockManager::new(committee.clone()),
             committer: UniversalCommitter::new(committee.clone(), ls, 1, 2),
-            ledger: SlotEquivocationLedger::new(),
+            // B3-a: SimulatedNode.authority is the same authority index
+            // passed to CoreEngine above; the ledger must agree on identity
+            // so self-equivocation replays (in replay tests) are filtered.
+            ledger: SlotEquivocationLedger::new(authority),
             linearizer: Linearizer::new(),
             finalizer: CommitFinalizer::new(),
             clock: ThresholdClock::new(committee.clone()),
