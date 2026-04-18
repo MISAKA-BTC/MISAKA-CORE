@@ -15,6 +15,9 @@
 //! - Query existence and lookup
 
 use misaka_muhash::MuHash;
+// PR E: SMT state root migration.
+use misaka_smt::key::{smt_key, smt_value};
+use misaka_smt::tree::SparseMerkleTree;
 use misaka_types::utxo::{OutputRef, TxOutput, TxType, UtxoTransaction};
 use std::collections::{HashMap, HashSet};
 
@@ -125,8 +128,22 @@ pub struct UtxoSet {
     max_delta_history: usize,
     /// Current chain height.
     pub height: u64,
-    /// Phase 3 C6: MuHash incremental accumulator for state root.
-    /// Replaces the Merkle-based compute_state_root (HARD FORK).
+    /// PR E (Phase 4): SMT (Sparse Merkle Tree) for state root.
+    /// Activated pre-mainnet. Provides O(log N) inclusion/exclusion proofs
+    /// and deterministic roots independent of insertion order.
+    ///
+    /// Key:   `smt_key(tx_hash, output_index)`  — 32 bytes
+    /// Value: `smt_value(borsh(TxOutput))`      — 32 bytes
+    ///
+    /// Superseded the MuHash3072 accumulator (v4 state root) which was
+    /// itself a drop-in replacement for the insecure XOR-based MuHash
+    /// (v3). Domain is bumped to `v5` on finalize.
+    smt: SparseMerkleTree,
+    /// DEPRECATED: kept as a no-op shim so `apply_block`/`undo_last_delta`
+    /// paths that still call `muhash.add_element/remove_element` continue
+    /// to compile during the incremental migration. The field is not
+    /// used by `compute_state_root()` — the SMT root is authoritative.
+    #[allow(dead_code)]
     muhash: MuHash,
     /// Cached total amount across all UTXOs (JSON-RPC DoS prevention).
     /// Updated incrementally on add_output / remove_output.
@@ -200,7 +217,8 @@ impl UtxoSet {
             deltas: Vec::new(),
             max_delta_history: clamped,
             height: 0,
-            muhash: MuHash::new(),
+            smt: SparseMerkleTree::new(),
+            muhash: MuHash::new(), // shim — see field docstring
             cached_total_amount: 0,
         }
     }
@@ -320,7 +338,20 @@ impl UtxoSet {
             return Err(UtxoError::OutputAlreadyExists(format!("{:?}", outref)));
         }
         let amount = output.amount;
-        // Phase 3 C6: Update MuHash accumulator incrementally.
+        // PR E (Phase 4): incremental SMT update.
+        //   key   = smt_key(tx_hash, output_index)
+        //   value = smt_value(borsh(TxOutput))
+        // The `height` is intentionally NOT mixed into the value so that
+        // the same UTXO at the same (outref, output) always hashes to
+        // the same SMT value — keeps the tree fully content-addressed.
+        let k = smt_key(&outref.tx_hash, outref.output_index);
+        let v = smt_value(
+            &borsh::to_vec(&output).expect("TxOutput is borsh-serializable by construction"),
+        );
+        self.smt.insert(k, v);
+        // Legacy MuHash accumulator kept updated during migration for
+        // snapshot round-trip parity; safe to drop when all callers
+        // stop reading muhash.
         let elem = utxo_element_bytes(&outref, &output, height);
         self.muhash.add_element(&elem);
         self.unspent.insert(
@@ -340,7 +371,11 @@ impl UtxoSet {
     /// Called by block producer after a TX consumes this output.
     pub fn remove_output(&mut self, outref: &OutputRef) {
         if let Some(entry) = self.unspent.remove(outref) {
-            // Phase 3 C6: Remove from MuHash accumulator.
+            // PR E (Phase 4): SMT tombstone the key so the tree no longer
+            // contains it (exclusion proofs become valid).
+            let k = smt_key(&outref.tx_hash, outref.output_index);
+            self.smt.remove(&k);
+            // Legacy MuHash mirror — see add_output comment.
             let elem = utxo_element_bytes(outref, &entry.output, entry.created_at);
             self.muhash.remove_element(&elem);
             self.cached_total_amount = self.cached_total_amount.saturating_sub(entry.output.amount);
@@ -540,27 +575,31 @@ impl UtxoSet {
         Ok(())
     }
 
-    /// Compute the state root using MuHash3072 (HARD FORK v4).
+    /// Compute the state root using a Sparse Merkle Tree (HARD FORK v5).
     ///
-    /// Replaces the O(n log n) Merkle-based computation with O(1) MuHash finalize.
-    /// The MuHash accumulator is maintained incrementally on add_output/remove_output.
+    /// PR E (Phase 4) activates SMT pre-mainnet, replacing the MuHash3072
+    /// accumulator that PR B introduced as the `v4` drop-in for the
+    /// insecure XOR-based MuHash (`v3`). SMT gives:
+    ///   - content-addressed, order-independent roots (O(log N) update)
+    ///   - inclusion / exclusion proofs for RPC clients
+    ///   - a stable tree that matches the frozen v1.0 consensus spec
     ///
-    /// Domain: "MISAKA:state_root:v4:" — bumped from v3 for MuHash3072 transition.
-    /// v3 used insecure XOR accumulation; v4 uses 3072-bit multiplicative group.
+    /// Domain: `MISAKA:state_root:v5:` — bumped from `v4` for SMT transition.
     ///
     /// # Determinism Guarantee
     ///
-    /// MuHash is order-independent: same UTXO set always produces the same root
-    /// regardless of insertion order.
+    /// `SparseMerkleTree` is a keyed structure: the root is the hash of
+    /// the tree with all (smt_key, smt_value) pairs for currently-unspent
+    /// outputs. The same UTXO set always produces the same root.
     pub fn compute_state_root(&self) -> [u8; 32] {
         use sha3::{Digest, Sha3_256};
 
-        let muhash_digest = self.muhash.finalize();
+        let smt_root = self.smt.root();
 
         let mut h = Sha3_256::new();
-        h.update(b"MISAKA:state_root:v4:");
+        h.update(b"MISAKA:state_root:v5:");
         h.update(self.height.to_le_bytes());
-        h.update(muhash_digest);
+        h.update(smt_root);
         h.finalize().into()
     }
 
@@ -627,7 +666,14 @@ impl UtxoSet {
 
         for stored in snapshot.unspent {
             let outref = stored.outref;
-            // Phase 3 C6: Rebuild MuHash from all UTXOs during snapshot restore.
+            // PR E: rebuild SMT from all unspent UTXOs during snapshot restore.
+            let k = smt_key(&outref.tx_hash, outref.output_index);
+            let v = smt_value(
+                &borsh::to_vec(&stored.output)
+                    .expect("TxOutput is borsh-serializable by construction"),
+            );
+            set.smt.insert(k, v);
+            // Legacy MuHash mirror kept consistent during migration.
             let elem = utxo_element_bytes(&outref, &stored.output, stored.created_at);
             set.muhash.add_element(&elem);
             set.cached_total_amount = set.cached_total_amount.saturating_add(stored.output.amount);

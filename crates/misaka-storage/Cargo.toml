@@ -14,7 +14,12 @@ eutxo-v1-state = ["misaka-types/eutxo-v1-types"]
 [dependencies]
 misaka-types = { path = "../misaka-types" }
 misaka-crypto = { path = "../misaka-crypto" }
+# PR E (MuHash → SMT migration): keep misaka-muhash as a transitive dep
+# for any remaining callers (bench, doc), but utxo_set.rs now uses SMT
+# as the state-root commitment. Drop misaka-muhash dep when no callers
+# remain.
 misaka-muhash = { path = "../misaka-muhash" }
+misaka-smt    = { path = "../misaka-smt" }
 borsh = { workspace = true }
 sha3 = { workspace = true }
 serde = { workspace = true }
