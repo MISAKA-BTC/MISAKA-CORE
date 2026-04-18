@@ -3367,20 +3367,49 @@ async fn start_narwhal_node(
                     // normal BlockRequest/fetch_requests path triggered by
                     // suspended blocks with missing ancestors.
                     //
+                    // v0.8.8.1 (hotfix/peer-replay-window): raised 3 → 100.
+                    // A 3-round window on a chain running at the fast lane
+                    // rate is only ~6 s of history; any peer joining while
+                    // others are past round ~20 cannot satisfy ancestor
+                    // references through BlockRequest fast enough and hits
+                    // the MAX_SUSPENDED_PER_AUTHOR=16 quarantine threshold
+                    // before fetch_requests round-trip completes. 100 rounds
+                    // spans ~200 s at 2 s blocks (≈33 min at 10 s blocks),
+                    // covering any realistic reconnect gap without triggering
+                    // the documented stale-flood failure on production-scale
+                    // chains — block_cache in this file is unbounded but on
+                    // a freshly cold-reset or short-lived chain it contains
+                    // only recent rounds by definition. Long-running chain
+                    // overflow is a separate pre-existing concern (cache
+                    // never evicts — needs a follow-up fix).
+                    //
                     // Observers are excluded — they receive broadcasts only.
-                    const PEER_REPLAY_ROUND_WINDOW: u32 = 3;
+                    const PEER_REPLAY_ROUND_WINDOW: u32 = 100;
                     if authority_index
                         != crate::narwhal_block_relay_transport::OBSERVER_SENTINEL_AUTHORITY
                     {
-                        let cache_snapshot: Vec<NarwhalBlock> = {
+                        // v0.8.8.1 (hotfix/peer-replay-window): also record
+                        // cache_total and round_range so the cold-reset
+                        // diagnostic can distinguish "window too narrow"
+                        // from "cache empty" from "cutoff clips real blocks".
+                        let (cache_snapshot, cache_total, max_round, cutoff, round_min) = {
                             let cache = relay_cache_for_ingress.read().await;
+                            let cache_total = cache.len();
                             let max_round = cache.keys().map(|r| r.round).max().unwrap_or(0);
                             let cutoff = max_round.saturating_sub(PEER_REPLAY_ROUND_WINDOW);
-                            cache
+                            let mut round_min = u32::MAX;
+                            let blocks: Vec<NarwhalBlock> = cache
                                 .iter()
                                 .filter(|(r, _)| r.round >= cutoff)
-                                .map(|(_, b)| b.clone())
-                                .collect()
+                                .map(|(r, b)| {
+                                    if r.round < round_min {
+                                        round_min = r.round;
+                                    }
+                                    b.clone()
+                                })
+                                .collect();
+                            let round_min = if round_min == u32::MAX { 0 } else { round_min };
+                            (blocks, cache_total, max_round, cutoff, round_min)
                         };
                         let replay_count = cache_snapshot.len();
                         let relay_out_tx = relay_out_tx_for_ingress.clone();
@@ -3398,8 +3427,14 @@ async fn start_narwhal_node(
                                 }
                             });
                             info!(
-                                "narwhal_peer_replay authority={} blocks={} window_rounds={}",
-                                authority_index, replay_count, PEER_REPLAY_ROUND_WINDOW
+                                "narwhal_peer_replay authority={} blocks={} window_rounds={} round_range={}..{} max_round={} cutoff={} cache_total={}",
+                                authority_index, replay_count, PEER_REPLAY_ROUND_WINDOW,
+                                round_min, max_round, max_round, cutoff, cache_total
+                            );
+                        } else {
+                            info!(
+                                "narwhal_peer_replay authority={} blocks=0 window_rounds={} max_round={} cutoff={} cache_total={}",
+                                authority_index, PEER_REPLAY_ROUND_WINDOW, max_round, cutoff, cache_total
                             );
                         }
                     }
