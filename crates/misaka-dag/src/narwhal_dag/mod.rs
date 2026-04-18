@@ -16,6 +16,7 @@ pub mod block_subscriber;
 pub mod block_verifier;
 pub mod broadcaster;
 pub mod clock;
+pub mod columns;
 pub mod commit_consumer;
 pub mod commit_finalizer;
 pub mod commit_observer;

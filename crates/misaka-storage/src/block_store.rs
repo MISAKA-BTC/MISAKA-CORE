@@ -32,12 +32,17 @@ use tracing::info;
 
 use misaka_types::utxo::{OutputRef, TxOutput};
 
-/// Column family names.
-const CF_UTXOS: &str = "utxos";
-const CF_SPENT_TAGS: &str = "spent_tags";
-const CF_SPENDING_KEYS: &str = "spending_keys";
-const CF_BLOCK_META: &str = "block_meta";
-const CF_STATE: &str = "state";
+use crate::columns::StorageCf;
+
+/// Column family names. Kept as `&'static str` aliases over [`StorageCf`]
+/// so existing call sites change by one character (`CF_UTXOS` → `StorageCf::Utxos.name()`
+/// is verbose; constant aliases preserve readability while the enum owns
+/// the canonical source of truth).
+const CF_UTXOS: &str = StorageCf::Utxos.name();
+const CF_SPENT_TAGS: &str = StorageCf::SpentTags.name();
+const CF_SPENDING_KEYS: &str = StorageCf::SpendingKeys.name();
+const CF_BLOCK_META: &str = StorageCf::BlockMeta.name();
+const CF_STATE: &str = StorageCf::State.name();
 
 /// State keys within the `state` column family.
 const STATE_KEY_HEIGHT: &[u8] = b"height";
