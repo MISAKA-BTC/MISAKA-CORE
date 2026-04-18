@@ -388,3 +388,188 @@ fn test_rocksdb_gc_round_persistence() {
         );
     }
 }
+
+// ═══════════════════════════════════════════════════════════
+//  BLOCKER G: schema versioning + point-get + counts
+// ═══════════════════════════════════════════════════════════
+
+use misaka_dag::narwhal_dag::rocksdb_store::CURRENT_SCHEMA_VERSION;
+
+/// Fresh open on a new directory must stamp `CURRENT_SCHEMA_VERSION`
+/// in `narwhal_meta`. Subsequent opens must see the same value.
+#[test]
+fn blocker_g_fresh_open_stamps_schema_version() {
+    let dir = TempDir::new().unwrap();
+    let store_path = dir.path().join("consensus_db");
+
+    {
+        let store = RocksDbConsensusStore::open(&store_path).unwrap();
+        assert_eq!(
+            store.read_schema_version().unwrap(),
+            Some(CURRENT_SCHEMA_VERSION),
+            "fresh open must stamp CURRENT_SCHEMA_VERSION"
+        );
+    }
+
+    // Reopening must keep the same value and succeed.
+    {
+        let store = RocksDbConsensusStore::open(&store_path).unwrap();
+        assert_eq!(
+            store.read_schema_version().unwrap(),
+            Some(CURRENT_SCHEMA_VERSION),
+        );
+    }
+}
+
+/// An open that sees a FUTURE schema version (e.g. a v0.9.0 node that
+/// was accidentally pointed at a v0.10.0 DB) must fail closed with
+/// `SchemaVersionMismatch`. This is the core safety gate.
+#[test]
+fn blocker_g_future_schema_version_refuses_to_open() {
+    let dir = TempDir::new().unwrap();
+    let store_path = dir.path().join("consensus_db");
+
+    // First open stamps version=1.
+    {
+        let _ = RocksDbConsensusStore::open(&store_path).unwrap();
+    }
+
+    // Manually corrupt narwhal_meta/schema_version to 99 to simulate
+    // a newer-binary-wrote-this-DB scenario.
+    {
+        let mut opts = rocksdb::Options::default();
+        opts.create_if_missing(false);
+        let cfs = vec![
+            "narwhal_blocks",
+            "narwhal_commits",
+            "narwhal_meta",
+            "narwhal_last_committed",
+            "narwhal_equivocation_evidence",
+            "narwhal_committed_tx_filter",
+            "narwhal_tx_index",
+            "narwhal_addr_index",
+        ];
+        let db = rocksdb::DB::open_cf(&opts, &store_path, cfs).unwrap();
+        let cf_meta = db.cf_handle("narwhal_meta").unwrap();
+        db.put_cf(cf_meta, b"schema_version", 99u32.to_le_bytes())
+            .unwrap();
+    }
+
+    match RocksDbConsensusStore::open(&store_path) {
+        Ok(_) => panic!("open must refuse a future schema_version"),
+        Err(StoreError::SchemaVersionMismatch { got, expected }) => {
+            assert_eq!(got, 99);
+            assert_eq!(expected, CURRENT_SCHEMA_VERSION);
+        }
+        Err(other) => panic!("expected SchemaVersionMismatch, got {other:?}"),
+    }
+}
+
+/// A legacy DB (blocks present, but no schema_version key — simulates
+/// a v0.8.8 testnet DB that predates BLOCKER G) must be implicitly
+/// upgraded to CURRENT_SCHEMA_VERSION without data loss.
+#[test]
+fn blocker_g_legacy_db_without_schema_version_is_upgraded() {
+    let dir = TempDir::new().unwrap();
+    let store_path = dir.path().join("consensus_db");
+
+    // Write a block to a freshly opened store, then erase the
+    // schema_version key to simulate a pre-BLOCKER-G DB.
+    {
+        let store = RocksDbConsensusStore::open(&store_path).unwrap();
+        let mut batch = DagWriteBatch::new();
+        batch.add_block(VerifiedBlock::new_for_test(make_block(7, 2)));
+        store.write_batch(&batch).unwrap();
+    }
+    {
+        let mut opts = rocksdb::Options::default();
+        opts.create_if_missing(false);
+        let cfs = vec![
+            "narwhal_blocks",
+            "narwhal_commits",
+            "narwhal_meta",
+            "narwhal_last_committed",
+            "narwhal_equivocation_evidence",
+            "narwhal_committed_tx_filter",
+            "narwhal_tx_index",
+            "narwhal_addr_index",
+        ];
+        let db = rocksdb::DB::open_cf(&opts, &store_path, cfs).unwrap();
+        let cf_meta = db.cf_handle("narwhal_meta").unwrap();
+        db.delete_cf(cf_meta, b"schema_version").unwrap();
+    }
+
+    // Reopen: must succeed (implicit upgrade) AND preserve the block.
+    let store = RocksDbConsensusStore::open(&store_path).unwrap();
+    assert_eq!(
+        store.read_schema_version().unwrap(),
+        Some(CURRENT_SCHEMA_VERSION),
+        "legacy DB must be upgraded to CURRENT_SCHEMA_VERSION"
+    );
+    assert_eq!(
+        store.block_count().unwrap(),
+        1,
+        "legacy upgrade must preserve blocks"
+    );
+}
+
+/// `get_block` returns the same data that `read_all_blocks` would,
+/// but via a single point-get. Unknown digests return `Ok(None)`.
+#[test]
+fn blocker_g_point_get_block_roundtrip() {
+    let dir = TempDir::new().unwrap();
+    let store_path = dir.path().join("consensus_db");
+
+    let block = make_block(5, 1);
+    let digest = block.digest();
+
+    {
+        let store = RocksDbConsensusStore::open(&store_path).unwrap();
+        let mut batch = DagWriteBatch::new();
+        batch.add_block(VerifiedBlock::new_for_test(block.clone()));
+        store.write_batch(&batch).unwrap();
+    }
+
+    let store = RocksDbConsensusStore::open(&store_path).unwrap();
+
+    // Known digest → Some with matching data
+    let got = store.get_block(&digest).unwrap();
+    let got = got.expect("present");
+    assert_eq!(got.round, block.round);
+    assert_eq!(got.author, block.author);
+    assert_eq!(got.transactions, block.transactions);
+
+    // Unknown digest → None
+    let missing = BlockDigest([0xFFu8; 32]);
+    assert!(store.get_block(&missing).unwrap().is_none());
+}
+
+/// `block_count` and `commit_count` return exact counts after a
+/// write_batch and survive a reopen.
+#[test]
+fn blocker_g_block_and_commit_counts_are_exact() {
+    let dir = TempDir::new().unwrap();
+    let store_path = dir.path().join("consensus_db");
+
+    {
+        let store = RocksDbConsensusStore::open(&store_path).unwrap();
+        assert_eq!(store.block_count().unwrap(), 0, "fresh DB");
+        assert_eq!(store.commit_count().unwrap(), 0);
+
+        let mut batch = DagWriteBatch::new();
+        for author in 0..4u32 {
+            batch.add_block(VerifiedBlock::new_for_test(make_block(1, author)));
+        }
+        batch.add_commit(make_commit(1, 1, 0));
+        batch.add_commit(make_commit(2, 1, 1));
+        store.write_batch(&batch).unwrap();
+
+        assert_eq!(store.block_count().unwrap(), 4);
+        assert_eq!(store.commit_count().unwrap(), 2);
+    }
+
+    // Reopen: counts survive.
+    let store = RocksDbConsensusStore::open(&store_path).unwrap();
+    assert_eq!(store.block_count().unwrap(), 4);
+    assert_eq!(store.commit_count().unwrap(), 2);
+}
