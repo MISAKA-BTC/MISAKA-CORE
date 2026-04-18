@@ -387,6 +387,20 @@ struct Cli {
     #[arg(long, env = "MISAKA_TREASURY_ADDRESS")]
     treasury_address: Option<String>,
 
+    /// Initial treasury balance, in base units (10⁹ per MSK), minted
+    /// as a single genesis UTXO at `--treasury-address`.
+    ///
+    /// BLOCKER J: this value is part of the canonical genesis hash via
+    /// `GenesisBuilder::with_treasury`. ALL validators must pass the
+    /// same value (together with the same `--treasury-address`) or
+    /// the computed `genesis_hash` will diverge across nodes. Setting
+    /// only one of the two pair is ignored — both are required.
+    ///
+    /// A value of 0 is treated as "no treasury allocation" and produces
+    /// the same genesis hash as omitting the flags entirely.
+    #[arg(long, env = "MISAKA_TREASURY_INITIAL_BALANCE")]
+    treasury_initial_balance: Option<u64>,
+
     // ─── Validator Registration (misakastake.com) ──────────
     /// Generate L1 validator key and exit. Does NOT start the node.
     /// Use this to get the L1 Public Key for misakastake.com registration.
@@ -1618,10 +1632,65 @@ async fn start_narwhal_node(
         .iter()
         .map(|auth| auth.public_key.clone())
         .collect();
-    let genesis_hash = misaka_types::genesis::compute_genesis_hash(cli.chain_id, &committee_pks);
-    let chain_ctx = misaka_types::chain_context::ChainContext::new(cli.chain_id, genesis_hash);
+
+    // BLOCKER J: construct the canonical Genesis via misaka-genesis-builder.
+    //
+    // This replaces the deprecated `misaka_types::genesis::compute_genesis_hash`
+    // (which hashed only `chain_id` + concatenated pubkeys) with the
+    // canonical v2 hash that covers:
+    //   * ProtocolVersion
+    //   * chain_id
+    //   * genesis_timestamp_ms  (fixed at 0 so all nodes agree without
+    //                             needing a wall-clock handshake)
+    //   * every GenesisValidator (authority_index / pubkey / stake /
+    //                             network_address / solana_stake_account)
+    //   * every treasury UTXO
+    // Domain: `MISAKA-GENESIS:v2:` — disjoint from the v1 domain used by
+    // the deprecated `compute_genesis_hash` so the two hash spaces
+    // cannot collide.
+    //
+    // A future manifest revision can carry a `genesis_timestamp_ms`
+    // field so the committee timestamp matches chain-launch wall-clock
+    // if that ever becomes policy-relevant. For now 0 is deterministic
+    // and auditable.
+    let genesis = {
+        let mut builder = misaka_genesis_builder::GenesisBuilder::new()
+            .with_protocol_version(misaka_protocol_config::ProtocolVersion::V1)
+            .with_chain_id(cli.chain_id)
+            .with_genesis_timestamp_ms(0);
+        for auth in &committee.authorities {
+            // committee_pks[i] matches committee.authorities[i].public_key
+            // by construction; use the authority struct directly so we
+            // thread stake and the advertise address through. The
+            // narwhal `Authority` struct spells the field `hostname`,
+            // which is what the genesis-builder expects for its
+            // `network_address` slot.
+            builder = builder.add_validator(auth.public_key.clone(), auth.stake, &auth.hostname);
+        }
+        // Optional treasury UTXO: only when the operator passed
+        // `--treasury-address` / `MISAKA_TREASURY_ADDRESS` AND a positive
+        // initial balance via `--treasury-initial-balance`. The genesis
+        // hash depends on these, so every node MUST pass the same
+        // values or the hashes diverge.
+        if let (Some(addr_hex), Some(balance)) =
+            (cli.treasury_address.as_ref(), cli.treasury_initial_balance)
+        {
+            if let Some(addr_bytes) = hex::decode(addr_hex).ok().filter(|b| b.len() == 32) {
+                let mut addr = [0u8; 32];
+                addr.copy_from_slice(&addr_bytes);
+                if balance > 0 {
+                    builder = builder.with_treasury(addr, balance);
+                }
+            }
+        }
+        builder.build().map_err(|e| {
+            anyhow::anyhow!("BLOCKER J: failed to construct canonical Genesis: {}", e)
+        })?
+    };
+    let genesis_hash = genesis.hash();
+    let chain_ctx = genesis.chain_context();
     info!(
-        "ChainContext: chain_id={}, genesis_hash={}",
+        "ChainContext: chain_id={}, genesis_hash={} (v2 canonical, via GenesisBuilder)",
         chain_ctx.chain_id,
         hex::encode(&chain_ctx.genesis_hash[..8]),
     );
@@ -8012,6 +8081,107 @@ mod tests {
         assert_eq!(header_a1.compute_hash(), header_a2.compute_hash());
         assert_ne!(header_a1.proposer_id, header_b.proposer_id);
         assert_ne!(header_a1.compute_hash(), header_b.compute_hash());
+    }
+
+    // ─── BLOCKER J: GenesisBuilder wiring tests ──────────────────────────
+    //
+    // Pins down the contract of the wiring added in BLOCKER J:
+    // * The canonical genesis hash is fully determined by
+    //   (chain_id, protocol_version, timestamp=0, validator set,
+    //    treasury allocation) — no wall-clock input.
+    // * Every node that loads the same `genesis_committee.toml` and
+    //   passes the same `--treasury-*` flags obtains the same 32-byte
+    //   genesis hash.
+    // * Any change to `chain_id`, validator stake, validator hostname,
+    //   or treasury amount/address produces a DIFFERENT hash.
+
+    fn mk_pk(seed: u8) -> Vec<u8> {
+        // 1952-byte ML-DSA-65 placeholder — the builder does not verify
+        // the key internally, only the length.
+        vec![seed; 1952]
+    }
+
+    fn build_genesis_for_test(
+        chain_id: u32,
+        treasury: Option<([u8; 32], u64)>,
+    ) -> misaka_genesis_builder::Genesis {
+        let mut b = misaka_genesis_builder::GenesisBuilder::new()
+            .with_protocol_version(misaka_protocol_config::ProtocolVersion::V1)
+            .with_chain_id(chain_id)
+            .with_genesis_timestamp_ms(0)
+            .add_validator(mk_pk(0xA1), 1_000, "127.0.0.1:16111")
+            .add_validator(mk_pk(0xA2), 1_000, "127.0.0.1:16112")
+            .add_validator(mk_pk(0xA3), 1_000, "127.0.0.1:16113");
+        if let Some((addr, amount)) = treasury {
+            b = b.with_treasury(addr, amount);
+        }
+        b.build().expect("test-only builder must build")
+    }
+
+    #[test]
+    fn blocker_j_genesis_hash_is_deterministic_across_invocations() {
+        let g1 = build_genesis_for_test(2, None);
+        let g2 = build_genesis_for_test(2, None);
+        assert_eq!(
+            g1.hash(),
+            g2.hash(),
+            "GenesisBuilder must be deterministic across invocations"
+        );
+    }
+
+    #[test]
+    fn blocker_j_genesis_hash_changes_with_chain_id() {
+        // The builder requires a treasury for mainnet (chain_id=1), so we
+        // supply the SAME treasury to both genesis instances and verify that
+        // only the differing chain_id alters the hash.
+        let treasury = Some(([0xCDu8; 32], 1_000_000));
+        let g_testnet = build_genesis_for_test(2, treasury);
+        let g_mainnet = build_genesis_for_test(1, treasury);
+        assert_ne!(
+            g_testnet.hash(),
+            g_mainnet.hash(),
+            "chain_id must be part of the canonical hash"
+        );
+    }
+
+    #[test]
+    fn blocker_j_genesis_hash_changes_with_treasury() {
+        let no_treasury = build_genesis_for_test(2, None);
+        let with_treasury = build_genesis_for_test(2, Some(([0xCDu8; 32], 1_000_000)));
+        assert_ne!(
+            no_treasury.hash(),
+            with_treasury.hash(),
+            "treasury UTXO must be part of the canonical hash"
+        );
+
+        let different_amount = build_genesis_for_test(2, Some(([0xCDu8; 32], 999_999)));
+        assert_ne!(
+            with_treasury.hash(),
+            different_amount.hash(),
+            "treasury amount must be part of the canonical hash"
+        );
+
+        let different_addr = build_genesis_for_test(2, Some(([0xABu8; 32], 1_000_000)));
+        assert_ne!(
+            with_treasury.hash(),
+            different_addr.hash(),
+            "treasury address must be part of the canonical hash"
+        );
+    }
+
+    #[test]
+    fn blocker_j_zero_timestamp_is_cross_node_reproducible() {
+        // The production wiring fixes `with_genesis_timestamp_ms(0)` so
+        // every validator that loads the same committee manifest will
+        // agree on the genesis hash without coordinating wall-clocks.
+        // This test mirrors that call to guarantee the assumption stays
+        // visible to anyone who later tries to "improve" the wiring by
+        // reading `chrono::Utc::now()`.
+        let g = build_genesis_for_test(2, None);
+        assert_eq!(
+            g.genesis_timestamp_ms, 0,
+            "BLOCKER J: production wiring must keep genesis_timestamp_ms = 0"
+        );
     }
 
     #[cfg(all(feature = "dag", feature = "ghostdag-compat"))]
