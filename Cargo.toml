@@ -129,6 +129,11 @@ once_cell = "1"
 async-trait = "0.1"
 chacha20 = "0.9"
 num-bigint = "0.4"
+# BLOCKER C: BIP-39 mnemonic (English wordlist, English-only features).
+# The prior wallet/core mnemonic used synthetic "word0042" tokens and
+# was explicitly flagged as a mainnet blocker; we ship `bip39 = "2"`
+# pinned to the English language feature (no BIP-39 language bloat).
+bip39 = { version = "2", default-features = false }
 
 [workspace.lints.clippy]
 unwrap_used = "warn"
