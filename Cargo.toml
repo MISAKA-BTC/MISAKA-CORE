@@ -31,23 +31,41 @@ members = [
     "crates/misaka-utils",
     "crates/misaka-security",
     "crates/misaka-txscript",
-    # ── v0.8.0 merged adoption (Phase 1 = dead code only, wiring comes in PR C/D) ──
-    # These crates are part of the misaka-test-net-merged v0.8.0 snapshot that
-    # ships the eUTXO / SMT / SDK / audit layer. They build standalone but are
-    # NOT referenced by misaka-node in Phase 1 mainnet, so their output is not
-    # compiled into the production node. Phase 1 ships pure UTXO + self-stake.
-    # v0.9.0 hard fork wires misaka-smt into utxo_set state root.
-    # v2.0 hard fork wires eUTXO execution (misaka-eutxo-audit, sdk, etc.).
+    # ── v0.8.0 merged-snapshot crates: wiring status matrix (BLOCKER K) ──
+    #
+    # | crate                          | status  | production caller              | target |
+    # |--------------------------------|---------|--------------------------------|--------|
+    # | misaka-smt                     | WIRED   | misaka-storage/utxo_set.rs     | v0.8.0 |
+    # | misaka-genesis-builder         | WIRING  | BLOCKER J (this milestone)     | v0.8.0 |
+    # | misaka-authority-aggregation   | DEAD    | — (planned for v0.9.0)         | v0.9.0 |
+    # | misaka-loadgen                 | DEAD    | — (bench / testnet only)       | dev-only |
+    #
+    # "DEAD" crates are compiled by `cargo build --workspace` but no
+    # consumer links their symbols into the production node. This is
+    # deliberate for the v0.8.0 mainnet surface — we want the code in
+    # tree and type-checked so follow-up PRs can wire it, but the
+    # symbols must not smuggle unverified behaviour into the node.
+    #
+    # When you add a new public API to a DEAD crate, add its first
+    # production caller in the same PR. If you cannot add a caller,
+    # hide the API behind a feature flag or keep it private — a
+    # caller-less `pub fn` is a review-blocking regression under the
+    # planned `cargo-udeps` / `cargo-machete` CI gate (BLOCKER L).
     "crates/misaka-smt",
     "crates/misaka-genesis-builder",
     "crates/misaka-authority-aggregation",
     "crates/misaka-loadgen",
-    # ── PR D2: enable 3 of the 4 crates deferred from PR A ──
-    # These depend on the eUTXO types + dag_types added by PR B and ship
-    # as dead code (not wired into misaka-node production paths).
-    #   misaka-sdk          — wallet/dev SDK for eUTXO v2 tx construction
-    #   misaka-light-client — header-sync light client
-    #   misaka-replay       — deterministic chain replay tool
+    # ── v0.8.0 eUTXO dead crates (wiring status matrix, BLOCKER K) ──
+    #
+    # | crate                          | status  | production caller              | target |
+    # |--------------------------------|---------|--------------------------------|--------|
+    # | misaka-sdk                     | DEAD    | — (only misaka-eutxo-audit,    | v2.0   |
+    # |                                |         |   itself dead)                 |        |
+    # | misaka-light-client            | DEAD    | — (planned for v0.9.0)         | v0.9.0 |
+    # | misaka-replay                  | DEAD    | — (debugging / post-mortem)    | dev-only |
+    #
+    # These depend on the eUTXO types + dag_types added by PR B. They
+    # ship as dead code — buildable but not linked by misaka-node.
     #
     # misaka-eutxo-audit is STILL deferred because it pulls features that
     # need to be declared in misaka-mempool / misaka-txscript
