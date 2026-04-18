@@ -94,13 +94,19 @@ impl GenesisConfig {
 /// Domain prefix for genesis hash computation.
 pub const GENESIS_HASH_DOMAIN: &[u8] = b"MISAKA-GENESIS:v1:";
 
-/// Compute the canonical genesis hash from chain_id and committee public keys.
+/// Compute the v1 genesis hash from chain_id and committee public keys.
 ///
-/// This function MUST produce identical output for the same inputs across
-/// all components (node, CLI, wallet, relayer). Any callsite that constructs
-/// an AppId for cross-component verification must use this function.
+/// # Deprecation
+///
+/// This function only hashes `chain_id + committee_pks` and ignores the
+/// UTXO set, ProtocolVersion, and genesis timestamp. Use
+/// `misaka_genesis_builder::Genesis::hash()` for the complete v2 hash.
 ///
 /// `committee_pks` MUST be in canonical order (same as `committee.authorities`).
+#[deprecated(
+    since = "0.8.0",
+    note = "Use misaka_genesis_builder::Genesis::hash() — this function ignores UTXOs and ProtocolVersion"
+)]
 pub fn compute_genesis_hash(chain_id: u32, committee_pks: &[Vec<u8>]) -> [u8; 32] {
     use sha3::{Digest, Sha3_256};
     let mut h = Sha3_256::new();

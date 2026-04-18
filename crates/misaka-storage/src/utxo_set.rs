@@ -16,7 +16,7 @@
 
 use misaka_muhash::MuHash;
 use misaka_types::utxo::{OutputRef, TxOutput, TxType, UtxoTransaction};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// A stored UTXO entry.
 #[derive(Debug, Clone)]
@@ -136,6 +136,7 @@ pub struct UtxoSet {
 /// Phase 3 C6: Compute the canonical byte representation of a UTXO element
 /// for MuHash accumulation. Uses borsh encoding for determinism.
 fn utxo_element_bytes(outref: &OutputRef, output: &TxOutput, height: u64) -> Vec<u8> {
+    use borsh::BorshSerialize;
     let mut buf = Vec::with_capacity(128);
     buf.extend_from_slice(b"MISAKA:muhash:utxo:v1:");
     // SEC-FIX CRITICAL: borsh failures MUST panic, not silently skip.
@@ -149,6 +150,11 @@ fn utxo_element_bytes(outref: &OutputRef, output: &TxOutput, height: u64) -> Vec
     buf.extend_from_slice(&output_bytes);
     buf.extend_from_slice(&height.to_le_bytes());
     buf
+}
+
+/// Public v4 element bytes accessor for test/comparison purposes.
+pub fn utxo_element_bytes_v4_pub(outref: &OutputRef, output: &TxOutput, height: u64) -> Vec<u8> {
+    utxo_element_bytes(outref, output, height)
 }
 
 /// UTXO set errors.
@@ -534,12 +540,13 @@ impl UtxoSet {
         Ok(())
     }
 
-    /// Phase 3 C6: Compute the state root using MuHash (HARD FORK).
+    /// Compute the state root using MuHash3072 (HARD FORK v4).
     ///
     /// Replaces the O(n log n) Merkle-based computation with O(1) MuHash finalize.
     /// The MuHash accumulator is maintained incrementally on add_output/remove_output.
     ///
-    /// Domain: "MISAKA:state_root:v3:" -- bumped from v2 for hard fork.
+    /// Domain: "MISAKA:state_root:v4:" — bumped from v3 for MuHash3072 transition.
+    /// v3 used insecure XOR accumulation; v4 uses 3072-bit multiplicative group.
     ///
     /// # Determinism Guarantee
     ///
@@ -551,10 +558,17 @@ impl UtxoSet {
         let muhash_digest = self.muhash.finalize();
 
         let mut h = Sha3_256::new();
-        h.update(b"MISAKA:state_root:v3:");
+        h.update(b"MISAKA:state_root:v4:");
         h.update(self.height.to_le_bytes());
         h.update(muhash_digest);
         h.finalize().into()
+    }
+
+    /// Alias for `compute_state_root()` — O(1) thanks to MuHash3072.
+    /// Exposed as a named getter for RPC callers.
+    #[inline]
+    pub fn cached_state_root(&self) -> [u8; 32] {
+        self.compute_state_root()
     }
 
     /// Export the current in-memory state into a serializable snapshot.

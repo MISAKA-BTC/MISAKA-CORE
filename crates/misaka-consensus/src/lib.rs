@@ -52,10 +52,29 @@ pub mod validator_set;
 // ── Validator Workload + sqrt(stake) Epoch Rewards ──
 pub mod reward_epoch;
 
+// ── Reputation metrics + reward history (Prompt 2D) ──
+//
+// Additive-only modules: record per-validator performance metrics and
+// bounded reward history without modifying ValidatorRegistry /
+// StakingRegistry / ValidatorSystemV2 / RewardEpochTracker.
+//
+// v0.8.0 semantics: metrics are recorded but NOT used for validator
+// ranking (ranking uses self_stake only). See docs/internal/STAKING_MODEL.md.
+// NOTE (PR C): `reputation`, `reward_history`, and `slashing` modules
+// are declared in the merged snapshot but their source files are
+// deferred to PR D (they depend on misaka-node common-file changes).
+// Re-enable these `pub mod` lines when PR D lands.
+// pub mod reputation;
+// pub mod reward_history;
+// pub mod slashing;
+
 // ── On-Chain Staking & Slashing ──
 pub mod staking;
 
-// ── γ-2: ValidatorStakeTx signature + state verification ──
+// PR C: merged snapshot removed this module (stake-tx verification was
+// refactored into a different pipeline), but misaka-node/utxo_executor.rs
+// still imports `verify_stake_tx_signature` from here. Keep the module
+// until PR D migrates misaka-node.
 pub mod stake_tx_verify;
 pub use stake_tx_verify::{verify_stake_tx_signature, StakeVerifyError};
 

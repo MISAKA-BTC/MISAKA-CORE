@@ -448,7 +448,6 @@ mod tests {
     }
 
     #[test]
-    #[allow(deprecated)] // exercises legacy Reserved0x0010 bit in flag packing
     fn test_capability_flags() {
         let flags = capabilities_to_flags(&[Capability::SpendLimited, Capability::Reserved0x0010]);
         assert!(Capability::SpendLimited.is_in(flags));
