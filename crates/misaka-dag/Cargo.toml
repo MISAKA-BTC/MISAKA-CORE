@@ -11,7 +11,7 @@ misaka-storage  = { path = "../misaka-storage" }
 misaka-crypto   = { path = "../misaka-crypto" }
 misaka-protocol-config = { path = "../misaka-protocol-config" }
 misaka-pqc      = { path = "../misaka-pqc", optional = true }
-rocksdb         = { version = "0.22", default-features = false, features = ["snappy"], optional = true }
+rocksdb         = { version = "0.22", default-features = false, features = ["zstd"], optional = true }
 
 borsh     = { workspace = true }
 sha3      = { workspace = true }

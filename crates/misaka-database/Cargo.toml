@@ -11,7 +11,7 @@ parking_lot = { workspace = true }
 serde = { workspace = true }
 tracing = { workspace = true }
 hex = { workspace = true }
-rocksdb = { version = "0.22", default-features = false, features = ["snappy"] }
+rocksdb = { version = "0.22", default-features = false, features = ["zstd"] }
 bincode = { workspace = true }
 indexmap = { workspace = true }
 rand = { workspace = true }

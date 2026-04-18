@@ -1,0 +1,27 @@
+=== Target ===
+  data_dir: /tmp/cluster-4/data
+  db_dir  : /tmp/cluster-4/data/narwhal_consensus
+  host    : ubuntu
+  date    : 2026-04-18T12:28:54Z
+
+=== Total ===
+654M	/tmp/cluster-4/data/narwhal_consensus
+654M	/tmp/cluster-4/data
+
+=== Breakdown by extension ===
+  *.sst         242MB  (5 file(s))
+  *.blob           0B  (0 file(s))
+  *.log         412MB  (7 file(s))
+  MANIFEST       2.2KB  (1 file(s))
+  OPTIONS         43KB  (1 file(s))
+  IDENTITY         36B  (1 file(s))
+  CURRENT          16B  (1 file(s))
+
+=== Per-CF approximate size ===
+  (install rocksdb-tools: `apt install rocksdb-tools` or `cargo install ldb`)
+
+=== WAL state ===
+  size: 412MB  (7 segments)
+  cap : 512 MiB (set by misaka-dag set_max_total_wal_size)
+
+=== Done ===
