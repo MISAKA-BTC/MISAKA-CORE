@@ -125,11 +125,32 @@ pub struct SlotEquivocationLedger {
 
     /// Clock abstraction (Phase 0-2 completion).
     clock: Arc<dyn super::clock::Clock>,
+
+    /// B3-a: this node's own `AuthorityIndex`. Observing an apparent
+    /// equivocation whose `author == my_authority_index` during a
+    /// post-wipe peer-cache replay is NOT genuine misbehaviour — the
+    /// block we just produced is not yet in our `observed_per_slot`
+    /// but a peer's cache replays our own previous-session block
+    /// back to us, and the ledger would otherwise self-ban us and
+    /// propagate the ban through `banned_authorities`, bringing down
+    /// the stake-weighted quorum on every peer that cross-accepts
+    /// the replay. Defense-in-depth is preserved because peers at
+    /// other `AuthorityIndex`es still ban us if we genuinely
+    /// equivocate (their `my_authority_index != our_author`).
+    my_authority_index: AuthorityIndex,
 }
 
 impl SlotEquivocationLedger {
-    /// Create a new empty ledger.
-    pub fn new() -> Self {
+    /// Create a new empty ledger bound to this node's `AuthorityIndex`.
+    ///
+    /// B3-a (BREAKING): `my_authority_index` is now a required argument
+    /// rather than implicitly `None`. Callers that previously wrote
+    /// `SlotEquivocationLedger::new()` must thread in their own author
+    /// index — `CoreEngine::new`, simulator setup, and every test
+    /// fixture have been updated. The non-`Option` shape makes it
+    /// impossible to instantiate a ledger that cannot tell self- from
+    /// peer-equivocation, which was the exact failure mode B3-a fixes.
+    pub fn new(my_authority_index: AuthorityIndex) -> Self {
         Self {
             observed_per_slot: BTreeMap::new(),
             banned: HashMap::new(),
@@ -137,6 +158,7 @@ impl SlotEquivocationLedger {
             banned_set: HashSet::new(),
             first_sig_cache: HashMap::new(),
             clock: Arc::new(super::clock::SystemClock),
+            my_authority_index,
         }
     }
 
@@ -175,6 +197,26 @@ impl SlotEquivocationLedger {
             digests.insert(digest);
             self.first_sig_cache.insert(slot, signature.to_vec());
             return ObserveResult::Fresh;
+        }
+
+        // B3-a self-equivocation guard. If the apparent equivocation is
+        // on our own author, it is almost certainly a stale peer-cache
+        // replay of a previous-session block that we produced before a
+        // data-dir wipe. Treat the report as a harmless duplicate:
+        //   - DO NOT insert into `observed_per_slot` a second time
+        //   - DO NOT add to `banned` / `banned_set`
+        //   - DO emit a distinct log target so operators can audit
+        // Peers at other authority indices still ban us via their
+        // OWN ledgers if we genuinely equivocate, so this does not
+        // weaken the network-wide slashing guarantee.
+        if slot.authority == self.my_authority_index {
+            tracing::warn!(
+                target: "misaka::self_equivocation_ignored",
+                round = slot.round,
+                author = slot.authority,
+                "ignoring self-equivocation report (peer-cache replay, not live misbehaviour)",
+            );
+            return ObserveResult::Duplicate;
         }
 
         // Another digest exists at this slot → equivocation
@@ -239,6 +281,20 @@ impl SlotEquivocationLedger {
             digests.insert(digest);
             sig_cache.insert(slot, signature.to_vec());
             return ObserveResult::Fresh;
+        }
+
+        // B3-a self-equivocation guard. Same rationale as `observe()`
+        // above — peer-cache replay of our own pre-wipe block must not
+        // ban us in our own ledger. Peers still ban us if we genuinely
+        // equivocate.
+        if slot.authority == self.my_authority_index {
+            tracing::warn!(
+                target: "misaka::self_equivocation_ignored",
+                round = slot.round,
+                author = slot.authority,
+                "ignoring self-equivocation report (peer-cache replay, not live misbehaviour)",
+            );
+            return ObserveResult::Duplicate;
         }
 
         // Equivocation
@@ -459,8 +515,16 @@ impl SlotEquivocationLedger {
     }
 
     /// Restore ledger from persisted evidence.
-    pub fn restore_from_evidence(evidence: Vec<SlotEquivocationEvidence>) -> Self {
-        let mut ledger = Self::new();
+    ///
+    /// B3-a: the restored ledger must still know its own authority
+    /// index so that self-equivocation replays after the restore are
+    /// filtered. Callers at the node layer pass the same value they
+    /// use when constructing fresh ledgers (`core_engine.authority_index`).
+    pub fn restore_from_evidence(
+        my_authority_index: AuthorityIndex,
+        evidence: Vec<SlotEquivocationEvidence>,
+    ) -> Self {
+        let mut ledger = Self::new(my_authority_index);
         for ev in &evidence {
             ledger.banned.entry(ev.authority).or_insert(ev.slot.round);
             ledger.banned_set.insert(ev.authority);
@@ -522,11 +586,10 @@ impl SlotEquivocationLedger {
     }
 }
 
-impl Default for SlotEquivocationLedger {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+// B3-a: `Default` impl removed. A ledger that has no `my_authority_index`
+// cannot distinguish self-equivocation from peer equivocation and is
+// therefore unsafe to instantiate. Callers must pass an explicit
+// `AuthorityIndex` via `SlotEquivocationLedger::new(idx)`.
 
 // ═══════════════════════════════════════════════════════════
 //  Committee extension
@@ -592,7 +655,7 @@ mod tests {
 
     #[test]
     fn test_fresh_observation() {
-        let mut ledger = SlotEquivocationLedger::new();
+        let mut ledger = SlotEquivocationLedger::new(u32::MAX);
         let slot = test_slot(1, 0);
         let result = ledger.observe(slot, test_digest(1), test_block_ref(1, 0, 1), &[0xAA]);
         assert!(matches!(result, ObserveResult::Fresh));
@@ -601,7 +664,7 @@ mod tests {
 
     #[test]
     fn test_duplicate_observation() {
-        let mut ledger = SlotEquivocationLedger::new();
+        let mut ledger = SlotEquivocationLedger::new(u32::MAX);
         let slot = test_slot(1, 0);
         let digest = test_digest(1);
         let block_ref = test_block_ref(1, 0, 1);
@@ -613,7 +676,7 @@ mod tests {
 
     #[test]
     fn test_equivocation_detected() {
-        let mut ledger = SlotEquivocationLedger::new();
+        let mut ledger = SlotEquivocationLedger::new(u32::MAX);
         let slot = test_slot(1, 0);
         ledger.observe(slot, test_digest(1), test_block_ref(1, 0, 1), &[0xAA]);
         let result = ledger.observe(slot, test_digest(2), test_block_ref(1, 0, 2), &[0xBB]);
@@ -629,7 +692,7 @@ mod tests {
     /// without requiring full block signatures.
     #[test]
     fn test_ban_for_vote_equivocation() {
-        let mut ledger = SlotEquivocationLedger::new();
+        let mut ledger = SlotEquivocationLedger::new(u32::MAX);
         assert!(!ledger.is_banned(3));
         let first = ledger.ban_for_vote_equivocation(3, 42);
         assert!(first, "first ban must return true");
@@ -648,7 +711,7 @@ mod tests {
     #[test]
     fn test_equivocator_excluded_from_quorum() {
         let committee = test_committee(4); // 4 equal-stake authorities
-        let mut ledger = SlotEquivocationLedger::new();
+        let mut ledger = SlotEquivocationLedger::new(u32::MAX);
 
         // Authority 0 equivocates
         let slot = test_slot(1, 0);
@@ -676,7 +739,7 @@ mod tests {
     #[test]
     fn test_equivocator_fully_excluded_from_all_future_quora() {
         let committee = test_committee(4);
-        let mut ledger = SlotEquivocationLedger::new();
+        let mut ledger = SlotEquivocationLedger::new(u32::MAX);
 
         // Authority 2 equivocates at round 5
         let slot = test_slot(5, 2);
@@ -714,7 +777,7 @@ mod tests {
 
     #[test]
     fn test_evidence_serialization_roundtrip() {
-        let mut ledger = SlotEquivocationLedger::new();
+        let mut ledger = SlotEquivocationLedger::new(u32::MAX);
         let slot = test_slot(3, 1);
         ledger.observe(slot, test_digest(10), test_block_ref(3, 1, 10), &[0xAA; 64]);
         ledger.observe(slot, test_digest(20), test_block_ref(3, 1, 20), &[0xBB; 64]);
@@ -722,9 +785,11 @@ mod tests {
         // Serialize
         let bytes = ledger.serialize_evidence().unwrap();
 
-        // Restore
+        // Restore. B3-a: must pass my_authority_index — use the sentinel
+        // value so the restored ledger behaves exactly like the original
+        // pre-B3-a behaviour for this legacy test fixture.
         let evidence: Vec<SlotEquivocationEvidence> = serde_json::from_slice(&bytes).unwrap();
-        let restored = SlotEquivocationLedger::restore_from_evidence(evidence);
+        let restored = SlotEquivocationLedger::restore_from_evidence(u32::MAX, evidence);
 
         assert_eq!(restored.num_banned(), 1);
         assert!(restored.is_banned(1));
@@ -733,8 +798,8 @@ mod tests {
 
     #[test]
     fn test_evidence_merge_from_peer() {
-        let mut ledger_a = SlotEquivocationLedger::new();
-        let mut ledger_b = SlotEquivocationLedger::new();
+        let mut ledger_a = SlotEquivocationLedger::new(u32::MAX);
+        let mut ledger_b = SlotEquivocationLedger::new(u32::MAX);
 
         // Node A detects equivocation by authority 0
         let slot0 = test_slot(1, 0);
@@ -761,7 +826,7 @@ mod tests {
 
     #[test]
     fn test_evidence_merge_is_idempotent() {
-        let mut ledger = SlotEquivocationLedger::new();
+        let mut ledger = SlotEquivocationLedger::new(u32::MAX);
         let slot = test_slot(1, 0);
         ledger.observe(slot, test_digest(1), test_block_ref(1, 0, 1), &[0xAA]);
         ledger.observe(slot, test_digest(2), test_block_ref(1, 0, 2), &[0xBB]);
@@ -782,7 +847,7 @@ mod tests {
 
     #[test]
     fn test_gc_observations_preserves_evidence() {
-        let mut ledger = SlotEquivocationLedger::new();
+        let mut ledger = SlotEquivocationLedger::new(u32::MAX);
 
         // Observe at rounds 1, 5, 10
         for round in [1, 5, 10] {
@@ -812,7 +877,7 @@ mod tests {
     #[test]
     fn test_byzantine_equivocation_flood() {
         let committee = test_committee(7); // 7 authorities, f=2
-        let mut ledger = SlotEquivocationLedger::new();
+        let mut ledger = SlotEquivocationLedger::new(u32::MAX);
 
         // f=2 Byzantine authorities (0, 1) each equivocate at 100 rounds
         for round in 1..=100u32 {
@@ -851,6 +916,110 @@ mod tests {
         assert!(
             !committee.reached_quorum(four_honest),
             "4 out of 7 should not reach quorum"
+        );
+    }
+
+    // ═══════════════════════════════════════════════════════════
+    //  B3-a: self-equivocation guard
+    // ═══════════════════════════════════════════════════════════
+    //
+    // Scenario background. After a cold reset (data-dir wipe +
+    // staggered restart), peers that kept a block cache from the
+    // previous session replay old blocks to the newly-started node.
+    // The new node's own `authority_index` is the same key it used
+    // before the wipe, so the cached block's `slot.author` matches
+    // the new node's `my_authority_index`. Pre-B3-a behaviour banned
+    // the node in its own ledger when it saw a second (different)
+    // block at the same slot — a false positive that cascades into
+    // `banned_authorities` ballooning across the network.
+    //
+    // The three tests below pin down the full guard contract:
+    //
+    //   (1) self-equivocation → `Duplicate`, not banned
+    //   (2) external-authority equivocation → still banned (the guard
+    //       must not weaken real byzantine detection)
+    //   (3) defense-in-depth preserved: peer at index=1 still bans the
+    //       same author=0 block pair when it arrives through peer-view
+    //       (my_authority_index=1 ≠ author=0 → normal path)
+
+    #[test]
+    fn b3a_self_equivocation_returns_duplicate_not_banned() {
+        // Ledger bound to our own authority index (0).
+        let mut ledger = SlotEquivocationLedger::new(0);
+        let slot = test_slot(1, 0); // slot.authority == my_authority_index
+
+        // First sighting: normal Fresh path.
+        let r1 = ledger.observe(slot, test_digest(1), test_block_ref(1, 0, 1), &[0xAA]);
+        assert!(matches!(r1, ObserveResult::Fresh));
+
+        // Second sighting of a DIFFERENT digest at the SAME slot —
+        // pre-B3-a this would be `Equivocation(_)` + ban insertion.
+        // B3-a must instead treat it as a harmless `Duplicate` and
+        // leave the banned set empty.
+        let r2 = ledger.observe(slot, test_digest(2), test_block_ref(1, 0, 2), &[0xBB]);
+        assert!(
+            matches!(r2, ObserveResult::Duplicate),
+            "B3-a: self-equivocation must return Duplicate, got {:?}",
+            r2
+        );
+        assert_eq!(
+            ledger.num_banned(),
+            0,
+            "B3-a: self-equivocation must NOT insert into banned_authorities"
+        );
+        assert!(
+            !ledger.is_banned(0),
+            "B3-a: our own authority must not be self-banned"
+        );
+        // No evidence should be recorded either — the "replay" is not
+        // a real equivocation event to slash.
+        assert_eq!(ledger.evidence().len(), 0);
+    }
+
+    #[test]
+    fn b3a_external_equivocation_still_banned() {
+        // Ledger at authority 0; external author (1) equivocates.
+        let mut ledger = SlotEquivocationLedger::new(0);
+        let slot = test_slot(1, 1); // slot.authority == 1 ≠ my (0)
+
+        let r1 = ledger.observe(slot, test_digest(1), test_block_ref(1, 1, 1), &[0xAA]);
+        assert!(matches!(r1, ObserveResult::Fresh));
+
+        let r2 = ledger.observe(slot, test_digest(2), test_block_ref(1, 1, 2), &[0xBB]);
+        assert!(
+            matches!(r2, ObserveResult::Equivocation(_)),
+            "B3-a: external-author equivocation path MUST still fire, got {:?}",
+            r2
+        );
+        assert!(
+            ledger.is_banned(1),
+            "B3-a: external author must be banned as before"
+        );
+        assert_eq!(ledger.num_banned(), 1);
+        assert_eq!(ledger.evidence().len(), 1);
+    }
+
+    #[test]
+    fn b3a_peer_view_still_bans_equivocating_remote_author() {
+        // Defense-in-depth: author=0 genuinely equivocates. Node 0's
+        // own ledger skips the self-ban (proved by test 1 above), but
+        // any PEER (authority 1, 2, 3, …) observes the same equivocation
+        // and DOES ban author 0 in its own ledger. This test simulates
+        // the peer side.
+        let mut peer_ledger = SlotEquivocationLedger::new(1); // peer at idx 1
+        let slot = test_slot(42, 0); // equivocation by author 0
+
+        let r1 = peer_ledger.observe(slot, test_digest(1), test_block_ref(42, 0, 1), &[0xAA]);
+        assert!(matches!(r1, ObserveResult::Fresh));
+
+        let r2 = peer_ledger.observe(slot, test_digest(2), test_block_ref(42, 0, 2), &[0xBB]);
+        assert!(
+            matches!(r2, ObserveResult::Equivocation(_)),
+            "B3-a: peer (idx 1) must still ban author 0 for same-slot double-sign"
+        );
+        assert!(
+            peer_ledger.is_banned(0),
+            "B3-a: network-wide slashing preserved via peer-view ban"
         );
     }
 }

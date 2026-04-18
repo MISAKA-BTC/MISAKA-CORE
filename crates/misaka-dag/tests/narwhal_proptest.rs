@@ -229,7 +229,7 @@ proptest! {
             Committee::new_for_test(committee_size), ls2, 1, 2
         );
 
-        let ledger = misaka_dag::narwhal_dag::slot_equivocation_ledger::SlotEquivocationLedger::new();
+        let ledger = misaka_dag::narwhal_dag::slot_equivocation_ledger::SlotEquivocationLedger::new(u32::MAX);
         let commits1 = committer1.try_commit(&dag1, &ledger);
         let commits2 = committer2.try_commit(&dag2, &ledger);
 
@@ -309,7 +309,7 @@ proptest! {
         let ls = LeaderSchedule::new(committee.clone(), 1);
         let mut committer = UniversalCommitter::new(committee, ls, 1, 2);
 
-        let commits = committer.try_commit(&dag, &misaka_dag::narwhal_dag::slot_equivocation_ledger::SlotEquivocationLedger::new());
+        let commits = committer.try_commit(&dag, &misaka_dag::narwhal_dag::slot_equivocation_ledger::SlotEquivocationLedger::new(u32::MAX));
 
         // A fully connected DAG with ≥4 rounds must produce at least 1 commit
         if num_rounds >= 4 {
@@ -328,7 +328,7 @@ proptest! {
         let ls = LeaderSchedule::new(committee.clone(), 1);
         let mut committer = UniversalCommitter::new(committee, ls, 1, 2);
 
-        let commits = committer.try_commit(&dag, &misaka_dag::narwhal_dag::slot_equivocation_ledger::SlotEquivocationLedger::new());
+        let commits = committer.try_commit(&dag, &misaka_dag::narwhal_dag::slot_equivocation_ledger::SlotEquivocationLedger::new(u32::MAX));
 
         // Commit indices must be sequential starting from 0
         for (i, commit) in commits.iter().enumerate() {

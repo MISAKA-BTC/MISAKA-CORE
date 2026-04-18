@@ -105,7 +105,29 @@ impl BlockManager {
             committee,
             max_suspended: 10_000,
             suspended_per_author: HashMap::new(),
-            max_suspended_per_author: 16,
+            // v0.8.8.1 (hotfix/peer-replay-window): raised 16 → 256.
+            //
+            // Paired with PEER_REPLAY_ROUND_WINDOW 3 → 100 in misaka-node.
+            // During cold-reset bootstrap validation, a late-joining node
+            // still accumulated 6+ suspended blocks and hit the 16-block
+            // quarantine threshold faster than BlockRequest/fetch_requests
+            // round-trips could resolve the ancestor gap.
+            //
+            // Raising to 256 multiplies the fetch deadline by ~16×, giving
+            // the pull-based sync path enough time to cover the ancestor
+            // history that the replay window could not carry.
+            //
+            // Memory cost: max 256 blocks × N authors × ~70 KB/block
+            // (ML-DSA signature + header + tx envelopes). For a 4-node
+            // committee that caps at ~70 MB/node — bounded and small
+            // next to the (pre-existing, separately tracked) unbounded
+            // block_cache growth documented in
+            // docs/issues/block-cache-unbounded-leak.md.
+            //
+            // The half-threshold recovery logic at line 299 is
+            // proportional (`/ 2`) so it scales with this constant
+            // without separate tuning.
+            max_suspended_per_author: 256,
             quarantined_authors: HashSet::new(),
             suspension_ttl_rounds: 50,
             pending_fetch_requests: Vec::new(),
@@ -227,6 +249,19 @@ impl BlockManager {
                 .entry(block_ref.author)
                 .or_insert(0);
             *author_count += 1;
+            // v0.8.8.1 (hotfix/peer-replay-window): observability — emit
+            // each suspend so log diff between runs can show counter
+            // progression vs. the quarantine threshold. Target kept
+            // distinct (`misaka::suspend`) so RUST_LOG can filter it.
+            tracing::info!(
+                target: "misaka::suspend",
+                round = block_ref.round,
+                author = block_ref.author,
+                current = *author_count,
+                max = self.max_suspended_per_author,
+                missing = missing.len(),
+                "block_suspended"
+            );
             if *author_count > self.max_suspended_per_author {
                 self.quarantined_authors.insert(block_ref.author);
                 tracing::warn!(

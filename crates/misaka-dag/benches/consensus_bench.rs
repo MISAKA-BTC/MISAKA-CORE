@@ -99,7 +99,7 @@ fn bench_commit_throughput(c: &mut Criterion) {
                         committee.clone(), ls, 1, 2,
                     );
                     let (dag, _) = build_dag(n as usize, 20);
-                    let ledger = misaka_dag::narwhal_dag::slot_equivocation_ledger::SlotEquivocationLedger::new();
+                    let ledger = misaka_dag::narwhal_dag::slot_equivocation_ledger::SlotEquivocationLedger::new(u32::MAX);
                     black_box(committer.try_commit(&dag, &ledger));
                 });
             },

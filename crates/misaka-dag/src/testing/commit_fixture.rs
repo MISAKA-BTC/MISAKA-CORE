@@ -74,7 +74,12 @@ impl CommitFixture {
             None => return Decision::Skip,
         };
 
-        let ledger = crate::narwhal_dag::slot_equivocation_ledger::SlotEquivocationLedger::new();
+        // B3-a: `AuthorityIndex::MAX` is a sentinel "no local author" for
+        // pure test fixtures that do not represent a running node; no
+        // slot.authority in this fixture will match it, so the self-guard
+        // never triggers and the committer sees the normal ban path.
+        let ledger =
+            crate::narwhal_dag::slot_equivocation_ledger::SlotEquivocationLedger::new(u32::MAX);
         committer.try_direct_decide(&leader_ref, &dag, &ledger)
     }
 

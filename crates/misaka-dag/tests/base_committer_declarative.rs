@@ -473,7 +473,7 @@ fn s24_dsl_fully_connected() {
     let committee = b.committee().clone();
     let committer = misaka_dag::narwhal_ordering::base_committer::BaseCommitter::new(committee, 1);
     let leader_ref = b.leader_block(1).unwrap().reference();
-    let ledger = SlotEquivocationLedger::new();
+    let ledger = SlotEquivocationLedger::new(u32::MAX);
     let decision = committer.try_direct_decide(&leader_ref, &dag, &ledger);
     assert!(matches!(decision, Decision::Direct(_)));
 }
@@ -769,7 +769,7 @@ fn s36_tracked_direct_decide() {
         };
         dag.accept_block(VerifiedBlock::new_for_test(b));
     }
-    let ledger = SlotEquivocationLedger::new();
+    let ledger = SlotEquivocationLedger::new(u32::MAX);
     let (decision, registry) = committer.try_direct_decide_tracked(&leader, &dag, &ledger);
     assert!(matches!(decision, Decision::Direct(_)));
     assert_eq!(registry.voter_count(), 3);
@@ -874,7 +874,7 @@ fn s37_equivocation_flood_does_not_cause_skip() {
     };
 
     // Direct: only 2 votes, undecided (quorum=3)
-    let ledger = SlotEquivocationLedger::new();
+    let ledger = SlotEquivocationLedger::new(u32::MAX);
     assert!(matches!(
         committer.try_direct_decide(&leader, &dag, &ledger),
         Decision::Undecided
@@ -1073,7 +1073,7 @@ fn s39_heavy_equivocation_flood_bfs_safety() {
     };
 
     // Direct: only 2 votes (below quorum=3)
-    let ledger = SlotEquivocationLedger::new();
+    let ledger = SlotEquivocationLedger::new(u32::MAX);
     assert!(matches!(
         committer.try_direct_decide(&leader, &dag, &ledger),
         Decision::Undecided
