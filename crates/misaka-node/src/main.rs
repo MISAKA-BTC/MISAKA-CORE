@@ -4155,6 +4155,126 @@ async fn start_narwhal_node(
                             );
                         }
 
+                        // BLOCKER D: equivocation → slashing wiring.
+                        //
+                        // The DAG's SlotEquivocationLedger accumulates every
+                        // detected two-block-at-one-slot violation plus any
+                        // commit-vote equivocation. Until this block, that
+                        // evidence stayed inside CoreEngine — offenders were
+                        // excluded from live quorum but were NEVER debited on
+                        // the staking side. We now drain the ledger each
+                        // epoch boundary and apply `SlashSeverity::Severe`
+                        // (2000 BPS = 20 % per §5.6) via
+                        // `StakingRegistry::slash`, which already owns:
+                        //   * cooldown (`slash_cooldown_epochs`)
+                        //   * idempotency (`last_slash_epoch`)
+                        //   * auto-eject (Active → Exiting below min stake)
+                        //   * reporter reward (carved out of slashed amount)
+                        //
+                        // Evidence is append-only in the ledger, so repeat
+                        // draws are safe: the `last_slash_epoch` gate filters
+                        // out already-applied slashes. This mirrors the
+                        // downtime-Minor path directly above.
+                        {
+                            let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+                            let send_result = msg_tx.try_send(
+                                misaka_dag::narwhal_dag::runtime::ConsensusMessage::DrainEvidence {
+                                    reply: reply_tx,
+                                },
+                            );
+                            if send_result.is_err() {
+                                tracing::warn!(
+                                    "BLOCKER D: consensus runtime busy — skipping \
+                                     equivocation evidence drain at epoch {}",
+                                    new_epoch
+                                );
+                            } else {
+                                match reply_rx.await {
+                                    Ok(evidence) if !evidence.is_empty() => {
+                                        let committee_guard = committee_shared.read().await;
+                                        let mut slashed_ct: u64 = 0;
+                                        let mut skipped_ct: u64 = 0;
+                                        let mut total_slashed: u64 = 0;
+                                        for ev in &evidence {
+                                            let author_idx = ev.authority as usize;
+                                            let pk = match committee_guard
+                                                .authorities
+                                                .get(author_idx)
+                                            {
+                                                Some(a) if !a.public_key.is_empty() => {
+                                                    a.public_key.clone()
+                                                }
+                                                _ => {
+                                                    tracing::warn!(
+                                                        "BLOCKER D: no pubkey for authority={} \
+                                                         in committee — cannot slash",
+                                                        author_idx
+                                                    );
+                                                    skipped_ct += 1;
+                                                    continue;
+                                                }
+                                            };
+                                            let vid = misaka_consensus::slashing::authority_map::pubkey_to_validator_id(&pk);
+                                            match registry_guard.slash(
+                                                &vid,
+                                                misaka_consensus::staking::SlashSeverity::Severe,
+                                                new_epoch,
+                                            ) {
+                                                Ok((amount, reward)) => {
+                                                    slashed_ct += 1;
+                                                    total_slashed =
+                                                        total_slashed.saturating_add(amount);
+                                                    tracing::warn!(
+                                                        "BLOCKER D: equivocation slash Severe (20%) — \
+                                                         validator={} round={} amount={} \
+                                                         reporter_reward={} detected_at_ms={}",
+                                                        hex::encode(&vid[..8]),
+                                                        ev.slot.round,
+                                                        amount,
+                                                        reward,
+                                                        ev.detected_at_ms,
+                                                    );
+                                                }
+                                                Err(e) => {
+                                                    skipped_ct += 1;
+                                                    tracing::debug!(
+                                                        "BLOCKER D: equivocation slash skipped \
+                                                         for validator={}: {:?}",
+                                                        hex::encode(&vid[..8]),
+                                                        e,
+                                                    );
+                                                }
+                                            }
+                                        }
+                                        drop(committee_guard);
+                                        tracing::info!(
+                                            "BLOCKER D: epoch {} evidence drain — seen={} \
+                                             slashed={} skipped={} total_slashed_base_units={}",
+                                            new_epoch,
+                                            evidence.len(),
+                                            slashed_ct,
+                                            skipped_ct,
+                                            total_slashed,
+                                        );
+                                    }
+                                    Ok(_) => {
+                                        tracing::debug!(
+                                            "BLOCKER D: epoch {} — no equivocation evidence",
+                                            new_epoch
+                                        );
+                                    }
+                                    Err(_) => {
+                                        tracing::warn!(
+                                            "BLOCKER D: consensus runtime dropped DrainEvidence \
+                                             reply at epoch {} — evidence retained in ledger, \
+                                             will be retried next boundary",
+                                            new_epoch
+                                        );
+                                    }
+                                }
+                            }
+                        }
+
                         // Phase 10 (Item 1): Deferred VALIDATOR restart.
                         //
                         // If THIS node was started in OBSERVER MODE (not in
@@ -8181,6 +8301,96 @@ mod tests {
         assert_eq!(
             g.genesis_timestamp_ms, 0,
             "BLOCKER J: production wiring must keep genesis_timestamp_ms = 0"
+        );
+    }
+
+    // ─── BLOCKER D: equivocation → slashing wiring tests ─────────────────
+    //
+    // Pins down the invariants the production wiring relies on:
+    // * `authority_map::pubkey_to_validator_id` (used to map the DAG's
+    //   `AuthorityIndex` to a 32-byte staking id) produces the EXACT
+    //   same hash as the ad-hoc `Sha3_256::digest(pk)` path used for
+    //   `leader_address` in the commit loop. If these two diverge, a
+    //   proposer could receive rewards at one id but be slashed at
+    //   another.
+    // * Committee authorities can be looked up by index and their
+    //   `public_key` fed through `pubkey_to_validator_id` to produce the
+    //   staking id.
+    // * `SlashSeverity::Severe` resolves to the 2000 BPS (20 %) rate
+    //   the production wiring applies for equivocation. This is the
+    //   rate in §5.6 of the economic spec.
+
+    #[test]
+    fn blocker_d_pubkey_to_validator_id_matches_commit_loop_leader_address() {
+        use sha3::{Digest, Sha3_256};
+        let pk = vec![0xAAu8; 1952];
+        let via_authority_map =
+            misaka_consensus::slashing::authority_map::pubkey_to_validator_id(&pk);
+        let via_commit_loop: [u8; 32] = Sha3_256::digest(&pk).into();
+        assert_eq!(
+            via_authority_map, via_commit_loop,
+            "BLOCKER D: authority_map::pubkey_to_validator_id MUST match the \
+             SHA3-256(pubkey) derivation used in the commit loop for leader_address \
+             — divergence would split reward address from slash id"
+        );
+    }
+
+    #[test]
+    fn blocker_d_authority_index_maps_to_distinct_validator_ids() {
+        // Mirrors the lookup the drain-and-slash hook performs:
+        //     committee.authorities[author_idx].public_key
+        //       → pubkey_to_validator_id
+        // Using distinct pubkeys guarantees distinct validator ids.
+        let pks = [vec![0x01u8; 1952], vec![0x02u8; 1952], vec![0x03u8; 1952]];
+        let ids: Vec<[u8; 32]> = pks
+            .iter()
+            .map(|pk| misaka_consensus::slashing::authority_map::pubkey_to_validator_id(pk))
+            .collect();
+
+        // All distinct.
+        assert_ne!(ids[0], ids[1]);
+        assert_ne!(ids[1], ids[2]);
+        assert_ne!(ids[0], ids[2]);
+
+        // Deterministic — calling twice yields the same id.
+        let id_again = misaka_consensus::slashing::authority_map::pubkey_to_validator_id(&pks[1]);
+        assert_eq!(ids[1], id_again);
+    }
+
+    #[test]
+    fn blocker_d_severe_slash_rate_is_2000_bps() {
+        // The production wiring calls `StakingRegistry::slash(vid,
+        // SlashSeverity::Severe, epoch)`. The Severe rate MUST be 2000
+        // BPS (20 %) — if this ever changes the economic spec §5.6
+        // changes and we need to update it deliberately.
+        let mainnet = misaka_consensus::staking::StakingConfig::mainnet();
+        assert_eq!(
+            mainnet.slash_severe_bps, 2000,
+            "BLOCKER D: equivocation applies Severe slash, which MUST be 2000 BPS (20%)"
+        );
+        let testnet = misaka_consensus::staking::StakingConfig::testnet();
+        assert_eq!(
+            testnet.slash_severe_bps, 2000,
+            "BLOCKER D: testnet Severe rate must match mainnet for wiring parity"
+        );
+    }
+
+    #[test]
+    fn blocker_d_authority_out_of_range_cannot_produce_id() {
+        // Negative test: if the DAG reports evidence at `authority =
+        // U` and the committee has fewer than U+1 entries (e.g. after
+        // a ReloadCommittee), the drain-and-slash hook logs a warn and
+        // skips instead of slashing the wrong validator id.
+        //
+        // We emulate the lookup directly here — `Committee::authority`
+        // is tested in misaka-dag; what we pin is that the index path
+        // in main.rs (committee.authorities.get(idx)) returns None for
+        // out-of-range indices.
+        let authorities: Vec<Vec<u8>> = vec![vec![1u8; 1952], vec![2u8; 1952], vec![3u8; 1952]];
+        let out_of_range_idx: usize = 99;
+        assert!(
+            authorities.get(out_of_range_idx).is_none(),
+            "BLOCKER D: out-of-range authority index must NOT map to a validator id"
         );
     }
 
