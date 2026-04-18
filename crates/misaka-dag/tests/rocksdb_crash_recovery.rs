@@ -544,6 +544,141 @@ fn blocker_g_point_get_block_roundtrip() {
     assert!(store.get_block(&missing).unwrap().is_none());
 }
 
+// ═══════════════════════════════════════════════════════════
+//  BLOCKER H: atomic commit-index batch + last_committed_index
+// ═══════════════════════════════════════════════════════════
+
+/// A single `write_commit_indexes` must land tx_details + addr_entries
+/// + `last_committed_index` ATOMICALLY. After the call the DB must
+/// either contain everything we staged or (on failure) nothing. The
+/// happy path asserts everything lands.
+#[test]
+fn blocker_h_write_commit_indexes_lands_all_entries_atomically() {
+    let dir = TempDir::new().unwrap();
+    let store_path = dir.path().join("consensus_db");
+
+    let tx_details: Vec<([u8; 32], Vec<u8>)> = (0..5)
+        .map(|i| ([i as u8; 32], format!("tx-{}-payload", i).into_bytes()))
+        .collect();
+
+    // CF_ADDR_INDEX uses a fixed 64-byte prefix extractor so prefix
+    // scans work against a full hex-encoded 32-byte address. Mirror the
+    // production `{address_hex}:{height_be8}:{tx_hash_hex}` layout so
+    // `get_addr_entries` finds every entry via a single prefix scan.
+    let addr_hex: String = (0..32).map(|b: u8| format!("{:02x}", b)).collect();
+    let addr_entries: Vec<(Vec<u8>, Vec<u8>)> = (0..10u64)
+        .map(|i| {
+            let key = format!("{}:{:016x}:{}", addr_hex, i, hex::encode([i as u8; 32]));
+            (key.into_bytes(), format!("entry-{}", i).into_bytes())
+        })
+        .collect();
+
+    {
+        let store = RocksDbConsensusStore::open(&store_path).unwrap();
+        store
+            .write_commit_indexes(42, &tx_details, &addr_entries)
+            .expect("atomic commit-index batch write");
+    }
+
+    // Reopen and verify every entry survived.
+    let store = RocksDbConsensusStore::open(&store_path).unwrap();
+    assert_eq!(
+        store.get_last_committed_index().unwrap(),
+        Some(42),
+        "last_committed_index must land"
+    );
+    for (hash, expected) in &tx_details {
+        let got = store
+            .get_tx_detail(hash)
+            .unwrap()
+            .expect("tx_detail present");
+        assert_eq!(&got, expected);
+    }
+    // Prefix scan returns all 10 addr entries.
+    let got_addrs = store.get_addr_entries(&addr_hex).unwrap();
+    assert_eq!(
+        got_addrs.len(),
+        10,
+        "all 10 addr_entries must land in one batch"
+    );
+}
+
+/// Empty batch (e.g. an empty committed sub-dag) must still stamp
+/// `last_committed_index` so recovery can see progress was made.
+#[test]
+fn blocker_h_empty_batch_still_stamps_last_committed_index() {
+    let dir = TempDir::new().unwrap();
+    let store_path = dir.path().join("consensus_db");
+
+    {
+        let store = RocksDbConsensusStore::open(&store_path).unwrap();
+        assert_eq!(
+            store.get_last_committed_index().unwrap(),
+            None,
+            "fresh DB has no last_committed_index"
+        );
+
+        store
+            .write_commit_indexes(7, &[], &[])
+            .expect("empty commit batch must succeed");
+        assert_eq!(store.get_last_committed_index().unwrap(), Some(7));
+    }
+
+    // Survive reopen.
+    let store = RocksDbConsensusStore::open(&store_path).unwrap();
+    assert_eq!(store.get_last_committed_index().unwrap(), Some(7));
+}
+
+/// Repeated `write_commit_indexes` at higher indices must overwrite
+/// the marker monotonically. (The method itself does NOT enforce
+/// monotonicity — the commit loop does, because commits are fed in
+/// index order. This test pins the overwrite semantics.)
+#[test]
+fn blocker_h_last_committed_index_overwrites_on_later_commit() {
+    let dir = TempDir::new().unwrap();
+    let store_path = dir.path().join("consensus_db");
+
+    let store = RocksDbConsensusStore::open(&store_path).unwrap();
+    store.write_commit_indexes(1, &[], &[]).unwrap();
+    assert_eq!(store.get_last_committed_index().unwrap(), Some(1));
+    store.write_commit_indexes(2, &[], &[]).unwrap();
+    assert_eq!(store.get_last_committed_index().unwrap(), Some(2));
+    store.write_commit_indexes(100, &[], &[]).unwrap();
+    assert_eq!(store.get_last_committed_index().unwrap(), Some(100));
+}
+
+/// `write_commit_indexes` must not interfere with data written via
+/// `write_batch` (the block/commit path). Both coexist in the same
+/// DB and touch disjoint CFs.
+#[test]
+fn blocker_h_commit_index_batch_coexists_with_dag_write_batch() {
+    let dir = TempDir::new().unwrap();
+    let store_path = dir.path().join("consensus_db");
+
+    {
+        let store = RocksDbConsensusStore::open(&store_path).unwrap();
+
+        // DAG write_batch lands a block.
+        let mut batch = DagWriteBatch::new();
+        batch.add_block(VerifiedBlock::new_for_test(make_block(3, 1)));
+        store.write_batch(&batch).unwrap();
+
+        // Commit-index batch lands a tx_index entry + marker.
+        store
+            .write_commit_indexes(5, &[([0xAB; 32], b"tx-5".to_vec())], &[])
+            .unwrap();
+    }
+
+    // Reopen — both sides survive.
+    let store = RocksDbConsensusStore::open(&store_path).unwrap();
+    assert_eq!(store.block_count().unwrap(), 1);
+    assert_eq!(store.get_last_committed_index().unwrap(), Some(5));
+    assert_eq!(
+        store.get_tx_detail(&[0xAB; 32]).unwrap(),
+        Some(b"tx-5".to_vec())
+    );
+}
+
 /// `block_count` and `commit_count` return exact counts after a
 /// write_batch and survive a reopen.
 #[test]

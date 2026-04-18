@@ -76,6 +76,13 @@ const KEY_SCHEMA_VERSION: &[u8] = b"schema_version";
 /// or the node will fail closed on every restart.
 #[cfg(feature = "rocksdb")]
 pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+/// BLOCKER H: last-committed-index marker stamped atomically with
+/// every commit-loop index write. Used on recovery to detect whether
+/// a crash left any `tx_index` / `addr_index` entries partially
+/// persisted and to log the commit delta between the DAG store and
+/// the UTXO snapshot.
+#[cfg(feature = "rocksdb")]
+const KEY_LAST_COMMITTED_INDEX: &[u8] = b"last_committed_index";
 
 /// RocksDB-backed consensus store.
 ///
@@ -363,6 +370,94 @@ impl RocksDbConsensusStore {
             }
         }
         Ok(results)
+    }
+
+    // ─── BLOCKER H: atomic commit-boundary index batch ───────
+    //
+    // The commit loop (main.rs) previously issued `put_tx_detail` /
+    // `put_addr_entry` per-transaction. Because each is a separate
+    // `db.put_cf` call, a node crash mid-loop could leave some
+    // transactions indexed and others not — an explorer would
+    // present an inconsistent view of a committed sub-dag until the
+    // next run "filled in" the missing entries by chance.
+    //
+    // `write_commit_indexes` packs every tx_index / addr_index
+    // `put_cf` plus the `last_committed_index` meta-key update into
+    // ONE `rocksdb::WriteBatch`. RocksDB guarantees an atomic write
+    // across all CFs in a single handle, so either every entry from
+    // this commit lands or none of them do. On recovery,
+    // `get_last_committed_index` tells the node which commit was
+    // the last fully-persisted one.
+    //
+    // Out of scope for this batch: UTXO snapshot (separate JSON
+    // artifact, atomic-via-rename in its own right) and DAG
+    // `narwhal_blocks` / `narwhal_commits` (written by the consensus
+    // runtime on a different cadence). A cross-artifact transaction
+    // would require merging those stores into a single RocksDB
+    // handle; that is a dedicated follow-up.
+
+    /// Atomically persist a commit's tx_index + addr_index entries
+    /// together with the `last_committed_index` meta marker.
+    ///
+    /// Either every entry lands or none does. The write honours the
+    /// store's `sync_writes` policy — when enabled (production
+    /// default) the WAL is fsynced before returning.
+    pub fn write_commit_indexes(
+        &self,
+        commit_index: u64,
+        tx_details: &[([u8; 32], Vec<u8>)],
+        addr_entries: &[(Vec<u8>, Vec<u8>)],
+    ) -> Result<(), StoreError> {
+        let cf_tx = self.cf_tx_index()?;
+        let cf_addr = self.cf_addr_index()?;
+        let cf_meta = self.cf_meta()?;
+
+        let mut batch = rocksdb::WriteBatch::default();
+        for (hash, detail) in tx_details {
+            batch.put_cf(cf_tx, hash, detail);
+        }
+        for (key, entry) in addr_entries {
+            batch.put_cf(cf_addr, key, entry);
+        }
+        batch.put_cf(
+            cf_meta,
+            KEY_LAST_COMMITTED_INDEX,
+            commit_index.to_le_bytes(),
+        );
+
+        let mut opts = rocksdb::WriteOptions::default();
+        if self.sync_writes {
+            opts.set_sync(true);
+        }
+        self.db.write_opt(batch, &opts).map_err(|e| {
+            StoreError::Corrupted(format!(
+                "RocksDB write_commit_indexes atomic batch failed: {}",
+                e
+            ))
+        })?;
+        Ok(())
+    }
+
+    /// Read the `last_committed_index` marker written by the most
+    /// recent [`write_commit_indexes`]. Returns `Ok(None)` on a DB
+    /// that has never processed a commit (fresh install or a
+    /// pre-BLOCKER-H v0.8.8 testnet DB).
+    pub fn get_last_committed_index(&self) -> Result<Option<u64>, StoreError> {
+        let raw = self
+            .db
+            .get_cf(self.cf_meta()?, KEY_LAST_COMMITTED_INDEX)
+            .map_err(|e| {
+                StoreError::Corrupted(format!("RocksDB get last_committed_index failed: {}", e))
+            })?;
+        Ok(raw.and_then(|v| {
+            if v.len() == 8 {
+                Some(u64::from_le_bytes([
+                    v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7],
+                ]))
+            } else {
+                None
+            }
+        }))
     }
 
     // ─── Committed TX filter persistence ─────────────────────

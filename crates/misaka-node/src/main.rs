@@ -4161,6 +4161,17 @@ async fn start_narwhal_node(
                 // txs in a batch mutate the registry atomically relative to
                 // the REST api (which takes read locks).
                 let current_epoch_for_stake = *current_epoch.read().await;
+                // BLOCKER H: track whether this commit rolled an epoch so
+                // we can persist the full lifecycle snapshot immediately
+                // after `drop(registry_guard)`. The epoch-boundary block
+                // is where the most consequential registry mutations
+                // happen (settle_unlocks, downtime-Minor + equivocation
+                // slashes, auto_activate_locked), and they were
+                // previously lost on crash because the lifecycle
+                // persister was only called at bootstrap. Capture after
+                // the block runs so the JSON file reflects the exact
+                // post-mutation state.
+                let mut registry_dirty_from_epoch_boundary = false;
                 let mut registry_guard = validator_registry.write().await;
                 let exec_result = tx_executor.execute_committed(
                     output.commit_index,
@@ -4556,10 +4567,44 @@ async fn start_narwhal_node(
                         // propose counts across epochs and inflate uptime.
                         propose_count.clear();
                         epoch_block_count = 0;
+
+                        // BLOCKER H: mark the registry as dirty so the
+                        // lifecycle snapshot is persisted once the write
+                        // lock is released below. The actual IO happens
+                        // outside the lock — we do not want to block REST
+                        // readers behind a tokio::fs::write.
+                        registry_dirty_from_epoch_boundary = true;
                     }
                 }
 
                 drop(registry_guard);
+
+                // BLOCKER H: persist the full lifecycle snapshot outside
+                // the write lock. Failures are non-fatal — the in-memory
+                // state is still authoritative and the next epoch will
+                // retry. Without this call the settle_unlocks /
+                // downtime-Minor / equivocation-slash mutations
+                // performed above would be lost on the next crash.
+                if registry_dirty_from_epoch_boundary {
+                    if let Err(e) = crate::validator_lifecycle_persistence::persist_global_state(
+                        &validator_registry,
+                        &current_epoch,
+                        &validator_epoch_progress,
+                    )
+                    .await
+                    {
+                        tracing::warn!(
+                            "BLOCKER H: validator lifecycle persist failed at epoch-boundary commit={}: {}",
+                            output.commit_index,
+                            e
+                        );
+                    } else {
+                        tracing::debug!(
+                            "BLOCKER H: validator lifecycle persisted at commit={}",
+                            output.commit_index
+                        );
+                    }
+                }
                 total_committed_txs += output.transactions.len() as u64;
                 total_accepted_txs += exec_result.txs_accepted as u64;
 
@@ -4721,6 +4766,15 @@ async fn start_narwhal_node(
 
                     let mut tx_map = committed_txs_writer.write().await;
                     let mut mempool_guard = narwhal_mempool.mempool.lock().await;
+                    // BLOCKER H: accumulate every tx_index + addr_index
+                    // entry for this commit into buffers, then issue ONE
+                    // atomic `write_commit_indexes` batch at the end.
+                    // Replaces the per-tx `put_tx_detail` / `put_addr_entry`
+                    // calls which were non-atomic — a crash mid-loop could
+                    // leave the explorer with a half-indexed commit.
+                    let mut pending_tx_details: Vec<([u8; 32], Vec<u8>)> =
+                        Vec::with_capacity(output.transactions.len());
+                    let mut pending_addr_entries: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
                     for raw_tx in &output.transactions {
                         if let Ok(tx) = borsh::from_slice::<misaka_types::utxo::UtxoTransaction>(raw_tx) {
                             let hash = tx.tx_hash();
@@ -4756,14 +4810,18 @@ async fn start_narwhal_node(
                                 memo: memo.clone(),
                             };
 
-                            // Persist to RocksDB
+                            // BLOCKER H: stage for the atomic batch below
+                            // instead of issuing a single-key `put_cf` here.
                             if let Ok(json_bytes) = serde_json::to_vec(&detail) {
-                                if let Err(e) = tx_index_store.put_tx_detail(&hash, &json_bytes) {
-                                    tracing::warn!("Failed to persist tx_index: {}", e);
-                                }
+                                pending_tx_details.push((hash, json_bytes));
+                            } else {
+                                tracing::warn!(
+                                    "BLOCKER H: failed to serialize tx_index for {}",
+                                    hash_hex
+                                );
                             }
 
-                            // Persist address index entries for outputs
+                            // Stage address index entries for outputs.
                             for out_summary in &outputs_summary {
                                 let addr_ref = AddressTxRef {
                                     tx_hash: hash_hex.clone(),
@@ -4778,12 +4836,13 @@ async fn start_narwhal_node(
                                         "{}:{:016x}:{}",
                                         out_summary.address, current_height, hash_hex
                                     );
-                                    if let Err(e) = tx_index_store.put_addr_entry(
-                                        addr_key.as_bytes(),
-                                        &ref_bytes,
-                                    ) {
-                                        tracing::warn!("Failed to persist addr_index: {}", e);
-                                    }
+                                    pending_addr_entries
+                                        .push((addr_key.into_bytes(), ref_bytes));
+                                } else {
+                                    tracing::warn!(
+                                        "BLOCKER H: failed to serialize addr_index for {}",
+                                        hash_hex
+                                    );
                                 }
                             }
 
@@ -4791,6 +4850,33 @@ async fn start_narwhal_node(
                             tx_map.insert(hash, detail);
                             mempool_guard.remove(&hash);
                         }
+                    }
+
+                    // BLOCKER H: one atomic WriteBatch for this commit's
+                    // tx_index + addr_index + last_committed_index marker.
+                    // Success means every entry plus the index marker
+                    // landed together; failure means none of them did.
+                    if let Err(e) = tx_index_store.write_commit_indexes(
+                        output.commit_index,
+                        &pending_tx_details,
+                        &pending_addr_entries,
+                    ) {
+                        tracing::warn!(
+                            "BLOCKER H: atomic commit-index batch failed at commit={} \
+                             tx_entries={} addr_entries={}: {}",
+                            output.commit_index,
+                            pending_tx_details.len(),
+                            pending_addr_entries.len(),
+                            e
+                        );
+                    } else {
+                        tracing::debug!(
+                            "BLOCKER H: persisted commit={} atomic batch \
+                             tx_entries={} addr_entries={}",
+                            output.commit_index,
+                            pending_tx_details.len(),
+                            pending_addr_entries.len(),
+                        );
                     }
                     // Evict oldest entries from in-memory cache if too large
                     if tx_map.len() > 10_000 {
@@ -4803,6 +4889,24 @@ async fn start_narwhal_node(
                         for (k, _) in entries.into_iter().take(excess) {
                             tx_map.remove(&k);
                         }
+                    }
+                } else {
+                    // BLOCKER H: even on an empty commit (no tx_index or
+                    // addr_index entries), stamp the `last_committed_index`
+                    // marker so recovery knows the DAG store is caught up
+                    // to this index and the UTXO snapshot can be compared
+                    // against it at startup.
+                    if let Err(e) = tx_index_store.write_commit_indexes(
+                        output.commit_index,
+                        &[],
+                        &[],
+                    ) {
+                        tracing::warn!(
+                            "BLOCKER H: failed to stamp last_committed_index={} \
+                             on empty commit: {}",
+                            output.commit_index,
+                            e
+                        );
                     }
                 }
 
