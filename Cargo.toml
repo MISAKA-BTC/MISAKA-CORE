@@ -42,6 +42,21 @@ members = [
     "crates/misaka-genesis-builder",
     "crates/misaka-authority-aggregation",
     "crates/misaka-loadgen",
+    # ── PR D2: enable 3 of the 4 crates deferred from PR A ──
+    # These depend on the eUTXO types + dag_types added by PR B and ship
+    # as dead code (not wired into misaka-node production paths).
+    #   misaka-sdk          — wallet/dev SDK for eUTXO v2 tx construction
+    #   misaka-light-client — header-sync light client
+    #   misaka-replay       — deterministic chain replay tool
+    #
+    # misaka-eutxo-audit is STILL deferred because it pulls features that
+    # need to be declared in misaka-mempool / misaka-txscript
+    # (eutxo-v1-vm, transitive ModEu wiring) which is larger than the
+    # PR-D2 scope. Re-enable in a dedicated follow-up after those
+    # feature flags land.
+    "crates/misaka-sdk",
+    "crates/misaka-light-client",
+    "crates/misaka-replay",
     # misaka-vm: DELETED (Phase 25). VM is not implemented.
     # See docs/design/VM_ROADMAP.md for v1.1 plan.
     "components/addressmanager",

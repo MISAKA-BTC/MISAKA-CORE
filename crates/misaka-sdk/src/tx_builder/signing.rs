@@ -28,8 +28,8 @@ pub fn sign_input(
     sk: &MlDsaSecretKey,
 ) -> Result<Vec<u8>, SdkError> {
     let digest = compute_signing_digest(tx, input_index);
-    let sig = ml_dsa_sign_raw(sk, &digest)
-        .map_err(|e| SdkError::SigningFailed(format!("{}", e)))?;
+    let sig =
+        ml_dsa_sign_raw(sk, &digest).map_err(|e| SdkError::SigningFailed(format!("{}", e)))?;
     Ok(sig.as_bytes().to_vec())
 }
 

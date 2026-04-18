@@ -1679,6 +1679,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "misaka-light-client"
+version = "0.9.0"
+dependencies = [
+ "bincode",
+ "hex",
+ "misaka-crypto",
+ "misaka-pqc",
+ "misaka-protocol-config",
+ "misaka-types",
+ "serde",
+ "sha3",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "misaka-loadgen"
 version = "0.9.0"
 dependencies = [
@@ -1887,6 +1902,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "misaka-replay"
+version = "0.9.0"
+dependencies = [
+ "bincode",
+ "borsh",
+ "clap",
+ "hex",
+ "misaka-crypto",
+ "misaka-execution",
+ "misaka-pqc",
+ "misaka-protocol-config",
+ "misaka-storage",
+ "misaka-types",
+ "serde",
+ "sha3",
+ "thiserror 1.0.69",
+ "tracing",
+]
+
+[[package]]
 name = "misaka-rpc"
 version = "0.9.0"
 dependencies = [
@@ -1914,6 +1949,21 @@ dependencies = [
  "misaka-types",
  "serde",
  "serde_json",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "misaka-sdk"
+version = "0.9.0"
+dependencies = [
+ "borsh",
+ "hex",
+ "misaka-pqc",
+ "misaka-protocol-config",
+ "misaka-types",
+ "serde",
+ "serde_json",
+ "sha3",
  "thiserror 1.0.69",
 ]
 
