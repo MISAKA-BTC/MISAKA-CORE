@@ -60,13 +60,15 @@ pub mod reward_epoch;
 //
 // v0.8.0 semantics: metrics are recorded but NOT used for validator
 // ranking (ranking uses self_stake only). See docs/internal/STAKING_MODEL.md.
-// NOTE (PR C): `reputation`, `reward_history`, and `slashing` modules
-// are declared in the merged snapshot but their source files are
-// deferred to PR D (they depend on misaka-node common-file changes).
-// Re-enable these `pub mod` lines when PR D lands.
-// pub mod reputation;
-// pub mod reward_history;
-// pub mod slashing;
+// PR D1: source files for `reputation`, `reward_history`, and `slashing`
+// are additive — they don't remove existing APIs, so misaka-node and
+// other callers keep compiling without changes. The staking.rs refactor
+// that rewires `StakingRegistry::slash` / `::on_slash` etc. into these
+// modules is still deferred to PR D2 (needs coordinated misaka-node
+// updates).
+pub mod reputation;
+pub mod reward_history;
+pub mod slashing;
 
 // ── On-Chain Staking & Slashing ──
 pub mod staking;
