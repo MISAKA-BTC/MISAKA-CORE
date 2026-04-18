@@ -103,3 +103,28 @@ Keep changes confined and explain which line they affect:
 - import/breadth line
 
 Avoid mixing both in one change unless the coupling is real and unavoidable.
+
+## Workspace layout & deferred sub-projects (BLOCKER B / K)
+
+The top-level `Cargo.toml` uses `[workspace.exclude]` for sub-projects
+that are **intentionally NOT part of the v0.8.0 mainnet surface**:
+
+- `relayer/` — Solana ↔ MISAKA bridge (burn & mint). Not part of any
+  `cargo build --workspace`, CI gate, or external audit scope. The
+  node-side stub (`POST /api/bridge/submit_mint`) always rejects and
+  the binary FATALs on mainnet. See `relayer/README.md` for status.
+- `solana-bridge/` — Solana side of the same bridge. Same status.
+
+When working on either, `cd` into the sub-project and use its own
+`cargo` invocation. Do NOT add them to `[workspace.members]` unless a
+production wire-up lands in the same PR.
+
+## Dead-code workspace members (BLOCKER F / K)
+
+Several workspace members ship as dead code *today* and are expected
+to gain production callers in a future release. The comment block
+immediately above them in `Cargo.toml` tracks their target version.
+When you add a new public API anywhere in those crates, add a
+production caller in the same PR — a caller-less public API is a
+review-blocking regression under the planned CI lint (BLOCKER L).
+

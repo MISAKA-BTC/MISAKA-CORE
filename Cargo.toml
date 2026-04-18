@@ -66,6 +66,17 @@ members = [
     "wallet/core",
 ]
 exclude = [
+    # BLOCKER B: `relayer` and `solana-bridge` are explicitly out of scope
+    # for the v0.8.0 mainnet launch. Keeping them in `[workspace.exclude]`
+    # means:
+    #   - `cargo build --workspace [--all-features]` does NOT compile them
+    #   - the CI gate does NOT gate on bridge code
+    #   - external audits of the workspace do NOT include unimplemented bridge
+    # Build them on demand with `cd relayer && cargo build`. The relayer
+    # binary itself FATALs on mainnet until the mint endpoint
+    # (`POST /api/bridge/submit_mint`) is implemented, and the node-side
+    # stub in `crates/misaka-node/src/main.rs` always rejects mint requests
+    # with `accepted: false`. See `relayer/README.md` for the full status.
     "relayer",
     "solana-bridge",
 ]
