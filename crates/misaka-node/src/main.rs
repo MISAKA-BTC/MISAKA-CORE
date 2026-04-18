@@ -1544,6 +1544,54 @@ async fn start_narwhal_node(
     let committee_shared: std::sync::Arc<
         tokio::sync::RwLock<misaka_dag::narwhal_types::committee::Committee>,
     > = std::sync::Arc::new(tokio::sync::RwLock::new(committee.clone()));
+
+    // BLOCKER F: peer-score / ban-list persistence.
+    //
+    // Load the multi-dimensional `ScoreManager` from
+    // `{data_dir}/peer_scores.json` so that temp/perm bans survive a
+    // restart. Without persistence, every node restart resets the
+    // ban list and score history, and an attacker who hit the
+    // permanent-ban threshold can simply wait for the next restart
+    // to be welcomed back as a fresh peer.
+    //
+    // Fallback policy (matches BLOCKER A UTXO snapshot):
+    // * Missing file → start with a fresh, empty ScoreManager.
+    // * Corrupt / format-mismatched file → log + start fresh.
+    // The in-memory state is wrapped in an `Arc<parking_lot::Mutex>`
+    // so the sig-verify-fail hooks (sync context, inside tokio::select
+    // arms) can mutate it without .await, and the periodic
+    // save/tick task can also take short locks.
+    let peer_scores_path = data_dir.join("peer_scores.json");
+    let score_manager: std::sync::Arc<parking_lot::Mutex<misaka_p2p::scoring::ScoreManager>> =
+        std::sync::Arc::new(parking_lot::Mutex::new(
+            match misaka_p2p::scoring::ScoreManager::load_from_file(&peer_scores_path) {
+                Ok(Some(mgr)) => {
+                    info!(
+                        "BLOCKER F: loaded peer-score snapshot from {} ({} peers, {} bans)",
+                        peer_scores_path.display(),
+                        mgr.peer_count(),
+                        mgr.banned_count(),
+                    );
+                    mgr
+                }
+                Ok(None) => {
+                    info!(
+                        "BLOCKER F: no peer-score snapshot at {} — starting fresh",
+                        peer_scores_path.display()
+                    );
+                    misaka_p2p::scoring::ScoreManager::new()
+                }
+                Err(e) => {
+                    warn!(
+                        "BLOCKER F: failed to load peer-score snapshot at {} ({}) — starting fresh",
+                        peer_scores_path.display(),
+                        e
+                    );
+                    misaka_p2p::scoring::ScoreManager::new()
+                }
+            },
+        ));
+
     info!("startup[2/6]: parsing validator keys...");
     let relay_public_key = identity.validator_public_key()?;
     let relay_secret_key = Arc::new(identity.validator_secret_key()?);
@@ -3384,6 +3432,11 @@ async fn start_narwhal_node(
     let connected_peers_for_ingress = connected_peers.clone();
     let observer_count_for_ingress = observer_count.clone();
     let observer_registry_for_ingress = observer_registry.clone();
+    // BLOCKER F: clone the shared ScoreManager + committee handle into
+    // the relay ingress task so the sig-verify-fail hooks can update
+    // scores keyed on the authority's pubkey-derived PeerId.
+    let score_manager_for_ingress = score_manager.clone();
+    let committee_shared_for_ingress = committee_shared.clone();
     let relay_ingress_handle = tokio::spawn(async move {
         while let Some(event) = relay_in_rx.recv().await {
             match event {
@@ -3564,16 +3617,38 @@ async fn start_narwhal_node(
                         }
                         if let Ok(outcome) = reply_rx.await {
                             if outcome.sig_verify_failed {
-                                // Task D / audit follow-up: the sender pushed a
-                                // block whose ML-DSA-65 signature or structural
-                                // check failed inside CoreEngine. Surface that
-                                // fact to operators so bad peers are visible
-                                // even though the production code path currently
-                                // has no PeerScorer wired up.
-                                warn!(
-                                    "peer_sig_verify_failed from={} round={}",
-                                    authority_index, block_ref.round,
-                                );
+                                // BLOCKER F: record InvalidPqSignature against
+                                // the sending authority's pubkey-derived PeerId.
+                                // ScoreManager auto-bans at the -100 threshold;
+                                // a single InvalidPqSignature costs 50 penalty
+                                // points, so two failures → permanent ban.
+                                let peer_id = {
+                                    let c = committee_shared_for_ingress.read().await;
+                                    c.authorities
+                                        .get(authority_index as usize)
+                                        .filter(|a| !a.public_key.is_empty())
+                                        .map(|a| {
+                                            use sha3::{Digest, Sha3_256};
+                                            let id: [u8; 32] =
+                                                Sha3_256::digest(&a.public_key).into();
+                                            misaka_p2p::peer_id::PeerId(id)
+                                        })
+                                };
+                                if let Some(pid) = peer_id {
+                                    let banned = score_manager_for_ingress.lock().record_event(
+                                        pid,
+                                        misaka_p2p::scoring::ScoreEvent::InvalidPqSignature,
+                                    );
+                                    warn!(
+                                        "peer_sig_verify_failed from={} round={} score_event=InvalidPqSignature banned={}",
+                                        authority_index, block_ref.round, banned,
+                                    );
+                                } else {
+                                    warn!(
+                                        "peer_sig_verify_failed from={} round={} (no committee pubkey — score not updated)",
+                                        authority_index, block_ref.round,
+                                    );
+                                }
                             }
                             if !outcome.accepted.is_empty() {
                                 // Cache ONLY after verification succeeded
@@ -3658,10 +3733,35 @@ async fn start_narwhal_node(
                             }
                             if let Ok(outcome) = reply_rx.await {
                                 if outcome.sig_verify_failed {
-                                    warn!(
-                                        "peer_sig_verify_failed from={} round={} (BlockResponse)",
-                                        authority_index, block_ref.round,
-                                    );
+                                    // BLOCKER F: same score path as the
+                                    // BlockProposal arm directly above.
+                                    let peer_id = {
+                                        let c = committee_shared_for_ingress.read().await;
+                                        c.authorities
+                                            .get(authority_index as usize)
+                                            .filter(|a| !a.public_key.is_empty())
+                                            .map(|a| {
+                                                use sha3::{Digest, Sha3_256};
+                                                let id: [u8; 32] =
+                                                    Sha3_256::digest(&a.public_key).into();
+                                                misaka_p2p::peer_id::PeerId(id)
+                                            })
+                                    };
+                                    if let Some(pid) = peer_id {
+                                        let banned = score_manager_for_ingress.lock().record_event(
+                                            pid,
+                                            misaka_p2p::scoring::ScoreEvent::InvalidPqSignature,
+                                        );
+                                        warn!(
+                                            "peer_sig_verify_failed from={} round={} (BlockResponse) score_event=InvalidPqSignature banned={}",
+                                            authority_index, block_ref.round, banned,
+                                        );
+                                    } else {
+                                        warn!(
+                                            "peer_sig_verify_failed from={} round={} (BlockResponse, no committee pubkey)",
+                                            authority_index, block_ref.round,
+                                        );
+                                    }
                                 }
                                 if !outcome.accepted.is_empty() {
                                     relay_cache_for_ingress
@@ -3739,6 +3839,39 @@ async fn start_narwhal_node(
         }
     });
 
+    // BLOCKER F: periodic peer-score save + decay tick.
+    //
+    // Every 60s we (a) decay non-penalty scores toward zero and drop
+    // expired temp bans via `ScoreManager::tick`, then (b) persist the
+    // snapshot atomically to `{data_dir}/peer_scores.json`. A
+    // save-failure is logged but is NOT fatal — the in-memory state
+    // is still authoritative and the next tick will retry.
+    let score_manager_for_saver = score_manager.clone();
+    let peer_scores_path_for_saver = peer_scores_path.clone();
+    let score_saver_handle = tokio::spawn(async move {
+        let mut tick = tokio::time::interval(tokio::time::Duration::from_secs(60));
+        tick.tick().await; // consume the initial immediate tick
+        loop {
+            tick.tick().await;
+            let save_result = {
+                let mut mgr = score_manager_for_saver.lock();
+                mgr.tick();
+                mgr.save_to_file(&peer_scores_path_for_saver)
+            };
+            match save_result {
+                Ok(()) => tracing::debug!(
+                    "BLOCKER F: peer-score snapshot saved to {}",
+                    peer_scores_path_for_saver.display()
+                ),
+                Err(e) => tracing::warn!(
+                    "BLOCKER F: failed to save peer-score snapshot at {}: {}",
+                    peer_scores_path_for_saver.display(),
+                    e
+                ),
+            }
+        }
+    });
+
     // Main loop: process committed outputs
     tokio::select! {
         _ = rpc_server => {
@@ -3749,6 +3882,12 @@ async fn start_narwhal_node(
         }
         _ = relay_ingress_handle => {
             info!("Narwhal relay ingress stopped");
+        }
+        _ = score_saver_handle => {
+            // The score saver loops forever; it only exits on panic /
+            // task abort. Treat as informational — the node keeps
+            // running, scoring state is still in memory.
+            info!("BLOCKER F: peer-score saver task stopped");
         }
         relay_result = relay_transport_handle => {
             match relay_result {
