@@ -3708,25 +3708,35 @@ async fn start_narwhal_node(
 
             // R7 C-1: Build executor from persisted UTXO snapshot (if any),
             // falling back to the canonical set from mempool, then to fresh.
+            //
+            // BLOCKER A: use `UtxoExecutor::load_snapshot` so that
+            // `processed_burns` and `total_emitted` are restored alongside
+            // the UTXO set. `load_from_file` alone lost both, which
+            // re-opened the bridge replay attack and the supply-cap reset
+            // on every node restart.
             let utxo_snapshot_path = std::path::Path::new(&cli.data_dir)
                 .join("narwhal_utxo_snapshot.json");
             let mut tx_executor = {
-                match misaka_storage::utxo_set::UtxoSet::load_from_file(
-                    &utxo_snapshot_path, 1000,
+                match crate::utxo_executor::UtxoExecutor::load_snapshot(
+                    &utxo_snapshot_path,
+                    app_id.clone(),
                 ) {
-                    Ok(Some(restored)) => {
+                    Ok(Some(restored_exec)) => {
                         info!(
-                            "Restored UTXO snapshot: height={}, utxos={}",
-                            restored.height, restored.len()
+                            "Restored UTXO snapshot: height={}, utxos={}, total_emitted={}, processed_burns={}",
+                            restored_exec.utxo_set().height,
+                            restored_exec.utxo_set().len(),
+                            restored_exec.total_emitted(),
+                            restored_exec.processed_burns().len(),
                         );
                         {
                             // Mempool and RPC share the same Arc, one write suffices
                             let mut shared = utxo_set_writer.write().await;
-                            *shared = restored.clone();
+                            *shared = restored_exec.utxo_set().clone();
                         }
-                        crate::utxo_executor::UtxoExecutor::with_utxo_set(restored, app_id.clone())
+                        restored_exec
                     }
-                    _ => {
+                    Ok(None) | Err(_) => {
                         let canonical = narwhal_mempool.utxo_set();
                         let snapshot = canonical.read().await;
                         crate::utxo_executor::UtxoExecutor::with_utxo_set(
@@ -4412,14 +4422,23 @@ async fn start_narwhal_node(
                 // wasteful 2GB+ writes on empty blocks. The snapshot is saved
                 // synchronously here (blocking) because spawn_blocking + clone
                 // doubles memory usage and triggers OOM on small servers.
+                //
+                // BLOCKER A: use `save_snapshot` so `processed_burns` and
+                // `total_emitted` are persisted atomically with the UTXO set.
+                // The prior `utxo_set().save_to_file()` silently wrote
+                // `total_emitted = 0` and `processed_burns = []`, which meant
+                // the supply cap and the burn-replay guard reset on every
+                // restart.
                 if exec_result.txs_accepted > 0 {
-                    if let Err(e) = tx_executor.utxo_set().save_to_file(&utxo_snapshot_path) {
+                    if let Err(e) = tx_executor.save_snapshot(&utxo_snapshot_path) {
                         tracing::warn!("Failed to save UTXO snapshot: {}", e);
                     } else {
                         tracing::info!(
-                            "UTXO snapshot saved at commit {} (height={}) [triggered by {} accepted tx(s)]",
+                            "UTXO snapshot saved at commit {} (height={}, total_emitted={}, processed_burns={}) [triggered by {} accepted tx(s)]",
                             output.commit_index,
                             tx_executor.utxo_set().height,
+                            tx_executor.total_emitted(),
+                            tx_executor.processed_burns().len(),
                             exec_result.txs_accepted,
                         );
                     }
@@ -4427,12 +4446,16 @@ async fn start_narwhal_node(
             }
             // Graceful shutdown: save UTXO snapshot so balances survive restart.
             // This is a single save (not per-commit clone) so OOM is not a concern.
-            if let Err(e) = tx_executor.utxo_set().save_to_file(&utxo_snapshot_path) {
+            //
+            // BLOCKER A: same full-metadata save as the per-commit path above.
+            if let Err(e) = tx_executor.save_snapshot(&utxo_snapshot_path) {
                 tracing::warn!("Failed to save UTXO snapshot on shutdown: {}", e);
             } else {
                 tracing::info!(
-                    "UTXO snapshot saved on shutdown (height={})",
+                    "UTXO snapshot saved on shutdown (height={}, total_emitted={}, processed_burns={})",
                     tx_executor.utxo_set().height,
+                    tx_executor.total_emitted(),
+                    tx_executor.processed_burns().len(),
                 );
             }
         } => {

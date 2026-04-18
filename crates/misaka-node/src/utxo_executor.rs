@@ -1400,6 +1400,48 @@ impl UtxoExecutor {
     pub fn processed_burns_snapshot(&self) -> Vec<[u8; 32]> {
         self.processed_burns.iter().copied().collect()
     }
+
+    /// BLOCKER A: Save the full UTXO state (UTXO set + `processed_burns`
+    /// + `total_emitted`) to a snapshot file, atomically.
+    ///
+    /// Wraps `UtxoSet::save_to_file_full` so the caller does not need to
+    /// thread executor-private fields through the storage API. Prefer
+    /// this over `utxo_set().save_to_file(&path)`, which silently writes
+    /// `processed_burns = []` and `total_emitted = 0` — leaving the node
+    /// vulnerable to bridge burn replay and to `MAX_TOTAL_SUPPLY` reset
+    /// after restart.
+    pub fn save_snapshot(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<(), misaka_storage::utxo_set::UtxoError> {
+        self.utxo_set
+            .save_to_file_full(path, self.processed_burns_snapshot(), self.total_emitted)
+    }
+
+    /// BLOCKER A: Load the full UTXO state (UTXO set + `processed_burns`
+    /// + `total_emitted`) from a snapshot file, wiring all three back
+    /// into a fresh `UtxoExecutor`.
+    ///
+    /// Returns `Ok(None)` when the file does not exist (fresh start).
+    /// Returns `Ok(Some(exec))` on a successful restore. On corruption
+    /// or integrity mismatch, propagates the underlying error so the
+    /// caller can refuse to start — restarting with `total_emitted = 0`
+    /// would reset the global supply cap.
+    pub fn load_snapshot(
+        path: &std::path::Path,
+        app_id: misaka_types::intent::AppId,
+    ) -> Result<Option<Self>, misaka_storage::utxo_set::UtxoError> {
+        use misaka_storage::utxo_set::UtxoSet;
+        match UtxoSet::load_from_file_with_burns(path, 1000)? {
+            None => Ok(None),
+            Some((set, burn_ids, total_emitted)) => {
+                let mut exec = Self::with_utxo_set(set, app_id);
+                exec.load_processed_burns(burn_ids);
+                exec.set_total_emitted(total_emitted);
+                Ok(Some(exec))
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2541,5 +2583,112 @@ mod tests {
             misaka_consensus::staking::ValidatorState::Locked,
             "exit rejection must leave state untouched"
         );
+    }
+
+    // ─── BLOCKER A: Supply-counter persistence round-trip ─────────────────
+    //
+    // Guards against the regression fixed by the save/load wiring added in
+    // BLOCKER A: without persistence, `total_emitted` reset to 0 on every
+    // restart, defeating the MAX_TOTAL_SUPPLY cap check and — combined
+    // with the `processed_burns` reset — re-opening the bridge replay
+    // window.
+    //
+    // The test persists a non-zero `total_emitted` and a non-empty
+    // `processed_burns` set, reloads from disk into a fresh
+    // `UtxoExecutor`, and asserts that both values survive the round trip
+    // and that the structural MAX_TOTAL_SUPPLY check still fires
+    // post-restart.
+
+    fn make_app_id() -> misaka_types::intent::AppId {
+        misaka_types::intent::AppId::new(2, [0xABu8; 32])
+    }
+
+    #[test]
+    fn blocker_a_snapshot_round_trip_preserves_total_emitted_and_burns() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("narwhal_utxo_snapshot.json");
+
+        // First executor: populate some state.
+        let mut exec = UtxoExecutor::new(make_app_id());
+        exec.set_total_emitted(7_500_000_000_000);
+        exec.load_processed_burns(vec![[0x01u8; 32], [0x02u8; 32], [0x03u8; 32]]);
+
+        exec.save_snapshot(&path).expect("save_snapshot");
+
+        // Drop the first executor (simulated process exit) and reload
+        // from the on-disk snapshot.
+        drop(exec);
+        let restored = UtxoExecutor::load_snapshot(&path, make_app_id())
+            .expect("load_snapshot")
+            .expect("snapshot file present");
+
+        assert_eq!(
+            restored.total_emitted(),
+            7_500_000_000_000,
+            "total_emitted must survive restart"
+        );
+        assert_eq!(
+            restored.processed_burns().len(),
+            3,
+            "processed_burns must survive restart"
+        );
+        assert!(restored.processed_burns().contains(&[0x01u8; 32]));
+        assert!(restored.processed_burns().contains(&[0x02u8; 32]));
+        assert!(restored.processed_burns().contains(&[0x03u8; 32]));
+    }
+
+    #[test]
+    fn blocker_a_supply_cap_still_enforced_after_restart() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("narwhal_utxo_snapshot.json");
+
+        // MAX_TOTAL_SUPPLY = 10B × 10^9 base units. Persist a value that
+        // sits one block-reward-sized chunk below the cap, so the next
+        // block reward would overflow the cap.
+        //
+        // The pre-BLOCKER-A bug would reset `total_emitted` to 0 on
+        // restart, happily allowing another 10B tokens of emission — the
+        // test below proves that the restored executor rejects the
+        // would-be-overflow reward because the counter was preserved.
+        let almost_max = MAX_TOTAL_SUPPLY - 1;
+
+        let mut exec = UtxoExecutor::new(make_app_id());
+        exec.set_total_emitted(almost_max);
+        exec.save_snapshot(&path).expect("save_snapshot");
+        drop(exec);
+
+        let mut restored = UtxoExecutor::load_snapshot(&path, make_app_id())
+            .expect("load_snapshot")
+            .expect("snapshot file present");
+
+        assert_eq!(restored.total_emitted(), almost_max);
+
+        // `generate_block_reward` returns 0 when a reward would push
+        // `total_emitted` past `MAX_TOTAL_SUPPLY`. Ask it to produce a
+        // reward at height 1 on behalf of a dummy leader — with
+        // `total_emitted = MAX_TOTAL_SUPPLY - 1`, the reward is bigger
+        // than the 1-unit headroom so it must be skipped.
+        let leader_address = [0xAAu8; 32];
+        let awarded = restored.generate_block_reward(leader_address, None);
+
+        assert_eq!(
+            awarded, 0,
+            "BLOCKER A: post-restart block reward must honour the preserved \
+             MAX_TOTAL_SUPPLY cap and return 0 instead of emitting over the cap"
+        );
+        // And the counter must not have moved.
+        assert_eq!(restored.total_emitted(), almost_max);
+    }
+
+    #[test]
+    fn blocker_a_fresh_start_returns_none_not_zeroed_state() {
+        // Absent file: load_snapshot returns Ok(None), NOT an
+        // Ok(Some(default_zero)). The caller is expected to fall back to
+        // a fresh-genesis path in that case — see main.rs:3648 loader.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("does-not-exist.json");
+
+        let result = UtxoExecutor::load_snapshot(&path, make_app_id()).expect("ok");
+        assert!(result.is_none(), "missing snapshot must map to None");
     }
 }

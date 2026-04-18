@@ -887,6 +887,83 @@ impl UtxoSet {
         }
     }
 
+    /// BLOCKER A: Save the UTXO set together with the full UtxoExecutor
+    /// metadata (`processed_burns` + `total_emitted`) atomically.
+    ///
+    /// The MuHash3072 → SMT migration (PR E) kept `UtxoSet` as the single
+    /// durable state object, but `total_emitted` and `processed_burns`
+    /// live on `UtxoExecutor`. Without this helper the save path had two
+    /// silent bugs:
+    ///
+    /// 1. `save_to_file` called `export_snapshot()` → wrote
+    ///    `total_emitted = 0`, so `MAX_TOTAL_SUPPLY` enforcement reset to
+    ///    zero after every restart (unlimited SystemEmission possible).
+    /// 2. `save_to_file` also wrote `processed_burns = []`, so the bridge
+    ///    replay check (`UtxoExecutor::check_burn_replay`) lost its state.
+    ///
+    /// This function writes the envelope format used by `load_from_file`
+    /// / `load_from_file_with_burns` (32-byte SHA3-256 integrity prefix +
+    /// JSON payload), using the same atomic write path as `save_to_file`
+    /// (tmp → fsync → rename → dir fsync).
+    pub fn save_to_file_full(
+        &self,
+        path: &std::path::Path,
+        burn_ids: Vec<[u8; 32]>,
+        total_emitted: u64,
+    ) -> Result<(), UtxoError> {
+        use sha3::{Digest, Sha3_256};
+        use std::io::Write;
+
+        let mut snapshot = self.export_snapshot();
+        snapshot.processed_burns = burn_ids;
+        snapshot.total_emitted = total_emitted;
+
+        let payload = serde_json::to_vec(&snapshot)
+            .map_err(|e| UtxoError::SnapshotIo(format!("serialize failed: {}", e)))?;
+
+        let content_hash: [u8; 32] = Sha3_256::digest(&payload).into();
+
+        let mut envelope = Vec::with_capacity(32 + payload.len());
+        envelope.extend_from_slice(&content_hash);
+        envelope.extend_from_slice(&payload);
+
+        let tmp_path = path.with_extension("tmp");
+        {
+            let file = std::fs::File::create(&tmp_path).map_err(|e| {
+                UtxoError::SnapshotIo(format!("failed to create {}: {}", tmp_path.display(), e))
+            })?;
+            let mut writer = std::io::BufWriter::new(file);
+            writer
+                .write_all(&envelope)
+                .map_err(|e| UtxoError::SnapshotIo(format!("write failed: {}", e)))?;
+            writer
+                .flush()
+                .map_err(|e| UtxoError::SnapshotIo(format!("flush failed: {}", e)))?;
+            writer
+                .get_ref()
+                .sync_all()
+                .map_err(|e| UtxoError::SnapshotIo(format!("fsync failed: {}", e)))?;
+        }
+
+        std::fs::rename(&tmp_path, path).map_err(|e| {
+            UtxoError::SnapshotIo(format!(
+                "rename {} → {}: {}",
+                tmp_path.display(),
+                path.display(),
+                e
+            ))
+        })?;
+
+        if let Some(parent) = path.parent() {
+            let dir = std::fs::File::open(parent)
+                .map_err(|e| UtxoError::SnapshotIo(format!("open parent dir: {}", e)))?;
+            dir.sync_all()
+                .map_err(|e| UtxoError::SnapshotIo(format!("dir fsync: {}", e)))?;
+        }
+
+        Ok(())
+    }
+
     /// SEC-FIX: Load UTXO set AND processed burn IDs from snapshot.
     ///
     /// Returns `(UtxoSet, Vec<burn_id>)` where burn_ids should be passed to
