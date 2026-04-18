@@ -3867,6 +3867,34 @@ async fn start_narwhal_node(
                 std::collections::HashMap::new();
             let mut epoch_block_count: u64 = 0;
 
+            // BLOCKER I: treasury payout address (hex → 32 bytes).
+            // Derived once before the commit loop so each commit's
+            // `distribute_fees` call is a cheap Option copy. When this
+            // is `None` the treasury portion (§5.5 = 10%) folds into the
+            // burn share — see `UtxoExecutor::distribute_fees`.
+            let treasury_address_for_fees: Option<[u8; 32]> = cli
+                .treasury_address
+                .as_deref()
+                .and_then(|hex_str| {
+                    let bytes = hex::decode(hex_str).ok()?;
+                    if bytes.len() == 32 {
+                        let mut arr = [0u8; 32];
+                        arr.copy_from_slice(&bytes);
+                        Some(arr)
+                    } else {
+                        tracing::warn!(
+                            "BLOCKER I: --treasury-address must be 32 bytes hex, got {} bytes; treasury share will burn",
+                            bytes.len()
+                        );
+                        None
+                    }
+                });
+            if treasury_address_for_fees.is_none() {
+                tracing::warn!(
+                    "BLOCKER I: no treasury address configured — §5.5 treasury fee share (10%) will be folded into the burn share"
+                );
+            }
+
             while let Some(output) = commit_rx.recv().await {
                 // v0.5.9: if safe-mode has already been tripped, drop
                 // any further committed sub-dags without applying.
@@ -4210,26 +4238,72 @@ async fn start_narwhal_node(
                 // SEC-FIX C-12: Generate block reward for the commit leader.
                 // R7 C-4: Skip when the batch already contained a SystemEmission
                 // to prevent double emission in the same commit.
-                if let Some(addr) = leader_address.filter(|_| !exec_result.had_system_emission) {
+                //
+                // BLOCKER I: we also capture the leader's pubkey here so we
+                // can pass it to `distribute_fees` below — both the block
+                // reward and the proposer's fee share need a spending_pubkey
+                // on the created UTXO, otherwise the leader cannot spend
+                // their own reward.
+                let (proposer_address_for_fees, proposer_pubkey_for_fees): (
+                    Option<[u8; 32]>,
+                    Option<Vec<u8>>,
+                ) = if let Some(addr) = leader_address {
                     let author_idx = output.leader.author as usize;
-                    let leader_pk = if author_idx < committee_guard.authorities.len() {
+                    let pk_opt = if author_idx < committee_guard.authorities.len() {
                         let pk = &committee_guard.authorities[author_idx].public_key;
                         if !pk.is_empty() { Some(pk.clone()) } else { None }
                     } else {
                         None
                     };
-                    let reward = tx_executor.generate_block_reward(addr, leader_pk);
-                    if reward > 0 {
-                        tracing::info!(
-                            "Block reward: {} MISAKA to leader {} (commit {})",
-                            reward as f64 / 1_000_000_000.0,
-                            hex::encode(&addr[..8]),
+
+                    if !exec_result.had_system_emission {
+                        let reward = tx_executor.generate_block_reward(addr, pk_opt.clone());
+                        if reward > 0 {
+                            tracing::info!(
+                                "Block reward: {} MISAKA to leader {} (commit {})",
+                                reward as f64 / 1_000_000_000.0,
+                                hex::encode(&addr[..8]),
+                                output.commit_index,
+                            );
+                        }
+                    }
+
+                    (Some(addr), pk_opt)
+                } else {
+                    (None, None)
+                };
+
+                drop(committee_guard);
+
+                // BLOCKER I: distribute §5.5 fee split (50% proposer / 10%
+                // treasury / 40% burn). When there is no proposer address
+                // (observer node, or leader not yet identified), the entire
+                // fee pot burns — safer than letting it silently vanish.
+                if exec_result.total_fees > 0 {
+                    if let Some(addr) = proposer_address_for_fees {
+                        let split = tx_executor.distribute_fees(
                             output.commit_index,
+                            exec_result.total_fees,
+                            addr,
+                            proposer_pubkey_for_fees.clone(),
+                            treasury_address_for_fees,
+                        );
+                        tracing::debug!(
+                            "BLOCKER I: commit {} fee split — proposer={} treasury={} burned={} (treasury_active={})",
+                            output.commit_index,
+                            split.proposer_share,
+                            split.treasury_share,
+                            split.burned_share,
+                            split.treasury_active,
+                        );
+                    } else {
+                        tracing::warn!(
+                            "BLOCKER I: commit {} had {} fees but no proposer address — entire pot burned",
+                            output.commit_index,
+                            exec_result.total_fees
                         );
                     }
                 }
-
-                drop(committee_guard);
 
                 // Update shared persistent block height
                 block_height_writer.store(
