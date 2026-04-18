@@ -249,6 +249,19 @@ impl BlockManager {
                 .entry(block_ref.author)
                 .or_insert(0);
             *author_count += 1;
+            // v0.8.8.1 (hotfix/peer-replay-window): observability — emit
+            // each suspend so log diff between runs can show counter
+            // progression vs. the quarantine threshold. Target kept
+            // distinct (`misaka::suspend`) so RUST_LOG can filter it.
+            tracing::info!(
+                target: "misaka::suspend",
+                round = block_ref.round,
+                author = block_ref.author,
+                current = *author_count,
+                max = self.max_suspended_per_author,
+                missing = missing.len(),
+                "block_suspended"
+            );
             if *author_count > self.max_suspended_per_author {
                 self.quarantined_authors.insert(block_ref.author);
                 tracing::warn!(

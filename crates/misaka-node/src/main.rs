@@ -3521,6 +3521,14 @@ async fn start_narwhal_node(
                             }
                             for fetch in outcome.fetch_requests {
                                 let relay_out_tx = relay_out_tx_for_ingress.clone();
+                                // v0.8.8.1 observability: record each fetch
+                                // dispatch so diff analysis can see whether
+                                // the pull-based catch-up path is keeping up
+                                // with suspension accumulation.
+                                let missing_round = fetch.block_ref.round;
+                                let missing_author = fetch.block_ref.author;
+                                let fetch_attempt = fetch.attempt;
+                                let fetch_delay_ms = fetch.delay_ms;
                                 tokio::spawn(async move {
                                     if fetch.delay_ms > 0 {
                                         tokio::time::sleep(std::time::Duration::from_millis(
@@ -3528,6 +3536,15 @@ async fn start_narwhal_node(
                                         ))
                                         .await;
                                     }
+                                    tracing::info!(
+                                        target: "misaka::fetch::req",
+                                        missing_round = missing_round,
+                                        missing_author = missing_author,
+                                        attempt = fetch_attempt,
+                                        delay_ms = fetch_delay_ms,
+                                        to_peer = authority_index,
+                                        "block_request_dispatched"
+                                    );
                                     let _ = relay_out_tx
                                         .send(crate::narwhal_block_relay_transport::OutboundNarwhalRelayEvent::ToAuthority {
                                             authority_index,
@@ -3543,6 +3560,19 @@ async fn start_narwhal_node(
                         }
                     }
                     NarwhalRelayMessage::BlockResponse(NarwhalBlockResponse { blocks }) => {
+                        // v0.8.8.1 observability: record BlockResponse receipt
+                        // so the fetch round-trip can be correlated with the
+                        // `block_request_dispatched` events. rtt is not
+                        // computed here (caller-side per-ref would need a
+                        // wait table) but the count is enough to tell
+                        // whether the pull path returns any blocks at all.
+                        let response_block_count = blocks.len();
+                        tracing::info!(
+                            target: "misaka::fetch::resp",
+                            from_peer = authority_index,
+                            blocks = response_block_count,
+                            "block_request_response"
+                        );
                         for block in blocks {
                             let block_ref = block.reference();
                             // SEC-FIX: Cache AFTER verification, not before.
