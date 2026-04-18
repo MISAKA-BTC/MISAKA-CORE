@@ -26,6 +26,15 @@
 
 use serde::{Deserialize, Serialize};
 
+/// eUTXO v2 protocol parameters (cost model, fee formula, budget limits).
+/// Feature-gated: requires `eutxo-v2-params` feature.
+#[cfg(feature = "eutxo-v2-params")]
+pub mod eutxo_v2;
+
+/// eUTXO v2 parameters are also available in dev-dependencies (tests).
+#[cfg(all(test, not(feature = "eutxo-v2-params")))]
+pub mod eutxo_v2;
+
 /// Minimum and maximum supported protocol versions.
 const MIN_PROTOCOL_VERSION: u64 = 1;
 const MAX_PROTOCOL_VERSION: u64 = 1;

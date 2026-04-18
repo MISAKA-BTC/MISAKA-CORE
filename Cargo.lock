@@ -1757,6 +1757,10 @@ dependencies = [
 name = "misaka-muhash"
 version = "0.9.0"
 dependencies = [
+ "chacha20",
+ "criterion",
+ "hex",
+ "num-bigint",
  "serde",
  "sha3",
 ]
@@ -1874,7 +1878,12 @@ dependencies = [
 name = "misaka-protocol-config"
 version = "0.9.0"
 dependencies = [
+ "borsh",
+ "hex",
+ "misaka-types",
  "serde",
+ "sha3",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -2093,10 +2102,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "num-bigint"
+version = "0.4.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a5e44f723f1133c9deac646763579fdb3ac745e418f2a7af9cd0c431da1f20b9"
+dependencies = [
+ "num-integer",
+ "num-traits",
+]
+
+[[package]]
 name = "num-conv"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c6673768db2d862beb9b39a78fdcb1a69439615d5794a1be50caa9bc92c81967"
+
+[[package]]
+name = "num-integer"
+version = "0.1.46"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7969661fd2958a5cb096e56c8e1ad0444ac2bbcd0061bd28660485a44879858f"
+dependencies = [
+ "num-traits",
+]
 
 [[package]]
 name = "num-traits"

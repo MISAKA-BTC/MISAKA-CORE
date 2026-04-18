@@ -33,6 +33,19 @@ pub mod recovery;
 pub mod utxo_set;
 pub mod wal;
 
+pub mod block_archive;
+
+/// eUTXO v5 state commitment (datum/script_ref in element bytes).
+/// Feature-gated behind `eutxo-v1-state`. Activated at v2.0 hard fork.
+///
+/// NOTE: merged snapshot tests reference `utxo_set::utxo_element_bytes_v4_pub`
+/// which is introduced in PR C (common-file utxo_set.rs diff). Until PR C
+/// lands, the `#[cfg(any(..., test))]` dual gate would fail the test build,
+/// so the feature-only gate is retained here and the test gate is restored
+/// in PR C.
+#[cfg(feature = "eutxo-v1-state")]
+pub mod eutxo_state;
+
 // ─── New: Kaspa-Aligned Storage Infrastructure ───
 pub mod cache;
 pub mod cached_access;
