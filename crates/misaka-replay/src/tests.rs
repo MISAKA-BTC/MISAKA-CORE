@@ -79,19 +79,11 @@ fn test_determinism_identical_results() {
     let snapshot = empty_snapshot();
     let blocks: Vec<ReplayBlock> = (1..=5)
         .map(|h| {
-            let faucet = make_faucet_tx(
-                100,
-                [h as u8; 32],
-                Some(vec![0xAA; 1952]),
-            );
+            let faucet = make_faucet_tx(100, [h as u8; 32], Some(vec![0xAA; 1952]));
             // Compute expected state root by replaying
             let mut utxo = utxo_set_from_snapshot(snapshot.clone());
             for prev in 1..h {
-                let prev_faucet = make_faucet_tx(
-                    100,
-                    [prev as u8; 32],
-                    Some(vec![0xAA; 1952]),
-                );
+                let prev_faucet = make_faucet_tx(100, [prev as u8; 32], Some(vec![0xAA; 1952]));
                 let _ = utxo.apply_transaction(&prev_faucet);
             }
             let _ = utxo.apply_transaction(&faucet);
@@ -292,7 +284,11 @@ fn test_detect_state_root_zero() {
     });
 
     let violations = detectors::detect_state_root_zero(&store, 1..4).expect("detect");
-    assert_eq!(violations, vec![2], "only block 2 should have zero state root");
+    assert_eq!(
+        violations,
+        vec![2],
+        "only block 2 should have zero state root"
+    );
 }
 
 // ─── Test (g): Unspendable faucet detector ──────────────────────
@@ -319,8 +315,7 @@ fn test_detect_unspendable_faucet() {
         leader_address: None,
     });
 
-    let violations =
-        detectors::detect_unspendable_faucet_outputs(&store, 1..3).expect("detect");
+    let violations = detectors::detect_unspendable_faucet_outputs(&store, 1..3).expect("detect");
     assert_eq!(violations.len(), 1);
     assert_eq!(violations[0], (2, 0)); // block 2, tx 0
 }

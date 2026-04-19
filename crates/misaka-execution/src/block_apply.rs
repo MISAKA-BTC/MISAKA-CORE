@@ -34,11 +34,11 @@ pub fn execute_block(
     utxo_set: &mut UtxoSet,
     validator_set: Option<&ValidatorSet>,
 ) -> Result<BlockResult, BlockError> {
-    // γ-2: pass `None` for staking_registry — the legacy block_apply path does
-    // not carry a registry reference. The DAG-mode utxo_executor (γ-3) wires
-    // the registry through so that StakeDeposit / StakeWithdraw txs get their
-    // signature + state verified before the validator account is mutated.
-    let delta = block_validation::validate_and_apply_block(block, utxo_set, validator_set, None)?;
+    // PR C: merged block_validation::validate_and_apply_block dropped the
+    // `staking_registry` parameter — stake-tx verification now flows through
+    // a different pipeline. Legacy block_apply path no longer needs to pass
+    // it. Signature reduced from 4 args to 3.
+    let delta = block_validation::validate_and_apply_block(block, utxo_set, validator_set)?;
 
     // SEC-FIX: Use checked_add to prevent silent overflow in release builds.
     // 256 txs with fee near u64::MAX would wrap to a small number.

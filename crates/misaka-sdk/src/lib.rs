@@ -14,15 +14,17 @@ pub mod tx_builder;
 
 pub use error::SdkError;
 pub use script_builder::ScriptBuilder;
-pub use tx_builder::TxBuilder;
 pub use tx_builder::collateral::auto_select_collateral;
 pub use tx_builder::fee::compute_min_fee;
 pub use tx_builder::signing::{compute_signing_digest, generate_keypair, sign_input};
+pub use tx_builder::TxBuilder;
 
 // Re-export commonly used misaka-types for convenience
 pub use misaka_types::eutxo::cost_model::ExUnits;
 pub use misaka_types::eutxo::datum::{DatumOrHash, InlineDatum};
-pub use misaka_types::eutxo::script::{ScriptBytecode, ScriptSource, ScriptVmVersion, VersionedScript};
+pub use misaka_types::eutxo::script::{
+    ScriptBytecode, ScriptSource, ScriptVmVersion, VersionedScript,
+};
 pub use misaka_types::eutxo::value::{AssetId, AssetName, AssetValue};
 
 #[cfg(test)]
@@ -91,7 +93,10 @@ mod tests {
             vm_version: ScriptVmVersion::V1,
             bytecode: ScriptBytecode(vec![0x51]),
         });
-        let ex = ExUnits { cpu: 10_000, mem: 500 };
+        let ex = ExUnits {
+            cpu: 10_000,
+            mem: 500,
+        };
         let tx = TxBuilder::new(0, TxType::TransparentTransfer)
             .add_script_input(or(1), script, vec![1, 2, 3], None, ex)
             .add_output([2u8; 32], AssetValue::mlp_only(100))
@@ -108,7 +113,10 @@ mod tests {
             .add_input(or(1), vec![0xAA; 64])
             .add_output([2u8; 32], AssetValue::mlp_only(900_000));
         let fee = b.estimate_fee().expect("estimate");
-        assert!(fee >= 100_000, "minimum fee should be at least base 100k ulrz");
+        assert!(
+            fee >= 100_000,
+            "minimum fee should be at least base 100k ulrz"
+        );
     }
 
     // ── ScriptBuilder tests ──
@@ -216,7 +224,10 @@ mod tests {
     fn test_collateral_insufficient() {
         let avail = vec![(or(1), 10_000)];
         let result = auto_select_collateral(&avail, 100_000, [9u8; 32]);
-        assert!(matches!(result, Err(SdkError::InsufficientCollateral { .. })));
+        assert!(matches!(
+            result,
+            Err(SdkError::InsufficientCollateral { .. })
+        ));
     }
 
     #[test]

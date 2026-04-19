@@ -9,6 +9,7 @@ pub mod chain_context;
 pub mod checkpoint;
 pub mod constants;
 pub mod crypto_state;
+pub mod dag_types;
 pub mod equivocation;
 pub mod error;
 pub mod gas;
@@ -28,6 +29,11 @@ pub mod tx_signable;
 pub mod utxo;
 pub mod validator;
 pub mod validator_stake_tx;
+
+/// eUTXO v2 type definitions (wire format frozen at E1).
+/// Gated behind `eutxo-v1-types` feature to avoid breaking existing builds.
+#[cfg(feature = "eutxo-v1-types")]
+pub mod eutxo;
 
 pub use validator_stake_tx::{
     RegisterParams, StakeInput, StakeMoreParams, StakeTxError, StakeTxKind, StakeTxParams,

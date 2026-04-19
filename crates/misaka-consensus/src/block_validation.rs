@@ -64,11 +64,6 @@ pub enum BlockError {
     Utxo(#[from] UtxoError),
     #[error("total fees overflow")]
     FeeOverflow,
-    // ── γ-2: ValidatorStakeTx envelope + signature verification errors ──
-    #[error("tx[{index}] stake envelope decode failed: {reason}")]
-    StakeTxDecodeFailed { index: usize, reason: String },
-    #[error("tx[{index}] stake signature verify failed: {reason}")]
-    StakeTxVerifyFailed { index: usize, reason: String },
 }
 
 // ═══ Canonical Block Hash ════════════════════════════════════
@@ -150,16 +145,14 @@ pub fn validate_and_apply_block(
     block: &BlockCandidate,
     utxo_set: &mut UtxoSet,
     validator_set: Option<&ValidatorSet>,
-    staking_registry: Option<&crate::staking::StakingRegistry>,
 ) -> Result<BlockDelta, BlockError> {
-    validate_and_apply_block_inner(block, utxo_set, validator_set, staking_registry)
+    validate_and_apply_block_inner(block, utxo_set, validator_set)
 }
 
 fn validate_and_apply_block_inner(
     block: &BlockCandidate,
     utxo_set: &mut UtxoSet,
     validator_set: Option<&ValidatorSet>,
-    staking_registry: Option<&crate::staking::StakingRegistry>,
 ) -> Result<BlockDelta, BlockError> {
     // ═══ 0a. Structural bounds ═══
     if block.transactions.len() > MAX_TXS_PER_BLOCK {
@@ -299,11 +292,15 @@ fn validate_and_apply_block_inner(
             }
 
             // ── ML-DSA-65 direct signature verification (transparent mode) ──
+            //
+            // `VerifiedProof` currently has the single `Transparent`
+            // variant — the LRS (ring) variant was removed in Phase
+            // 2c-B. Extract the raw signature directly; the
+            // wildcard-guarded `_ => Err(...)` arm that used to
+            // handle non-transparent proofs is now unreachable under
+            // `-D warnings`. Reinstate the defensive branch when a
+            // second proof variant is added.
             {
-                // Phase 2c-B removed the LRS / LogRing variants; the only
-                // surviving  variant is , so
-                // destructure directly. A future variant would need to be
-                // handled here explicitly — the compiler will complain.
                 let VerifiedProof::Transparent { raw_sig } = &vtx.ring_proofs[in_idx];
                 let raw_sig = raw_sig.clone();
 
@@ -330,43 +327,6 @@ fn validate_and_apply_block_inner(
 
                 // KI proof is optional for transparent (UTXO reference prevents double-spend)
                 // Key image is still tracked for state manager compatibility.
-            }
-        }
-
-        // ── γ-2: ValidatorStakeTx envelope + ML-DSA-65 signature verification ──
-        //
-        // Fires for TxType::StakeDeposit / StakeWithdraw only. `validate_structure`
-        // already did the envelope decode + kind cross-check (γ-1); here we
-        // re-decode and run the signature / state verifier so the verification is
-        // self-contained and reusable by `utxo_executor` (γ-3).
-        //
-        // When `staking_registry` is None the caller hasn't wired a registry yet.
-        // The legacy `block_apply` path passes None for now; γ-3 wires the registry
-        // through `utxo_executor`. Skipping here is safe because:
-        //   (a) γ-1 already enforced envelope + structural validity via
-        //       `tx.validate_structure()`, and
-        //   (b) any StakeDeposit / StakeWithdraw finalized through the DAG path
-        //       goes through `utxo_executor`, which does the signature verify
-        //       before mutating `StakingRegistry`.
-        if matches!(
-            tx.tx_type,
-            misaka_types::utxo::TxType::StakeDeposit | misaka_types::utxo::TxType::StakeWithdraw
-        ) {
-            if let Some(registry) = staking_registry {
-                let stake_tx =
-                    misaka_types::validator_stake_tx::ValidatorStakeTx::decode_from_extra(
-                        &tx.extra,
-                    )
-                    .map_err(|e| BlockError::StakeTxDecodeFailed {
-                        index: tx_idx,
-                        reason: e.to_string(),
-                    })?;
-                crate::stake_tx_verify::verify_stake_tx_signature(&stake_tx, registry).map_err(
-                    |e| BlockError::StakeTxVerifyFailed {
-                        index: tx_idx,
-                        reason: e.to_string(),
-                    },
-                )?;
             }
         }
 

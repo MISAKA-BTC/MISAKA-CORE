@@ -10,7 +10,9 @@ pub struct ScriptBuilder {
 
 impl ScriptBuilder {
     pub fn new() -> Self {
-        Self { bytecode: Vec::new() }
+        Self {
+            bytecode: Vec::new(),
+        }
     }
 
     // ── Constants ──
@@ -30,21 +32,54 @@ impl ScriptBuilder {
     }
 
     // ── Stack ──
-    pub fn dup(mut self) -> Self { self.bytecode.push(0x76); self }
-    pub fn swap(mut self) -> Self { self.bytecode.push(0x7C); self }
-    pub fn drop(mut self) -> Self { self.bytecode.push(0x75); self }
+    pub fn dup(mut self) -> Self {
+        self.bytecode.push(0x76);
+        self
+    }
+    pub fn swap(mut self) -> Self {
+        self.bytecode.push(0x7C);
+        self
+    }
+    pub fn drop(mut self) -> Self {
+        self.bytecode.push(0x75);
+        self
+    }
 
     // ── Arithmetic ──
-    pub fn add(mut self) -> Self { self.bytecode.push(0x93); self }
-    pub fn sub(mut self) -> Self { self.bytecode.push(0x94); self }
-    pub fn bool_and(mut self) -> Self { self.bytecode.push(0x9A); self }
-    pub fn bool_or(mut self) -> Self { self.bytecode.push(0x9B); self }
+    pub fn add(mut self) -> Self {
+        self.bytecode.push(0x93);
+        self
+    }
+    pub fn sub(mut self) -> Self {
+        self.bytecode.push(0x94);
+        self
+    }
+    pub fn bool_and(mut self) -> Self {
+        self.bytecode.push(0x9A);
+        self
+    }
+    pub fn bool_or(mut self) -> Self {
+        self.bytecode.push(0x9B);
+        self
+    }
 
     // ── Comparison / flow ──
-    pub fn equal(mut self) -> Self { self.bytecode.push(0x87); self }
-    pub fn equal_verify(mut self) -> Self { self.bytecode.push(0x88); self }
-    pub fn verify(mut self) -> Self { self.bytecode.push(0x69); self }
-    pub fn op_return(mut self) -> Self { self.bytecode.push(0x6A); self }
+    pub fn equal(mut self) -> Self {
+        self.bytecode.push(0x87);
+        self
+    }
+    pub fn equal_verify(mut self) -> Self {
+        self.bytecode.push(0x88);
+        self
+    }
+    pub fn verify(mut self) -> Self {
+        self.bytecode.push(0x69);
+        self
+    }
+    pub fn op_return(mut self) -> Self {
+        self.bytecode.push(0x6A);
+        self
+    }
 
     // ── eUTXO context (0xC0-0xC6) ──
     pub fn push_datum(mut self) -> Self {

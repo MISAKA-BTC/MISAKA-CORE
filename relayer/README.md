@@ -1,5 +1,41 @@
 # MISAKA Bridge Relayer -- Burn & Mint Model
 
+> ## ⚠ STATUS: DEFERRED — NOT PART OF v0.8.0 MAINNET
+>
+> The bridge is **explicitly out of scope for the v0.8.0 mainnet launch**.
+>
+> What this means concretely:
+>
+> - The crate is listed in **`[workspace.exclude]`** of the top-level
+>   `Cargo.toml`, so `cargo build --workspace`, `cargo test --workspace`,
+>   `cargo clippy --workspace`, and the CI `--all-features` gate **do
+>   not compile it**. The relayer binary exists as a dedicated
+>   sub-project that you can build by `cd relayer && cargo build`.
+>
+> - The mint endpoint on the MISAKA node
+>   (`POST /api/bridge/submit_mint` in `misaka-node/src/main.rs`) is a
+>   defensive stub — it **always rejects** with
+>   `"bridge mint not yet implemented — do not burn tokens"` and
+>   `accepted: false`. It does NOT silently accept burns.
+>
+> - The relayer binary itself (`relayer/src/main.rs`) has a `FATAL`
+>   startup guard that `std::process::exit(1)`s when
+>   `NetworkMode::Mainnet` + `MintExecutorKind::MisakaRpc` is
+>   combined, so an operator cannot accidentally run the unimplemented
+>   bridge on mainnet.
+>
+> **Do not burn real tokens on Solana against this bridge.** The
+> burn-and-mint roundtrip is not live and cannot be live until a
+> future release implements:
+> 1. `POST /api/bridge/submit_mint` with N-of-M attestation
+>    verification against a configured relayer-pubkey set,
+> 2. `UtxoExecutor::check_burn_replay` integration (already wired into
+>    the persisted `processed_burns` set, see BLOCKER A),
+> 3. End-to-end tests of the Solana burn → MISAKA mint path.
+>
+> The rest of this file describes the **design** that the crate
+> implements, not the operational status.
+
 ## Overview
 
 The MISAKA Bridge Relayer watches for SPL Token Burn transactions on Solana and submits corresponding mint requests to the MISAKA chain. This replaces the previous lock/mint model with a true Burn & Mint architecture.

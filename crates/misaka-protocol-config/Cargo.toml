@@ -5,8 +5,25 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = []
+## eUTXO v2 protocol parameters (cost model, fee formula, budget limits).
+## Dead code on mainnet; activated at v2.0 hard fork.
+eutxo-v2-params = ["dep:misaka-types", "misaka-types/eutxo-v1-types", "dep:borsh", "dep:sha3", "dep:thiserror"]
+
 [dependencies]
 serde = { workspace = true }
+misaka-types = { path = "../misaka-types", optional = true }
+borsh = { workspace = true, optional = true }
+sha3 = { workspace = true, optional = true }
+thiserror = { workspace = true, optional = true }
+
+[dev-dependencies]
+hex = { workspace = true }
+misaka-types = { path = "../misaka-types", features = ["eutxo-v1-types"] }
+borsh = { workspace = true }
+sha3 = { workspace = true }
+thiserror = { workspace = true }
 
 [lints]
 workspace = true

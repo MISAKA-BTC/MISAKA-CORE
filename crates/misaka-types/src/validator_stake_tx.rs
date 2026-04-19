@@ -40,17 +40,13 @@ pub const MAX_STAKE_TX_MEMO_SIZE: usize = 256;
 /// コミッション率の最大値 (BPS, 100% = 10000)
 pub const MAX_COMMISSION_BPS: u32 = 5_000; // 50%
 
-// ─── Wire envelope (γ-1) ─────────────────────────────────────────────────────
+// ─── Envelope encoding (back-compat for misaka-cli stake_deposit/stake_withdraw) ─
 //
-// `UtxoTransaction.extra` に `ValidatorStakeTx` を載せるための wire envelope。
-// 先頭 24 バイトは固定 ASCII の magic で、残りは `borsh::to_vec(self)`。
-//
-// γ-1 時点では `encode_for_extra` の呼び出し元はテストのみ。
-// γ-2 で署名検証経路に、γ-3 で utxo_executor の dispatch に wire される。
-
-/// `UtxoTransaction.extra` envelope の magic prefix (24 bytes 固定 ASCII)
+// PR C NOTE: merged snapshot removed these constants / methods because its
+// downstream CLI flow uses a different encoding path. misaka-cli in this
+// repo still calls `encode_for_extra` / `decode_from_extra`, so we keep
+// them here until misaka-cli is migrated (tracked for PR D).
 pub const STAKE_ENVELOPE_MAGIC: &[u8; 24] = b"MISAKA:stake_envelope:v1";
-/// envelope 全体の最大サイズ (magic + borsh body)
 pub const MAX_STAKE_TX_EXTRA_SIZE: usize = 8 * 1024;
 
 // ─── ValidatorStakeTx ────────────────────────────────────────────────────────
@@ -319,14 +315,12 @@ impl ValidatorStakeTx {
         }
     }
 
-    // ─── Extra envelope (γ-1) ──────────────────────────────────────────────
-
-    /// `UtxoTransaction.extra` に格納する wire envelope を構築する。
-    ///
-    /// 形式: `STAKE_ENVELOPE_MAGIC (24 bytes) || borsh::to_vec(self)`
-    ///
-    /// 全長が `MAX_STAKE_TX_EXTRA_SIZE` を超える場合は
-    /// `EnvelopeTooLarge` を返す。
+    // ─── Envelope encoding (PR C back-compat for misaka-cli) ───────
+    //
+    // 形式: `STAKE_ENVELOPE_MAGIC (24 bytes) || borsh::to_vec(self)`
+    //
+    // 全長が `MAX_STAKE_TX_EXTRA_SIZE` を超える場合は
+    // `EnvelopeTooLarge` を返す。
     pub fn encode_for_extra(&self) -> Result<Vec<u8>, StakeTxError> {
         let body =
             borsh::to_vec(self).map_err(|e| StakeTxError::EnvelopeEncodeFailed(e.to_string()))?;
@@ -416,27 +410,21 @@ pub enum StakeTxError {
     #[error("additional_amount must be > 0")]
     ZeroAdditionalStake,
 
-    // ─── Envelope errors (γ-1) ─────────────────────────────────────────────
-    #[error("stake envelope magic mismatch")]
-    EnvelopeMagicMismatch,
-
-    #[error("stake envelope too large: {size} bytes (limit {limit})")]
-    EnvelopeTooLarge { size: usize, limit: usize },
-
-    #[error("stake envelope too short: {size} bytes (need at least 24 for magic)")]
-    EnvelopeTooShort { size: usize },
-
-    #[error("stake envelope encode failed: {0}")]
+    // ─── Envelope errors (PR C back-compat for misaka-cli) ────────
+    #[error("envelope encode failed: {0}")]
     EnvelopeEncodeFailed(String),
 
-    #[error("stake envelope decode failed: {0}")]
+    #[error("envelope decode failed: {0}")]
     EnvelopeDecodeFailed(String),
 
-    #[error("kind mismatch: tx_type={tx_type} envelope_kind={envelope_kind}")]
-    KindMismatch {
-        tx_type: String,
-        envelope_kind: String,
-    },
+    #[error("envelope too large: {size} bytes (limit {limit})")]
+    EnvelopeTooLarge { size: usize, limit: usize },
+
+    #[error("envelope too short: {size} bytes")]
+    EnvelopeTooShort { size: usize },
+
+    #[error("envelope magic prefix mismatch")]
+    EnvelopeMagicMismatch,
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -644,108 +632,5 @@ mod tests {
             tx.validate_structure(),
             Err(StakeTxError::MemoTooLarge { .. })
         ));
-    }
-
-    // ─── Envelope tests (γ-1) ──────────────────────────────────────────────
-
-    #[test]
-    fn envelope_magic_is_24_bytes() {
-        assert_eq!(STAKE_ENVELOPE_MAGIC.len(), 24);
-    }
-
-    #[test]
-    fn envelope_round_trip_register() {
-        let tx = make_register(10_000_000);
-        let bytes = tx.encode_for_extra().expect("encode");
-        // magic prefix 整合
-        assert_eq!(&bytes[..24], STAKE_ENVELOPE_MAGIC);
-        let decoded = ValidatorStakeTx::decode_from_extra(&bytes).expect("decode");
-        assert_eq!(decoded.kind, StakeTxKind::Register);
-        assert_eq!(decoded.validator_id, tx.validator_id);
-        assert_eq!(decoded.nonce, tx.nonce);
-        assert_eq!(decoded.fee, tx.fee);
-        assert_eq!(decoded.stake_inputs.len(), tx.stake_inputs.len());
-        assert_eq!(decoded.signing_payload(), tx.signing_payload());
-    }
-
-    #[test]
-    fn envelope_round_trip_stake_more() {
-        let tx = make_stake_more(5_000_000);
-        let bytes = tx.encode_for_extra().expect("encode");
-        let decoded = ValidatorStakeTx::decode_from_extra(&bytes).expect("decode");
-        assert_eq!(decoded.kind, StakeTxKind::StakeMore);
-        assert_eq!(decoded.signing_payload(), tx.signing_payload());
-    }
-
-    #[test]
-    fn envelope_round_trip_begin_exit() {
-        let tx = make_begin_exit();
-        let bytes = tx.encode_for_extra().expect("encode");
-        let decoded = ValidatorStakeTx::decode_from_extra(&bytes).expect("decode");
-        assert_eq!(decoded.kind, StakeTxKind::BeginExit);
-        assert!(decoded.stake_inputs.is_empty());
-        assert_eq!(decoded.signing_payload(), tx.signing_payload());
-    }
-
-    #[test]
-    fn envelope_magic_mismatch() {
-        let tx = make_register(10_000_000);
-        let mut bytes = tx.encode_for_extra().expect("encode");
-        bytes[0] ^= 0xFF; // 先頭 1 byte 破壊
-        assert!(matches!(
-            ValidatorStakeTx::decode_from_extra(&bytes),
-            Err(StakeTxError::EnvelopeMagicMismatch)
-        ));
-    }
-
-    #[test]
-    fn envelope_too_short() {
-        let short = vec![0u8; 23];
-        assert!(matches!(
-            ValidatorStakeTx::decode_from_extra(&short),
-            Err(StakeTxError::EnvelopeTooShort { size: 23 })
-        ));
-        let empty: Vec<u8> = vec![];
-        assert!(matches!(
-            ValidatorStakeTx::decode_from_extra(&empty),
-            Err(StakeTxError::EnvelopeTooShort { size: 0 })
-        ));
-    }
-
-    #[test]
-    fn envelope_too_large_on_encode() {
-        let mut tx = make_register(10_000_000);
-        // memo を MAX_STAKE_TX_EXTRA_SIZE 以上に膨らませる
-        // (memo size limit は validate_structure でしか効かないので encode_for_extra 単体で
-        //  envelope size limit を踏める)
-        tx.memo = Some("X".repeat(MAX_STAKE_TX_EXTRA_SIZE + 1));
-        assert!(matches!(
-            tx.encode_for_extra(),
-            Err(StakeTxError::EnvelopeTooLarge { .. })
-        ));
-    }
-
-    #[test]
-    fn envelope_too_large_on_decode() {
-        // magic 付き + body を MAX_STAKE_TX_EXTRA_SIZE+1 にする
-        let mut buf = Vec::with_capacity(MAX_STAKE_TX_EXTRA_SIZE + 1);
-        buf.extend_from_slice(STAKE_ENVELOPE_MAGIC);
-        buf.resize(MAX_STAKE_TX_EXTRA_SIZE + 1, 0);
-        assert!(matches!(
-            ValidatorStakeTx::decode_from_extra(&buf),
-            Err(StakeTxError::EnvelopeTooLarge { .. })
-        ));
-    }
-
-    #[test]
-    fn envelope_decode_failed_on_garbage_body() {
-        // 正しい magic + 無効な borsh body
-        let mut buf = Vec::new();
-        buf.extend_from_slice(STAKE_ENVELOPE_MAGIC);
-        buf.extend_from_slice(&[0xFFu8; 16]); // 無効な discriminant 等
-        match ValidatorStakeTx::decode_from_extra(&buf) {
-            Err(StakeTxError::EnvelopeDecodeFailed(_)) => {}
-            other => panic!("expected EnvelopeDecodeFailed, got {:?}", other),
-        }
     }
 }

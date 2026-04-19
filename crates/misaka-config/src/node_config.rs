@@ -100,7 +100,7 @@ impl Default for NodeConfig {
             staking_min_stake: 100_000_000_000,
             staking_unbonding_period: 43200,
             staking_max_validators: 50,
-            consensus_fast_block_time_secs: 2,
+            consensus_fast_block_time_secs: 10,
             consensus_zkp_block_time_secs: 30,
             dag_retention_rounds: 10_000,
             prune_mode: PruneMode::default(),

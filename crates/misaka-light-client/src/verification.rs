@@ -11,9 +11,7 @@
 
 use std::collections::HashSet;
 
-use misaka_crypto::validator_sig::{
-    validator_verify, ValidatorPqPublicKey, ValidatorPqSignature,
-};
+use misaka_crypto::validator_sig::{validator_verify, ValidatorPqPublicKey, ValidatorPqSignature};
 use misaka_types::validator::{
     CommitteeVote, EpochTransitionProof, ValidatorId, ValidatorIdentity, ValidatorSignature,
 };
@@ -124,11 +122,9 @@ pub fn verify_committee_votes(
 
         let vi = find_validator(committee, &v.voter)?;
         verify_sig(vi, &v.signing_bytes(), &v.signature)?;
-        total = total
-            .checked_add(vi.stake_weight)
-            .ok_or_else(|| {
-                LightClientError::SignatureVerificationFailed("stake overflow".into())
-            })?;
+        total = total.checked_add(vi.stake_weight).ok_or_else(|| {
+            LightClientError::SignatureVerificationFailed("stake overflow".into())
+        })?;
     }
     Ok(total)
 }
