@@ -445,6 +445,64 @@ Regression: `cargo test -p misaka-dag --lib` 519/519
 - Prometheus export of the `new_config` / `stats` — trivial to
   add once integration lands.
 
+### 5.9 `/api/metrics/node` axum route (this commit, 2026-04-19)
+
+Docs-plus-tiny-wiring commit. Exposes
+`NodeMetrics::render_prometheus()` over HTTP so operators can
+scrape the 4 Part B gauges/counters that have been accumulating
+since 64589df without a public surface.
+
+- `crates/misaka-node/src/main.rs`:
+  * The `_node_metrics_keep` binding that held the `Arc<NodeMetrics>`
+    alive was replaced with `node_metrics_rpc = node_metrics.clone()`
+    passed into the RPC router's `/api/metrics` nest. A second
+    `_node_metrics_keep` binding is retained so observer mode
+    (no RPC) still keeps the Arc alive.
+  * New route under the existing `/api/metrics` nest: `/node`
+    → Prometheus exposition of all `NodeMetrics` fields. Uses
+    the same `Content-Type: text/plain; version=0.0.4; charset=utf-8`
+    that Prometheus expects.
+  * Gated by the same `rpc_auth::require_api_key` middleware
+    that the pre-existing `/api/metrics/` route uses.
+- `cargo check --workspace --lib --bins`: clean.
+
+Operators scrape with:
+
+```
+curl -H "Authorization: Bearer $MISAKA_API_KEY" \
+     http://node:3001/api/metrics/node
+```
+
+Visible fields include (partial):
+
+- `misaka_round_interval_ms` (gauge) — Part B adaptive interval.
+- `misaka_mempool_utilisation_scaled` (gauge) — 0..=1000 fixed.
+- `misaka_round_wake_timer_total` / `_mempool_total` (counters).
+- Everything else in `NodeMetrics::render_prometheus()` (block
+  height, tx rates, p2p peers, etc. — most of which are still
+  zero because they pre-date Phase 3a integration and were never
+  wired).
+
+### 5.10 Integration gap analysis (this commit, 2026-04-19)
+
+The original Phase 3a plan implied A.7 (finalizer wire) and Part
+C integration (epoch transition) were thin wiring commits. A
+pre-wiring audit revealed both depend on subsystems that aren't
+yet production-live:
+
+- `docs/design/phase3a_finalizer_integration.md` — A.7 blocker:
+  `CheckpointManager` has zero production instantiation.
+- `docs/design/phase3a_epoch_integration.md` — Part C blocker:
+  two unwired epoch subsystems, a startup-static scheduler config,
+  no `EpochStats` collector.
+
+Both docs propose a three-path resolution. Both recommend
+**Path C — bundle into a new "Phase 3a.5 — Epoch subsystem
+activation" work item**, so the epoch machinery lands as one
+cohesive design rather than as two overlapping partial
+integrations. Phase 3b (ZK aggregation) is unaffected either
+way — it's proof machinery, independent of epoch activation.
+
 ## 6. Remaining work (after this session)
 
 Store-layer items from §5 are all shipped. Remaining work splits
@@ -466,21 +524,27 @@ into runtime integration and operational validation:
 
 ### Deferred — runtime integration
 
-- **A.7 — finalizer wire**: call `put_cert_v2_votes` +
-  `put_cert_mapping` + `verify_cert_v2` from the narwhal commit
-  finalizer (`checkpoint_manager::CheckpointManager::add_vote`
-  on quorum path).
-- **Part C integration**: epoch-transition hook that (a) collects
-  `EpochStats` from the previous epoch, (b) reads the previous
-  `RoundSchedulerConfig`, (c) calls `adjust_round_config`, (d)
-  persists via `put_round_config_audit`, (e) hands the new
-  config to the next epoch's propose-loop spawn.
-- **`/metrics` axum route**: expose `NodeMetrics::render_prometheus()`
-  over HTTP so operators can scrape the 4 new Part B gauges/counters
-  (currently accumulated in memory only).
+- ✅ **`/metrics` axum route** — shipped (see below). The 4
+  Part B gauges/counters + all other `NodeMetrics` fields are
+  now scrape-accessible at `/api/metrics/node` (auth-gated).
+- ⚠️ **A.7 — finalizer wire**: **blocked on an architectural
+  gap**. `CheckpointManager::add_vote` has no production call
+  site; adding Phase 3a store writes into its quorum branch
+  produces dead code. Blocker + three resolution paths
+  documented in
+  `docs/design/phase3a_finalizer_integration.md`. Recommended
+  resolution: defer to **Phase 3a.5 — Epoch subsystem
+  activation** (bundled with the Part C blocker below).
+- ⚠️ **Part C integration**: **blocked on an architectural
+  gap**. Three separate blockers — two unwired epoch
+  subsystems, a startup-static `RoundSchedulerConfig` (not
+  `Arc<RwLock>`), and a missing `EpochStats` collector. See
+  `docs/design/phase3a_epoch_integration.md`. Recommended
+  resolution: **Phase 3a.5**, bundled with A.7.
 - **Cert digest → commit linkage**: the `checkpoint_manager` writes
   a `FinalizedCheckpoint` (v1 shape); for the cross-over we need
   a v2 equivalent computed alongside and the v1↔v2 mapping written.
+  Part of Phase 3a.5 (tracked in the finalizer-integration doc).
 
 ### Deferred — retrofit (Part D → Phase 3b)
 

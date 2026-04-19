@@ -2108,8 +2108,16 @@ async fn start_narwhal_node(
         ))
     };
     // Keep the metrics handle alive for the lifetime of the node;
-    // the propose loop holds an Arc clone but other future
-    // subsystems (RPC / axum /metrics route) will want one too.
+    // the propose loop holds an Arc clone. Also pass an Arc clone
+    // into the RPC router so `/api/metrics/node` can render the
+    // `NodeMetrics` in Prometheus exposition format. The bare
+    // binding (formerly `_node_metrics_keep`) is replaced by
+    // `node_metrics_rpc` for clarity.
+    let node_metrics_rpc = node_metrics.clone();
+    // Retain an unused clone so the Arc is kept alive even if
+    // the RPC router is not spawned (e.g. observer mode). Without
+    // this, dropping the last clone on the propose-loop side would
+    // leave a dangling `Arc::weak_count` but never break.
     let _node_metrics_keep = node_metrics;
 
     // Start RPC server (minimal — submit_tx + status)
@@ -2208,6 +2216,27 @@ async fn start_narwhal_node(
                         let m = m.clone();
                         async move {
                             misaka_dag::narwhal_dag::prometheus::PrometheusExporter::new(m).export()
+                        }
+                    }
+                }))
+                // Phase 3a integration: expose `NodeMetrics` (distinct
+                // from the above `narwhal_dag::Metrics`) so operators
+                // can scrape the 4 new Part B adaptive-scheduler metrics
+                // + the 2 Phase 3a Part C epoch-audit placeholders +
+                // every other `NodeMetrics` field. Content-Type matches
+                // the Prometheus exposition format.
+                .route("/node", axum::routing::get({
+                    let nm = node_metrics_rpc.clone();
+                    move || {
+                        let nm = nm.clone();
+                        async move {
+                            (
+                                [(
+                                    axum::http::header::CONTENT_TYPE,
+                                    "text/plain; version=0.0.4; charset=utf-8",
+                                )],
+                                nm.render_prometheus(),
+                            )
                         }
                     }
                 }))
