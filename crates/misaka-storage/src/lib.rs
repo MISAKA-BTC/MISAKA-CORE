@@ -25,6 +25,7 @@
 // ─── Existing modules (preserved) ───
 pub mod block_store;
 pub mod checkpoint;
+pub mod columns;
 pub mod dag_recovery;
 pub mod flat_merkle;
 pub mod object_store;
