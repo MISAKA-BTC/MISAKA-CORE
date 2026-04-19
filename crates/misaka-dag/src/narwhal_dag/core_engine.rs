@@ -389,6 +389,7 @@ impl CoreEngine {
             commit_votes,
             tx_reject_votes: vec![],
             state_root: ctx_state_root,
+            state_root_smt: [0u8; 32],
             signature: vec![],
         };
 
@@ -1282,6 +1283,7 @@ mod tests {
             commit_votes: vec![],
             tx_reject_votes: vec![],
             state_root: [0u8; 32],
+            state_root_smt: [0u8; 32],
             signature: vec![],
         };
         tvs.sign_block(1, &mut block);
@@ -1320,6 +1322,7 @@ mod tests {
                     commit_votes: vec![],
                     tx_reject_votes: vec![],
                     state_root: [0u8; 32],
+                    state_root_smt: [0u8; 32],
                     signature: vec![],
                 };
                 tvs.sign_block(author as usize, &mut b);
@@ -1400,6 +1403,7 @@ mod tests {
             commit_votes: vec![],
             tx_reject_votes: vec![],
             state_root: [0u8; 32],
+            state_root_smt: [0u8; 32],
             signature: vec![], // EMPTY!
         };
         let vb = VerifiedBlock::new_for_test(block);
@@ -1427,6 +1431,7 @@ mod tests {
                 commit_votes: vec![],
                 tx_reject_votes: vec![],
                 state_root: [0u8; 32],
+                state_root_smt: [0u8; 32],
                 signature: vec![],
             };
             tvs.sign_block(author as usize, &mut b);
@@ -1507,6 +1512,7 @@ mod tests {
                     commit_votes: vec![],
                     tx_reject_votes: vec![],
                     state_root: [0u8; 32],
+                    state_root_smt: [0u8; 32],
                     signature: vec![],
                 };
                 tvs.sign_block(author as usize, &mut b);
@@ -1555,6 +1561,7 @@ mod tests {
             commit_votes: vec![],
             tx_reject_votes: vec![],
             state_root: [0u8; 32],
+            state_root_smt: [0u8; 32],
             signature: vec![0xAA; 64],
         };
         engine.process_block(VerifiedBlock::new_for_test(block), &mut bm, &mut dag);
@@ -1583,6 +1590,7 @@ mod tests {
             commit_votes: vec![],
             tx_reject_votes: vec![],
             state_root: [0u8; 32],
+            state_root_smt: [0u8; 32],
             signature: vec![],
         };
         tvs.sign_block(1, &mut block);
@@ -1619,6 +1627,7 @@ mod tests {
             commit_votes: vec![],
             tx_reject_votes: vec![],
             state_root: [0u8; 32],
+            state_root_smt: [0u8; 32],
             signature: vec![0xAA; 64],
         };
         let vb = VerifiedBlock::new_for_test(leader_block);
@@ -1703,6 +1712,7 @@ mod tests {
                 commit_votes: vec![],
                 tx_reject_votes: vec![],
                 state_root: [0u8; 32],
+                state_root_smt: [0u8; 32],
                 signature: vec![],
             };
             tvs.sign_block(auth as usize, &mut b);
@@ -1820,6 +1830,7 @@ mod tests {
                 commit_votes: vec![],
                 tx_reject_votes: vec![],
                 state_root: [0u8; 32],
+                state_root_smt: [0u8; 32],
                 signature: vec![],
             };
             tvs.sign_block(auth as usize, &mut b);

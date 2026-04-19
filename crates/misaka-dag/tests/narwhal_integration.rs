@@ -316,6 +316,7 @@ fn test_persistence_round_trip() {
                 commit_votes: vec![],
                 tx_reject_votes: vec![],
                 state_root: [0u8; 32],
+                state_root_smt: [0u8; 32],
                 signature: vec![0xAA; 64],
             };
             dag.accept_block(VerifiedBlock::new_for_test(block));
@@ -387,6 +388,7 @@ fn test_block_verifier_integration() {
         commit_votes: vec![],
         tx_reject_votes: vec![],
         state_root: [0u8; 32],
+        state_root_smt: [0u8; 32],
         signature: vec![],
     };
     vs.sign_block(0, &mut valid);
@@ -449,6 +451,7 @@ fn test_pipelined_committer_dual_slot() {
                 commit_votes: vec![],
                 tx_reject_votes: vec![],
                 state_root: [0u8; 32],
+                state_root_smt: [0u8; 32],
                 signature: vec![0xAA; 64],
             };
             let vb = VerifiedBlock::new_for_test(block);

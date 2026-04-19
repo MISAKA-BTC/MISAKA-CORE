@@ -667,6 +667,7 @@ fn s34_indirect_depth_bounded() {
             commit_votes: vec![],
             tx_reject_votes: vec![],
             state_root: [0u8; 32],
+            state_root_smt: [0u8; 32],
             signature: vec![0xAA; 64],
         };
         let vb = VerifiedBlock::new_for_test(b);
@@ -686,6 +687,7 @@ fn s34_indirect_depth_bounded() {
             commit_votes: vec![],
             tx_reject_votes: vec![],
             state_root: [0u8; 32],
+            state_root_smt: [0u8; 32],
             signature: vec![0xAA; 64],
         };
         let vb = VerifiedBlock::new_for_test(b);
@@ -717,6 +719,7 @@ fn s35_ancestor_excludes_low_score() {
             commit_votes: vec![],
             tx_reject_votes: vec![],
             state_root: [0u8; 32],
+            state_root_smt: [0u8; 32],
             signature: vec![0xAA; 64],
         };
         dag.accept_block(VerifiedBlock::new_for_test(b));
@@ -747,6 +750,7 @@ fn s36_tracked_direct_decide() {
             commit_votes: vec![],
             tx_reject_votes: vec![],
             state_root: [0u8; 32],
+            state_root_smt: [0u8; 32],
             signature: vec![0xAA; 64],
         };
         let vb = VerifiedBlock::new_for_test(b);
@@ -765,6 +769,7 @@ fn s36_tracked_direct_decide() {
             commit_votes: vec![],
             tx_reject_votes: vec![],
             state_root: [0u8; 32],
+            state_root_smt: [0u8; 32],
             signature: vec![0xAA; 64],
         };
         dag.accept_block(VerifiedBlock::new_for_test(b));
@@ -802,6 +807,7 @@ fn s37_equivocation_flood_does_not_cause_skip() {
             commit_votes: vec![],
             tx_reject_votes: vec![],
             state_root: [0u8; 32],
+            state_root_smt: [0u8; 32],
             signature: vec![0xAA; 64],
         };
         let vb = VerifiedBlock::new_for_test(block);
@@ -823,6 +829,7 @@ fn s37_equivocation_flood_does_not_cause_skip() {
             commit_votes: vec![],
             tx_reject_votes: vec![],
             state_root: [0u8; 32],
+            state_root_smt: [0u8; 32],
             signature: vec![0xAA; 64],
         };
         let vb = VerifiedBlock::new_for_test(block);
@@ -847,6 +854,7 @@ fn s37_equivocation_flood_does_not_cause_skip() {
             commit_votes: vec![],
             tx_reject_votes: vec![],
             state_root: [0u8; 32],
+            state_root_smt: [0u8; 32],
             signature: vec![0xBB; 64],
         };
         let vb = VerifiedBlock::new_for_test(block);
@@ -865,6 +873,7 @@ fn s37_equivocation_flood_does_not_cause_skip() {
             commit_votes: vec![],
             tx_reject_votes: vec![],
             state_root: [0u8; 32],
+            state_root_smt: [0u8; 32],
             signature: vec![0xAA; 64],
         };
         let vb = VerifiedBlock::new_for_test(block);
@@ -910,6 +919,7 @@ fn s38_equivocation_result_surfaced() {
             commit_votes: vec![],
             tx_reject_votes: vec![],
             state_root: [0u8; 32],
+            state_root_smt: [0u8; 32],
             signature: vec![0xAA; 64],
         };
         VerifiedBlock::new_for_test(block)
@@ -930,6 +940,7 @@ fn s38_equivocation_result_surfaced() {
             commit_votes: vec![],
             tx_reject_votes: vec![],
             state_root: [0u8; 32],
+            state_root_smt: [0u8; 32],
             signature: vec![0xBB; 64],
         };
         VerifiedBlock::new_for_test(block)
@@ -981,6 +992,7 @@ fn s39_heavy_equivocation_flood_bfs_safety() {
             commit_votes: vec![],
             tx_reject_votes: vec![],
             state_root: [0u8; 32],
+            state_root_smt: [0u8; 32],
             signature: vec![0xAA; 64],
         };
         let vb = VerifiedBlock::new_for_test(b);
@@ -1002,6 +1014,7 @@ fn s39_heavy_equivocation_flood_bfs_safety() {
             commit_votes: vec![],
             tx_reject_votes: vec![],
             state_root: [0u8; 32],
+            state_root_smt: [0u8; 32],
             signature: vec![0xAA; 64],
         };
         let vb = VerifiedBlock::new_for_test(b);
@@ -1026,6 +1039,7 @@ fn s39_heavy_equivocation_flood_bfs_safety() {
             commit_votes: vec![],
             tx_reject_votes: vec![],
             state_root: [0u8; 32],
+            state_root_smt: [0u8; 32],
             signature: vec![0xBB; 64],
         };
         let vb = VerifiedBlock::new_for_test(b);
@@ -1044,6 +1058,7 @@ fn s39_heavy_equivocation_flood_bfs_safety() {
             commit_votes: vec![],
             tx_reject_votes: vec![],
             state_root: [0u8; 32],
+            state_root_smt: [0u8; 32],
             signature: vec![0xAA; 64],
         };
         let vb = VerifiedBlock::new_for_test(b);
@@ -1064,6 +1079,7 @@ fn s39_heavy_equivocation_flood_bfs_safety() {
             commit_votes: vec![],
             tx_reject_votes: vec![],
             state_root: [0u8; 32],
+            state_root_smt: [0u8; 32],
             signature: vec![0xAA; 64],
         };
         let vb = VerifiedBlock::new_for_test(b);
@@ -1117,6 +1133,7 @@ fn s40_bfs_abort_retries_with_later_anchor() {
             commit_votes: vec![],
             tx_reject_votes: vec![],
             state_root: [0u8; 32],
+            state_root_smt: [0u8; 32],
             signature: vec![0xAA; 64],
         };
         let vb = VerifiedBlock::new_for_test(b);
@@ -1138,6 +1155,7 @@ fn s40_bfs_abort_retries_with_later_anchor() {
             commit_votes: vec![],
             tx_reject_votes: vec![],
             state_root: [0u8; 32],
+            state_root_smt: [0u8; 32],
             signature: vec![0xAA; 64],
         };
         let vb = VerifiedBlock::new_for_test(b);

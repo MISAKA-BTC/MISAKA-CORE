@@ -334,6 +334,7 @@ mod tests {
                 commit_votes: vec![],
                 tx_reject_votes: vec![],
                 state_root: [0u8; 32],
+                state_root_smt: [0u8; 32],
                 signature: vec![],
             })
         };
@@ -501,6 +502,7 @@ mod tests {
                 commit_votes: vec![],
                 tx_reject_votes: vec![],
                 state_root: [0u8; 32],
+                state_root_smt: [0u8; 32],
                 signature: vec![],
             })
         };
@@ -549,6 +551,7 @@ mod tests {
                 commit_votes: vec![],
                 tx_reject_votes: vec![],
                 state_root: [0u8; 32],
+                state_root_smt: [0u8; 32],
                 signature: vec![],
             })
         };
@@ -583,6 +586,7 @@ mod tests {
                 commit_votes: vec![],
                 tx_reject_votes: vec![],
                 state_root: [0u8; 32],
+                state_root_smt: [0u8; 32],
                 signature: vec![],
             })
         };
@@ -637,6 +641,7 @@ mod tests {
                 commit_votes: vec![],
                 tx_reject_votes: vec![],
                 state_root: [0u8; 32],
+                state_root_smt: [0u8; 32],
                 signature: vec![],
             })
         };

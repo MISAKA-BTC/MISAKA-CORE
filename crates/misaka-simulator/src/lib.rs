@@ -596,6 +596,7 @@ mod tests {
             commit_votes: vec![],
             tx_reject_votes: vec![],
             state_root: [0u8; 32],
+            state_root_smt: [0u8; 32],
             signature: vec![],
         };
         vs.sign_block(0, &mut valid_block);
@@ -672,6 +673,7 @@ mod tests {
             commit_votes: vec![],
             tx_reject_votes: vec![],
             state_root: [0u8; 32],
+            state_root_smt: [0u8; 32],
             signature: vec![],
         };
         h.validator_set.sign_block(0, &mut block_a);
@@ -687,6 +689,7 @@ mod tests {
             commit_votes: vec![],
             tx_reject_votes: vec![],
             state_root: [0u8; 32],
+            state_root_smt: [0u8; 32],
             signature: vec![],
         };
         h.validator_set.sign_block(0, &mut block_b);
@@ -818,6 +821,7 @@ mod tests {
                 commit_votes: vec![],
                 tx_reject_votes: vec![],
                 state_root: [0u8; 32],
+                state_root_smt: [0u8; 32],
                 signature: vec![],
             };
             vs.sign_block((i % n as u32) as usize, &mut block);
@@ -1226,6 +1230,7 @@ mod tests {
                 commit_votes: vec![],
                 tx_reject_votes: vec![],
                 state_root: [0u8; 32],
+                state_root_smt: [0u8; 32],
                 signature: vec![],
             };
             vs.sign_block((i % n as u32) as usize, &mut block);
@@ -1519,6 +1524,7 @@ mod tests {
             commit_votes: vec![],
             tx_reject_votes: vec![],
             state_root: [0u8; 32],
+            state_root_smt: [0u8; 32],
             signature: vec![],
         };
 

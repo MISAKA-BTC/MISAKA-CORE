@@ -644,6 +644,7 @@ impl<'a> LayerBuilder<'a> {
                 commit_votes: vec![],
                 tx_reject_votes: vec![],
                 state_root: [0u8; 32],
+                state_root_smt: [0u8; 32],
                 signature: vec![0xAA; sig_len],
             };
             self.dag.sign_block(&mut block);
@@ -662,6 +663,7 @@ impl<'a> LayerBuilder<'a> {
                     commit_votes: vec![],
                     tx_reject_votes: vec![],
                     state_root: [0u8; 32],
+                    state_root_smt: [0u8; 32],
                     signature: vec![0xBB; sig_len],
                 };
                 self.dag.sign_block(&mut eq_block);
@@ -915,6 +917,7 @@ mod tests {
             commit_votes: vec![],
             tx_reject_votes: vec![],
             state_root: [0u8; 32],
+            state_root_smt: [0u8; 32],
             signature: vec![],
         };
         let t2 = Instant::now();

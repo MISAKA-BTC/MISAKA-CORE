@@ -52,6 +52,7 @@ fn make_block(round: Round, author: AuthorityIndex, ancestors: Vec<BlockRef>) ->
         commit_votes: vec![],
         tx_reject_votes: vec![],
         state_root: [0u8; 32],
+        state_root_smt: [0u8; 32],
         signature: vec![0xAA; 64],
     };
     VerifiedBlock::new_for_test(block)
@@ -166,6 +167,7 @@ fn bench_e2e_latency(c: &mut Criterion) {
                         commit_votes: vec![],
                         tx_reject_votes: vec![],
                         state_root: [0u8; 32],
+                        state_root_smt: [0u8; 32],
                         signature: vec![0xAA; 64],
                     };
                     let vb = VerifiedBlock::new_for_test(block);
@@ -200,6 +202,7 @@ fn bench_fast_path_latency(c: &mut Criterion) {
                     commit_votes: vec![],
                     tx_reject_votes: vec![],
                     state_root: [0u8; 32],
+                    state_root_smt: [0u8; 32],
                     signature: vec![0xAA; 64],
                 };
                 VerifiedBlock::new_for_test(block)
@@ -281,6 +284,7 @@ fn bench_commit_finalizer(c: &mut Criterion) {
                     commit_votes: vec![],
                     tx_reject_votes: vec![],
                     state_root: [0u8; 32],
+                    state_root_smt: [0u8; 32],
                     signature: vec![0xAA; 64],
                 };
                 let commit = CommittedSubDag {

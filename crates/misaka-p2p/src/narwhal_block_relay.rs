@@ -209,6 +209,7 @@ mod tests {
             commit_votes: vec![BlockRef::new(2, 2, BlockDigest([0x22; 32]))],
             tx_reject_votes: vec![],
             state_root: [0u8; 32],
+            state_root_smt: [0u8; 32],
             signature: vec![0xAA; 3309],
         }
     }

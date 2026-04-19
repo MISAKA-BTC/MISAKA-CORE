@@ -430,6 +430,7 @@ mod tests {
             commit_votes: vec![],
             tx_reject_votes: vec![],
             state_root: [0u8; 32],
+            state_root_smt: [0u8; 32],
             signature: vec![], // unsigned — must be signed via TestValidatorSet
         }
     }
@@ -585,6 +586,7 @@ mod tests {
                 commit_votes: vec![],
                 tx_reject_votes: vec![],
                 state_root: [0u8; 32],
+                state_root_smt: [0u8; 32],
                 signature: vec![],
             };
             let digest = block.signing_digest_v2(app_id.clone());
@@ -667,6 +669,7 @@ mod tests {
             commit_votes: vec![],
             tx_reject_votes: vec![],
             state_root: [0u8; 32],
+            state_root_smt: [0u8; 32],
             signature: vec![],
         };
         // Sign with the real ML-DSA-65 key and the matching AppId.

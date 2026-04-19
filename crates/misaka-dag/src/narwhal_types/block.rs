@@ -177,6 +177,21 @@ pub struct Block {
     /// Phase 3 C7: Post-execution state root (MuHash of UTXO set).
     /// Commits the executor's state at the time of block proposal.
     pub state_root: [u8; 32],
+    /// v1.0 hard-fork parallel SMT state root
+    /// (see `misaka_storage::UtxoSet::compute_state_root_v4`).
+    ///
+    /// Carried on the block only in memory; the wire format
+    /// (both borsh and serde) SKIPS this field during the
+    /// parallel phase, keeping v0.9 ↔ v1.0 wire compatibility.
+    /// Consensus does not read this value pre-activation.
+    ///
+    /// At the v1.0 activation epoch, Step 7 of the migration
+    /// removes the skip attributes, promoting the field to
+    /// wire-visible and digest-bound. See
+    /// `docs/design/v100_smt_migration.md`.
+    #[borsh(skip)]
+    #[serde(default, skip)]
+    pub state_root_smt: [u8; 32],
     /// ML-DSA-65 signature over block content.
     pub signature: Vec<u8>,
 }
@@ -599,6 +614,7 @@ mod tests {
             commit_votes: vec![],
             tx_reject_votes: vec![],
             state_root: [0u8; 32],
+            state_root_smt: [0u8; 32],
             signature: vec![0xAA; 64],
         };
         let d1 = block.digest();
@@ -618,6 +634,7 @@ mod tests {
             commit_votes: vec![],
             tx_reject_votes: vec![],
             state_root: [0u8; 32],
+            state_root_smt: [0u8; 32],
             signature: vec![],
         };
         let block2 = Block {
@@ -649,6 +666,7 @@ mod tests {
             commit_votes: vec![],
             tx_reject_votes: vec![],
             state_root: [0u8; 32],
+            state_root_smt: [0u8; 32],
             signature: vec![0xBB; 64],
         };
         let vb = VerifiedBlock::new_for_test(block);
@@ -679,6 +697,7 @@ mod tests {
             commit_votes: vec![],
             tx_reject_votes: vec![],
             state_root: [0u8; 32],
+            state_root_smt: [0u8; 32],
             signature: vec![0xCC; 64],
         };
         let vb = VerifiedBlock::new_for_test(block);

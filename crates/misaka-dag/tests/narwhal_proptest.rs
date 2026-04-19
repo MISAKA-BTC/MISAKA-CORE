@@ -54,6 +54,7 @@ fn make_block(
         commit_votes: vec![],
         tx_reject_votes: vec![],
         state_root: [0u8; 32],
+        state_root_smt: [0u8; 32],
         signature: vec![0xAA; 64],
     };
     VerifiedBlock::new_for_test(block)
@@ -133,6 +134,7 @@ proptest! {
                 ancestors: vec![], transactions: vec![tx1],
                 commit_votes: vec![], tx_reject_votes: vec![],
                 state_root: [0u8; 32],
+                state_root_smt: [0u8; 32],
                 signature: vec![],
             };
             let b2 = Block {
@@ -140,6 +142,7 @@ proptest! {
                 ancestors: vec![], transactions: vec![tx2],
                 commit_votes: vec![], tx_reject_votes: vec![],
                 state_root: [0u8; 32],
+                state_root_smt: [0u8; 32],
                 signature: vec![],
             };
             prop_assert_ne!(b1.digest(), b2.digest());
@@ -157,6 +160,7 @@ proptest! {
                 ancestors: vec![], transactions: vec![],
                 commit_votes: vec![], tx_reject_votes: vec![],
                 state_root: [0u8; 32],
+                state_root_smt: [0u8; 32],
                 signature: vec![],
             };
             let b2 = Block {
@@ -164,6 +168,7 @@ proptest! {
                 ancestors: vec![], transactions: vec![],
                 commit_votes: vec![], tx_reject_votes: vec![],
                 state_root: [0u8; 32],
+                state_root_smt: [0u8; 32],
                 signature: vec![],
             };
             prop_assert_ne!(b1.digest(), b2.digest());
