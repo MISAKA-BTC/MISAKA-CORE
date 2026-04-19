@@ -1672,6 +1672,47 @@ async fn start_narwhal_node(
     // advances the UTXO tip, and on shutdown. See
     // `docs/design/v090_phase2_tail_work.md` §2 for the wider plan.
     let integrity_store = rocks_store.clone();
+    // Phase 2 Path X R6-b integration: same handle is used to feed
+    // `gc_below_round(round)` when the Narwhal pruning processor
+    // emits a `PruningDecision::Advance`. See
+    // `docs/design/v090_phase2_tail_work.md` §3.4.2.
+    let pruning_gc_store: std::sync::Arc<dyn misaka_dag::narwhal_dag::store::ConsensusStore> =
+        rocks_store.clone();
+
+    // Phase 2 Path X R6-b — construct the Narwhal pruning processor
+    // only when the operator opted into `PruneMode::Pruned{keep_rounds}`.
+    // `Archival` is represented by `None` here (processor not
+    // constructed), matching the semantics documented in
+    // `NarwhalPruningProcessor`'s rustdoc.
+    let narwhal_pruning_processor: Option<
+        std::sync::Arc<
+            misaka_consensus::pipeline::narwhal_pruning_processor::NarwhalPruningProcessor,
+        >,
+    > = match loaded_config.as_ref().map(|c| c.prune_mode) {
+        Some(misaka_config::PruneMode::Pruned { keep_rounds }) => {
+            use misaka_consensus::pipeline::narwhal_pruning_processor::{
+                NarwhalPruningConfig, NarwhalPruningProcessor,
+            };
+            use misaka_consensus::stores::commit_pruning::DbCommitPruningStore;
+            let store = std::sync::Arc::new(parking_lot::RwLock::new(DbCommitPruningStore::new(
+                integrity_store.raw_db().clone(),
+            )));
+            let config = NarwhalPruningConfig {
+                pruning_depth_commits: keep_rounds,
+            };
+            info!(
+                "R6-b: NarwhalPruningProcessor enabled (pruning_depth_commits = {})",
+                keep_rounds
+            );
+            Some(std::sync::Arc::new(NarwhalPruningProcessor::new(
+                config, store,
+            )))
+        }
+        Some(misaka_config::PruneMode::Archival) | None => {
+            info!("R6-b: NarwhalPruningProcessor disabled (prune_mode = archival or unset)");
+            None
+        }
+    };
     let store: std::sync::Arc<dyn misaka_dag::narwhal_dag::store::ConsensusStore> =
         rocks_store.clone();
     info!("startup[5/6]: RocksDB opened OK");
@@ -4506,6 +4547,61 @@ async fn start_narwhal_node(
                             "Failed to persist startup_integrity committed state: {}",
                             e
                         );
+                    }
+                }
+
+                // Phase 2 Path X R6-b — feed the Narwhal pruning
+                // processor every commit (gated on prune_mode earlier
+                // — processor is `None` under `Archival`). Runs
+                // independent of the `txs_accepted > 0` gate because
+                // empty commits still advance the DAG tip and
+                // therefore the prunable range.
+                if let Some(proc_arc) = narwhal_pruning_processor.as_ref() {
+                    use misaka_consensus::pipeline::narwhal_pruning_processor::{
+                        NarwhalCommitMeta, PruningDecision,
+                    };
+                    let meta = NarwhalCommitMeta {
+                        commit_index: output.commit_index,
+                        timestamp_ms: output.timestamp_ms,
+                    };
+                    match proc_arc.on_committed_subdag(&meta) {
+                        Ok(PruningDecision::NoChange) => {}
+                        Ok(PruningDecision::Advance {
+                            new_pruning_index,
+                            timestamp,
+                        }) => {
+                            // Map the commit-index watermark back to
+                            // a round watermark so the DAG-layer GC
+                            // (`gc_below_round`) knows where to cut.
+                            // The leader of the *current* commit is
+                            // the safest round-watermark we can use:
+                            // every block with `round < leader.round`
+                            // that is not an ancestor of this commit
+                            // is no longer needed for recovery, and
+                            // the processor already guaranteed the
+                            // pruning-depth safety margin is met.
+                            let gc_round = output.leader.round;
+                            match pruning_gc_store.gc_below_round(gc_round) {
+                                Ok(deleted) => tracing::info!(
+                                    "R6-b: pruned {} DAG blocks below round {} \
+                                     (new_pruning_index={}, timestamp={})",
+                                    deleted,
+                                    gc_round,
+                                    new_pruning_index,
+                                    timestamp,
+                                ),
+                                Err(e) => tracing::warn!(
+                                    "R6-b: gc_below_round({}) failed: {}",
+                                    gc_round, e
+                                ),
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "R6-b: NarwhalPruningProcessor::on_committed_subdag failed: {}",
+                                e
+                            );
+                        }
                     }
                 }
             }

@@ -250,7 +250,7 @@ The processor does not itself delete data. It publishes a
 R6-b therefore **adds the trigger**; the actual GC sites are
 pre-existing and tested.
 
-### 3.4.1 Core shipped 2026-04-19
+### 3.4.1 Core + main.rs integration shipped 2026-04-19
 
 Files added:
 
@@ -277,12 +277,66 @@ so `misaka-consensus` stays off the `misaka-dag` dep graph. The
 caller extracts these two fields from `CommittedSubDag` at the
 integration site.
 
-Deferred to a follow-up commit: the main.rs integration (subscribe
-to `CommitConsumer`, construct the processor when
-`NodeConfig::prune_mode == Pruned{keep_rounds}`, spawn the tick
-loop, feed `NarwhalCommitMeta` in). Splitting keeps the
-store/processor landing reviewable in isolation and lets the
-integration PR carry its own smoke plan.
+### 3.4.2 main.rs integration (shipped 2026-04-19)
+
+`crates/misaka-node/src/main.rs::start_narwhal_node`:
+
+- After `integrity_store = rocks_store.clone()` (R1 step 2 clone):
+  adds a second `pruning_gc_store` clone typed as
+  `Arc<dyn ConsensusStore>` for `gc_below_round(round)` calls.
+- Reads `loaded_config.prune_mode` and branches:
+  * `PruneMode::Pruned { keep_rounds }` → constructs
+    `NarwhalPruningProcessor` wrapping a
+    `DbCommitPruningStore::new(integrity_store.raw_db().clone())`,
+    `NarwhalPruningConfig { pruning_depth_commits: keep_rounds }`.
+  * `PruneMode::Archival` / `None` → processor stays `None`.
+- In the per-commit hot path (adjacent to the R1 step 2
+  `write_committed_state` call), runs *every* commit (even
+  empty ones, because the DAG tip still advances):
+  1. extract `NarwhalCommitMeta { commit_index: output.commit_index,
+     timestamp_ms: output.timestamp_ms }`,
+  2. `processor.on_committed_subdag(&meta)`,
+  3. on `PruningDecision::Advance { new_pruning_index, timestamp }`,
+     call `pruning_gc_store.gc_below_round(output.leader.round)`.
+
+#### Why `leader.round` for the GC watermark?
+
+`NarwhalPruningProcessor` tracks a **commit-index** watermark;
+`ConsensusStore::gc_below_round` takes a **round** cutoff. The two
+are related but not identical. Using `output.leader.round` (the
+round of the leader block of the *current* commit) rather than the
+leader-round-at-commit-index-N is a deliberate over-retention:
+every block with `round < output.leader.round` that is not an
+ancestor of *this* commit is safe to drop, because the processor
+has already enforced the `pruning_depth_commits` safety margin
+above the watermark. The over-retention is bounded by the typical
+round-per-commit ratio and is on the right side (retains more,
+never prunes too much).
+
+#### What's NOT wired here
+
+`misaka_storage::PruningStore::set_pruning_point(info, utxo_entries)`
+is intentionally **not** called. That API requires iterating the
+full UTXO set into `PruningUtxoEntry`s — expensive and structurally
+coupled to a `UtxoSet` persistence layer that the Narwhal path
+doesn't carry today. Hooking it would either (a) re-serialise the
+entire in-memory `UtxoSet` on every pruning tick (pathological) or
+(b) require a proper persistent UTXO store (Phase 3+ work).
+
+The GC that matters for v0.9.0's disk-growth target is
+`gc_below_round` (Narwhal DAG blocks) — that's what this commit
+wires. `PruningStore::set_pruning_point` can land later without
+changing the processor surface.
+
+#### Testing status
+
+- `cargo check --workspace --lib --bins`: clean.
+- `cargo test -p misaka-node --bin misaka-node`: 194/194.
+- `cargo test -p misaka-consensus --lib`: 210/210 (unchanged
+  since the core commit — integration added no new tests).
+- **24 h 4-node smoke pending** — runs against a deployed branch
+  once pushed. 2 archival + 2 pruned; assert pruned DB growth is
+  at least 2× slower than archival. Not in this commit's scope.
 
 ### 3.5 Dead-code cleanup (optional follow-up)
 
