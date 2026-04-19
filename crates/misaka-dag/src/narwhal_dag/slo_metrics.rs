@@ -226,6 +226,44 @@ pub static LEADER_TIMEOUTS: Lazy<IntCounter> = Lazy::new(|| {
     .unwrap()
 });
 
+// ── Phase 3a.5 Step 4 (2026-04-19): epoch-boundary scheduler
+// adjustment metrics. Incremented by the commit loop when a
+// round boundary is crossed; the derivation itself is the pure
+// `adjust_round_config` fn. Each counter / gauge has a single
+// writer (the commit loop on the current node) — Prometheus
+// sees per-node values and aggregates across the committee.
+// ─────────────────────────────────────────────────────────────
+
+/// Phase 3a.5 Step 4: total number of epoch-boundary
+/// `adjust_round_config` applications on this node.
+pub static EPOCH_ADJUSTMENTS_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    IntCounter::with_opts(Opts::new(
+        "misaka_consensus_epoch_adjustments_total",
+        "Total epoch-boundary RoundSchedulerConfig adjustments [Phase 3a.5 Step 4]",
+    ))
+    .unwrap()
+});
+
+/// Phase 3a.5 Step 4: current `min_interval_ms` installed by the
+/// last `adjust_round_config` application.
+pub static ROUND_INTERVAL_MIN_MS: Lazy<IntGauge> = Lazy::new(|| {
+    IntGauge::with_opts(Opts::new(
+        "misaka_consensus_round_interval_min_ms",
+        "Current min_interval_ms after last epoch-boundary adjustment [Phase 3a.5 Step 4]",
+    ))
+    .unwrap()
+});
+
+/// Phase 3a.5 Step 4: current `max_interval_ms` installed by the
+/// last `adjust_round_config` application.
+pub static ROUND_INTERVAL_MAX_MS: Lazy<IntGauge> = Lazy::new(|| {
+    IntGauge::with_opts(Opts::new(
+        "misaka_consensus_round_interval_max_ms",
+        "Current max_interval_ms after last epoch-boundary adjustment [Phase 3a.5 Step 4]",
+    ))
+    .unwrap()
+});
+
 // ═══════════════════════════════════════════════════════════════
 //  Registration
 // ═══════════════════════════════════════════════════════════════
@@ -255,6 +293,10 @@ pub fn register_slo_metrics() {
     Lazy::force(&STORAGE_WRITE_LATENCY);
     Lazy::force(&LEADER_TIMEOUT_MS);
     Lazy::force(&LEADER_TIMEOUTS);
+    // Phase 3a.5 Step 4 — epoch-boundary adjustment metrics.
+    Lazy::force(&EPOCH_ADJUSTMENTS_TOTAL);
+    Lazy::force(&ROUND_INTERVAL_MIN_MS);
+    Lazy::force(&ROUND_INTERVAL_MAX_MS);
     Lazy::force(&BLOCKS_SUSPENDED);
     Lazy::force(&BLOCKS_UNSUSPENDED);
     Lazy::force(&COMMIT_LATENCY_HISTOGRAM);

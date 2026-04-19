@@ -2096,9 +2096,10 @@ async fn start_narwhal_node(
     > = std::sync::Arc::new(tokio::sync::RwLock::new(
         misaka_dag::narwhal_dag::round_scheduler::RoundSchedulerConfig::default(),
     ));
-    // Retain a clone for the future epoch-transition handler; for
-    // now it only feeds the propose loop.
-    let _shared_scheduler_config_for_epoch = shared_scheduler_config.clone();
+    // `shared_scheduler_config` is also used directly by the
+    // Step 4 epoch-boundary handler in the commit loop below
+    // (which is inline in this same function), so no extra
+    // clone is needed here.
 
     // Phase 3a.5 Step 3 — the per-epoch stats collector feeds the
     // Step 4 `adjust_round_config` derivation. Lock-free atomic
@@ -2126,8 +2127,12 @@ async fn start_narwhal_node(
         ),
     );
     let epoch_stats_for_commit = epoch_stats.clone();
-    // Keep a clone alive for the future Step 4 epoch handler.
-    let _epoch_stats_for_epoch = epoch_stats.clone();
+    // `epoch_stats_for_commit` is used in two sites inside the
+    // commit loop below: `record_non_empty_round()` on every
+    // accepted commit (Step 3, already wired), and
+    // `snapshot_and_reset()` / `set_epoch()` on the epoch
+    // boundary (Step 4, wired below). No additional clones
+    // needed since the commit loop is inline in this function.
     let propose_loop_handle = if is_observer {
         info!("Observer mode: skipping propose loop (read-only node)");
         None
@@ -4148,6 +4153,95 @@ async fn start_narwhal_node(
                     let prev_epoch = new_height.saturating_sub(1) / epoch_len;
                     let new_epoch = new_height / epoch_len;
                     if new_epoch > prev_epoch {
+                        // Phase 3a.5 Step 4 (2026-04-19): scheduler
+                        // config adjustment at the epoch boundary.
+                        //
+                        // Snapshot the CLOSING epoch's stats from the
+                        // lock-free `EpochStatsCollector` (Step 1/3),
+                        // derive the NEW epoch's
+                        // `RoundSchedulerConfig` via the pure
+                        // `adjust_round_config` function (Part C),
+                        // persist the `RoundConfigAuditEntry` under
+                        // the `RoundConfigAudit` CF so any node can
+                        // audit-replay the decision, and swap the
+                        // shared `Arc<RwLock<RoundSchedulerConfig>>`
+                        // (Step 2) in place. The propose loop
+                        // re-reads the shared config on every
+                        // iteration, so the new interval bounds
+                        // take effect on the next proposal without
+                        // any restart. Finally advance the
+                        // collector's epoch label so subsequent
+                        // `record_*` observations are attributed
+                        // to `new_epoch`.
+                        //
+                        // Order: this block runs FIRST inside the
+                        // `new_epoch > prev_epoch` arm so the
+                        // snapshot captures the stats of the epoch
+                        // that just closed, before any of the
+                        // staking / election logic below mutates
+                        // validator state. Determinism: every
+                        // honest node computes the same
+                        // `EpochStats` over the same committed
+                        // history and the same pure
+                        // `adjust_round_config`, so
+                        // `new_config` is identical across the
+                        // committee. See
+                        // `docs/design/phase3a_epoch_integration.md`
+                        // §1 + §7 step 3-5 for the full contract.
+                        {
+                            use misaka_dag::narwhal_dag::round_config_adjust::{
+                                adjust_round_config, RoundConfigAuditEntry,
+                            };
+                            let prev_config = *shared_scheduler_config.read().await;
+                            let stats = epoch_stats_for_commit.snapshot_and_reset();
+                            let new_config = adjust_round_config(&stats, &prev_config);
+                            let timestamp_ms = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_millis() as u64)
+                                .unwrap_or(0);
+                            let entry = RoundConfigAuditEntry {
+                                applied_from_epoch: new_epoch,
+                                previous_config: prev_config,
+                                new_config,
+                                stats,
+                                timestamp_ms,
+                            };
+                            if let Err(e) = rocks_store.put_round_config_audit(&entry) {
+                                // Non-fatal: audit persistence failure
+                                // does NOT block the commit. The swap
+                                // still happens; the audit log is
+                                // best-effort observability.
+                                tracing::warn!(
+                                    "Phase 3a.5 Step 4: failed to persist \
+                                     round_config_audit for epoch {}: {}",
+                                    new_epoch,
+                                    e,
+                                );
+                            }
+                            *shared_scheduler_config.write().await = new_config;
+                            epoch_stats_for_commit.set_epoch(new_epoch);
+                            misaka_dag::narwhal_dag::slo_metrics::EPOCH_ADJUSTMENTS_TOTAL
+                                .inc();
+                            misaka_dag::narwhal_dag::slo_metrics::ROUND_INTERVAL_MIN_MS
+                                .set(new_config.min_interval_ms as i64);
+                            misaka_dag::narwhal_dag::slo_metrics::ROUND_INTERVAL_MAX_MS
+                                .set(new_config.max_interval_ms as i64);
+                            tracing::info!(
+                                "Phase 3a.5 Step 4: epoch {} boundary — \
+                                 adjust_round_config applied. \
+                                 closing_stats={{rounds={}, non_empty={}, rtt_max_ms={}}}. \
+                                 prev={{min={}, max={}}} → new={{min={}, max={}}}",
+                                new_epoch,
+                                stats.total_rounds,
+                                stats.non_empty_rounds,
+                                stats.max_observed_rtt_ms,
+                                prev_config.min_interval_ms,
+                                prev_config.max_interval_ms,
+                                new_config.min_interval_ms,
+                                new_config.max_interval_ms,
+                            );
+                        }
+
                         let settled = registry_guard.settle_unlocks(new_epoch);
                         if !settled.is_empty() {
                             tracing::info!(
