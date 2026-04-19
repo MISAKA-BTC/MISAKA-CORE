@@ -48,6 +48,11 @@ pub mod round_scheduler;
 // adjustment of the round_scheduler config. See
 // `docs/design/v091_phase3a_cert_v2.md` §5.8.
 pub mod round_config_adjust;
+// Phase 3a.5 Step 1 (2026-04-19): live atomic-counter collector
+// that feeds `round_config_adjust::adjust_round_config` at each
+// epoch boundary. See `docs/design/phase3a_epoch_integration.md`
+// §7 step 3.
+pub mod epoch_stats_collector;
 pub mod round_tracker;
 pub mod runtime;
 pub mod slo_metrics;
