@@ -42,6 +42,7 @@ pub mod db_writer;
 pub mod pruning_store;
 pub mod reachability_store;
 pub mod schema_version;
+pub mod startup_integrity;
 pub mod store_errors;
 pub mod store_registry;
 
@@ -88,6 +89,11 @@ pub use schema_version::{
     read_schema_version as read_storage_schema_version,
     write_schema_version as write_storage_schema_version, SchemaVersionError,
     CURRENT_STORAGE_SCHEMA_VERSION, STORAGE_SCHEMA_VERSION_V088, STORAGE_SCHEMA_VERSION_V090,
+};
+pub use startup_integrity::{
+    read_committed_state, verify_integrity as verify_startup_integrity_kaspa,
+    verify_integrity_arc as verify_startup_integrity_kaspa_arc, write_committed_state,
+    CommittedState, IntegrityError as StartupIntegrityError, IntegrityStatus,
 };
 pub use store_errors::StoreError;
 pub use store_registry::StorePrefixes;
