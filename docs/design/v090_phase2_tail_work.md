@@ -153,7 +153,7 @@ exist in any live layout. Fixed this commit to
 
 ---
 
-## 3. R6-b — PruneMode storage wiring (Option W — rewrite)
+## 3. R6-b — PruneMode storage wiring (Option W — rewrite) — CORE SHIPPED; integration deferred
 
 ### 3.1 Why Option W over Option R
 
@@ -249,6 +249,40 @@ The processor does not itself delete data. It publishes a
 
 R6-b therefore **adds the trigger**; the actual GC sites are
 pre-existing and tested.
+
+### 3.4.1 Core shipped 2026-04-19
+
+Files added:
+
+- `crates/misaka-consensus/src/stores/commit_pruning.rs`
+  (`DbCommitPruningStore`, `CommitPruningInfo`, `CommitPruningError`).
+  Writes under `misaka_storage::StorePrefixes::PruningPoint = 0x30`
+  with sub-bucket keys `committed_pruning_index` and
+  `committed_pruning_timestamp`. 7 unit tests cover fresh / roundtrip
+  / overwrite / partial write / wrong-length corruption / prefix
+  placement.
+- `crates/misaka-consensus/src/pipeline/narwhal_pruning_processor.rs`
+  (`NarwhalPruningProcessor`, `NarwhalCommitMeta`,
+  `NarwhalPruningConfig`, `PruningDecision`, `NarwhalPruningError`).
+  `on_committed_subdag(meta) -> Result<PruningDecision, _>`
+  implements the monotonic integer-compare decision with
+  no-regress guard, zero-depth guard, and early-chain
+  saturating-sub handling. 11 unit tests cover all branches.
+- `crates/misaka-consensus/src/stores/mod.rs` +
+  `crates/misaka-consensus/src/pipeline/mod.rs` register the new
+  modules.
+
+`NarwhalCommitMeta` is a 16-byte adapter struct (index + timestamp_ms)
+so `misaka-consensus` stays off the `misaka-dag` dep graph. The
+caller extracts these two fields from `CommittedSubDag` at the
+integration site.
+
+Deferred to a follow-up commit: the main.rs integration (subscribe
+to `CommitConsumer`, construct the processor when
+`NodeConfig::prune_mode == Pruned{keep_rounds}`, spawn the tick
+loop, feed `NarwhalCommitMeta` in). Splitting keeps the
+store/processor landing reviewable in isolation and lets the
+integration PR carry its own smoke plan.
 
 ### 3.5 Dead-code cleanup (optional follow-up)
 

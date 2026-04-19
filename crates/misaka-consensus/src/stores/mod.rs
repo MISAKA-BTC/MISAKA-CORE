@@ -2,6 +2,7 @@
 
 pub mod acceptance_data;
 pub mod block_transactions;
+pub mod commit_pruning;
 pub mod daa;
 pub mod depth;
 pub mod ghostdag;

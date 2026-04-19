@@ -10,6 +10,10 @@
 
 // Phase 2c-B D2: body_processor deleted (replaced by utxo_executor)
 pub mod header_processor;
+// Phase 2 Path X R6-b Option W (2026-04-19): Narwhal-native replacement
+// for `pruning_processor`. See
+// `docs/design/v090_phase2_tail_work.md` §3 for the reasoning.
+pub mod narwhal_pruning_processor;
 pub mod pruning_processor;
 pub mod virtual_processor;
 
