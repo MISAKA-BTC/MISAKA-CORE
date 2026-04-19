@@ -1,0 +1,46 @@
+MISAKA-CORE
+Copyright 2026 MISAKA Foundation
+
+This product includes software developed by the MISAKA Foundation and
+external contributors.
+
+───────────────────────────────────────────────────────────────────────────
+Third-party components
+───────────────────────────────────────────────────────────────────────────
+
+The following third-party components are used under their own licenses.
+Full license texts are reproduced in `docs/third-party-licenses/` or
+available from each component's source repository.
+
+- Sui / Mysticeti — Apache License 2.0
+  https://github.com/MystenLabs/sui
+  Portions of `crates/misaka-dag/` follow the Narwhal/Bullshark /
+  Mysticeti design from Mysten Labs. Semantics preserved; Rust
+  implementation is independent.
+
+- RocksDB (librocksdb-sys, rocksdb crate) — Apache License 2.0 / GPL-2.0 dual
+  https://github.com/facebook/rocksdb
+
+- Tokio, Hyper, Tower, and related async ecosystem — MIT License
+  https://tokio.rs
+
+- ML-DSA-65 (Dilithium3) reference implementation — CC0
+  FIPS 204 reference implementation by the CRYSTALS team.
+
+- RustCrypto (sha3, blake3, chacha20poly1305, hkdf, argon2) — MIT / Apache-2.0
+  https://github.com/RustCrypto
+
+- BLS12-381 / pqcrypto — Apache License 2.0 / MIT
+  https://github.com/zkcrypto, https://github.com/rustpq/pqcrypto
+
+- Borsh — Apache License 2.0
+  https://github.com/near/borsh-rs
+
+───────────────────────────────────────────────────────────────────────────
+Contributions
+───────────────────────────────────────────────────────────────────────────
+
+Contributions to this repository are licensed under Apache-2.0 per LICENSE §5.
+Submission of a contribution (PR, patch, issue-attached fix) constitutes
+agreement that the contribution is under Apache-2.0 and that the contributor
+has the right to submit it.
