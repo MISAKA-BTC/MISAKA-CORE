@@ -1715,6 +1715,29 @@ async fn start_narwhal_node(
     };
     let store: std::sync::Arc<dyn misaka_dag::narwhal_dag::store::ConsensusStore> =
         rocks_store.clone();
+    // Phase 3a.5 Step 5 (2026-04-19): capture the `emit_cert_v2`
+    // config flag once at startup. The Narwhal commit loop below
+    // reads this boolean to decide whether to write a
+    // `CertificateV2` per commit. Default `false` keeps legacy
+    // configs untouched; operators opt in after verifying
+    // schema v3 migration. See
+    // `docs/design/phase3a_finalizer_integration.md` §5.
+    let emit_cert_v2: bool = loaded_config
+        .as_ref()
+        .map(|c| c.emit_cert_v2)
+        .unwrap_or(false);
+    if emit_cert_v2 {
+        info!(
+            "Phase 3a.5 Step 5: Cert V2 archival emission ENABLED \
+             (emit_cert_v2=true) — each commit writes a CertificateV2 \
+             under narwhal_votes + narwhal_cert_mapping"
+        );
+    } else {
+        info!(
+            "Phase 3a.5 Step 5: Cert V2 archival emission disabled \
+             (emit_cert_v2=false; default)"
+        );
+    }
     info!("startup[5/6]: RocksDB opened OK");
     let committee_pks: Vec<Vec<u8>> = committee
         .authorities
@@ -2170,8 +2193,11 @@ async fn start_narwhal_node(
     // Retain an unused clone so the Arc is kept alive even if
     // the RPC router is not spawned (e.g. observer mode). Without
     // this, dropping the last clone on the propose-loop side would
-    // leave a dangling `Arc::weak_count` but never break.
-    let _node_metrics_keep = node_metrics;
+    // leave a dangling `Arc::weak_count` but never break. Cloned
+    // rather than moved so the commit loop's Phase 3a.5 Step 5
+    // Cert V2 emission path can still reach `node_metrics` via
+    // the original binding.
+    let _node_metrics_keep = node_metrics.clone();
 
     // Start RPC server (minimal — submit_tx + status)
     let rpc_port = cli.rpc_port;
@@ -4751,6 +4777,157 @@ async fn start_narwhal_node(
                             "Failed to persist startup_integrity committed state: {}",
                             e
                         );
+                    }
+                }
+
+                // Phase 3a.5 Step 5 (2026-04-19): Cert V2 archival
+                // emission.
+                //
+                // On every commit (independent of `txs_accepted > 0`
+                // — empty epochs still produce committee
+                // participation records worth archiving),
+                // synthesize a `CertificateV2` from the committed
+                // sub-DAG's author set and persist its
+                // `VoteCommitment` under `NarwhalCf::Votes`, plus a
+                // v1 → v2 digest mapping under
+                // `NarwhalCf::CertMapping`. This surfaces the Cert
+                // V2 store API (A.1-A.5, shipped in Phase 3a) on the
+                // live commit path — Path B of the finalizer
+                // integration plan in
+                // `docs/design/phase3a_finalizer_integration.md` §5.
+                //
+                // `CertificateV2` is ARCHIVAL ONLY. Consensus
+                // acceptance is unchanged. No wire format changes.
+                // Phase 3b's ZK aggregation retrofit consumes this
+                // archival data to build proofs against real epochs.
+                //
+                // Voter list derivation: the commit sub-DAG carries
+                // every block that participated in reaching this
+                // commit (leader + supporters). Their `author`
+                // fields are `AuthorityIndex` values that we map to
+                // their `validator_id` = SHA3-256(pubkey) via the
+                // current committee. Unique authors form the voter
+                // set. This is a reasonable participation proxy for
+                // archival; the strict-supporters-only view
+                // requires DAG-side API extension that's out of
+                // scope for Phase 3a.5.
+                //
+                // Gated by `emit_cert_v2` (default `false`). Writes
+                // are best-effort — a RocksDB put error is logged
+                // but does NOT halt the commit.
+                if emit_cert_v2 {
+                    use misaka_dag::narwhal_finality::cert_v2::{
+                        CertificateV2, VoteCommitment,
+                    };
+                    use sha3::{Digest as _, Sha3_256};
+                    use std::collections::BTreeSet;
+
+                    // Collect unique author indices from the sub-DAG.
+                    let mut author_idxs: BTreeSet<u32> = BTreeSet::new();
+                    for b in &output.blocks {
+                        author_idxs.insert(b.author as u32);
+                    }
+                    // Re-acquire the committee read guard — the
+                    // earlier `committee_guard` for this iteration
+                    // was dropped upstream (see `drop(committee_guard)`
+                    // around the proposed-block handler). Taking a
+                    // fresh read guard here is cheap (read lock,
+                    // contended only against rare committee rotation
+                    // writers) and keeps the guard's scope tight.
+                    let committee_guard_for_cert =
+                        committee_shared.read().await;
+                    let committee_len = committee_guard_for_cert.authorities.len();
+                    let bitmap_bytes = committee_len.div_ceil(8);
+                    let mut voters_bits = vec![0u8; bitmap_bytes];
+                    let mut voter_ids: Vec<[u8; 32]> =
+                        Vec::with_capacity(author_idxs.len());
+                    for idx in author_idxs {
+                        let i = idx as usize;
+                        if i < committee_len {
+                            let pk = &committee_guard_for_cert.authorities[i].public_key;
+                            if !pk.is_empty() {
+                                let vid: [u8; 32] = Sha3_256::digest(pk).into();
+                                voter_ids.push(vid);
+                                // Set bit `i` (little-endian within byte).
+                                voters_bits[i / 8] |= 1u8 << (i % 8);
+                            }
+                        }
+                    }
+                    drop(committee_guard_for_cert);
+
+                    if !voter_ids.is_empty() {
+                        let vote_commitment =
+                            VoteCommitment::with_blake3(&voter_ids, voters_bits);
+                        // v1 digest proxy: a deterministic 32-byte
+                        // identifier for this commit. The Narwhal
+                        // runtime emits `LinearizedOutput` (no
+                        // `digest()` method) rather than
+                        // `CommittedSubDag`, so we reproduce the
+                        // canonical commit digest shape inline:
+                        // blake3 over (domain, commit_index,
+                        // leader.digest, blocks.*.digest,
+                        // timestamp_ms). Every honest node
+                        // linearizes the same sub-DAG identically,
+                        // so this value is committee-wide
+                        // agreement. Used only as the lookup key
+                        // for the v1 → v2 mapping CF — no
+                        // consensus-rule implication.
+                        let cert_v1_digest: [u8; 32] = {
+                            let mut h = blake3::Hasher::new();
+                            h.update(b"MISAKA:commit:v1:");
+                            h.update(&output.commit_index.to_le_bytes());
+                            h.update(&output.leader.digest.0);
+                            for b in &output.blocks {
+                                h.update(&b.digest.0);
+                            }
+                            h.update(&output.timestamp_ms.to_le_bytes());
+                            *h.finalize().as_bytes()
+                        };
+                        let cert_v2 = CertificateV2 {
+                            header: misaka_dag::narwhal_finality::CheckpointDigest(
+                                cert_v1_digest,
+                            ),
+                            vote_refs: vote_commitment,
+                            epoch: current_epoch_for_stake,
+                            aggregation_slot: None,
+                        };
+                        let cert_v2_digest = cert_v2.digest().0;
+                        let voter_count_u64 = voter_ids.len() as u64;
+
+                        if let Err(e) = rocks_store.put_cert_v2_votes(
+                            &cert_v2_digest,
+                            &cert_v2.vote_refs,
+                            &None,
+                        ) {
+                            tracing::warn!(
+                                "Phase 3a.5 Step 5: put_cert_v2_votes failed \
+                                 commit={}: {}",
+                                output.commit_index,
+                                e,
+                            );
+                        } else if let Err(e) = rocks_store
+                            .put_cert_mapping(&cert_v1_digest, &cert_v2_digest)
+                        {
+                            tracing::warn!(
+                                "Phase 3a.5 Step 5: put_cert_mapping failed \
+                                 commit={}: {}",
+                                output.commit_index,
+                                e,
+                            );
+                        } else {
+                            node_metrics
+                                .checkpoint_votes_received
+                                .add(voter_count_u64);
+                            tracing::debug!(
+                                "Phase 3a.5 Step 5: wrote CertificateV2 commit={} \
+                                 voters={} epoch={} v1={} v2={}",
+                                output.commit_index,
+                                voter_count_u64,
+                                current_epoch_for_stake,
+                                hex::encode(&cert_v1_digest[..8]),
+                                hex::encode(&cert_v2_digest[..8]),
+                            );
+                        }
                     }
                 }
 

@@ -180,6 +180,14 @@ impl TryFrom<TomlConfig> for NodeConfig {
                 .retention_rounds
                 .unwrap_or(defaults.dag_retention_rounds),
             prune_mode,
+            // Phase 3a.5 Step 5: TOML-side Cert V2 emission flag is
+            // not yet plumbed through the TOML schema (would require
+            // extending `ConsensusToml` / `NodeToml`). For TOML
+            // configs the flag falls through to the compile-default
+            // `false`. JSON configs carry it explicitly via
+            // `NodeConfig`'s `serde(default)`. See
+            // `docs/design/phase3a_finalizer_integration.md` §5.
+            emit_cert_v2: defaults.emit_cert_v2,
             security_require_encrypted_keystore: t
                 .security
                 .require_encrypted_keystore

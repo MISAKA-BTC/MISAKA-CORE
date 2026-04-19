@@ -59,6 +59,21 @@ pub struct NodeConfig {
     #[serde(default)]
     pub prune_mode: PruneMode,
 
+    // ── Phase 3a.5 Step 5 (2026-04-19): Cert V2 archival emission
+    // on each committed sub-DAG. Opt-in. When `true`, the Narwhal
+    // commit loop writes a `CertificateV2` (vote commitment +
+    // participation bitmap synthesised from the sub-DAG block
+    // authors) under `NarwhalCf::Votes` and records a v1 → v2
+    // digest mapping under `NarwhalCf::CertMapping`, enabling
+    // Phase 3b ZK aggregation retrofit work against real
+    // committed data. Archival only — no consensus rule impact.
+    // Default `false` so legacy configs / nodes on older schemas
+    // stay untouched; flip to `true` after confirming schema v3
+    // migration has landed. See
+    // `docs/design/phase3a_finalizer_integration.md` §5.
+    #[serde(default)]
+    pub emit_cert_v2: bool,
+
     // ── Security ──
     pub security_require_encrypted_keystore: bool,
 }
@@ -89,6 +104,7 @@ impl Default for NodeConfig {
             consensus_zkp_block_time_secs: 30,
             dag_retention_rounds: 10_000,
             prune_mode: PruneMode::default(),
+            emit_cert_v2: false,
             security_require_encrypted_keystore: true,
         }
     }
@@ -266,5 +282,40 @@ mod tests {
         }"#;
         let c: NodeConfig = serde_json::from_str(json).expect("legacy JSON must parse");
         assert_eq!(c.prune_mode, PruneMode::Archival);
+    }
+
+    #[test]
+    fn json_config_without_emit_cert_v2_defaults_to_false() {
+        // Legacy JSON configs written before `emit_cert_v2` was
+        // added must still deserialise — serde(default) on the
+        // bool field fills in `false` (the Phase 3a.5 Step 5
+        // opt-in safety default).
+        let json = r#"{
+            "chain_id": 2,
+            "listen_addr": "0.0.0.0",
+            "listen_port": 16111,
+            "data_dir": "./data",
+            "log_level": "info",
+            "ws_checkpoint": null,
+            "max_block_txs": 1000,
+            "max_mempool_size": 5000,
+            "max_msg_size": 1048576,
+            "min_fee": 1,
+            "peers": null,
+            "rpc_bind": null,
+            "metrics_bind": null,
+            "faucet_enabled": false,
+            "faucet_amount": 1000000000,
+            "faucet_cooldown_secs": 300,
+            "staking_min_stake": 100000000000,
+            "staking_unbonding_period": 43200,
+            "staking_max_validators": 50,
+            "consensus_fast_block_time_secs": 2,
+            "consensus_zkp_block_time_secs": 30,
+            "dag_retention_rounds": 10000,
+            "security_require_encrypted_keystore": true
+        }"#;
+        let c: NodeConfig = serde_json::from_str(json).expect("legacy JSON must parse");
+        assert!(!c.emit_cert_v2);
     }
 }
