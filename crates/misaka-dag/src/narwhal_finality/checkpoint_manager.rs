@@ -17,8 +17,64 @@ use std::sync::Arc;
 use super::{Checkpoint, CheckpointDigest, CheckpointVote, FinalizedCheckpoint};
 use crate::narwhal_types::block::SignatureVerifier;
 
-/// Checkpoint interval — create checkpoint every N commits.
+/// Default checkpoint creation cadence in committed-round units.
+///
+/// Retained as a `pub const` for backward compatibility — it has been
+/// the sole cadence constant in prior releases. New code should
+/// construct a [`CheckpointTrigger`] and pass it via
+/// [`CheckpointManager::with_trigger`].
 pub const CHECKPOINT_INTERVAL: u64 = 100;
+
+/// What counter drives consensus-level checkpoint creation.
+///
+/// Phase 2 Path X R4 promotes the pre-v0.9.0 hardcoded
+/// `CHECKPOINT_INTERVAL = 100` (committed rounds) into a runtime
+/// choice. Current variants:
+///
+/// * [`CheckpointTrigger::CommitInterval`] — checkpoint every N
+///   committed rounds. This is the legacy behaviour and remains the
+///   default.
+/// * [`CheckpointTrigger::RoundInterval`] — same arithmetic as
+///   `CommitInterval`; distinct variant for callers that want to
+///   express "rounds" semantics explicitly.
+/// * [`CheckpointTrigger::EpochBoundary`] — checkpoint at each
+///   epoch boundary. **Not yet wired**: the finality-side manager
+///   does not currently have direct access to epoch transitions.
+///   Until wired, `EpochBoundary` falls back to
+///   `CommitInterval(CHECKPOINT_INTERVAL)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckpointTrigger {
+    /// Checkpoint every N committed rounds.
+    CommitInterval(u64),
+    /// Checkpoint every N rounds (same as `CommitInterval`; distinct
+    /// variant so callers can express intent).
+    RoundInterval(u64),
+    /// Checkpoint at each epoch boundary. Falls back to
+    /// `CommitInterval(CHECKPOINT_INTERVAL)` until the epoch subsystem
+    /// is wired into this manager.
+    EpochBoundary,
+}
+
+impl Default for CheckpointTrigger {
+    /// Preserves the legacy behaviour — checkpoint every
+    /// [`CHECKPOINT_INTERVAL`] committed rounds.
+    fn default() -> Self {
+        Self::CommitInterval(CHECKPOINT_INTERVAL)
+    }
+}
+
+impl CheckpointTrigger {
+    /// How many committed-round ticks must elapse between checkpoints
+    /// under this trigger. `EpochBoundary` degrades to the default
+    /// interval until the epoch subsystem is wired.
+    #[must_use]
+    pub const fn ticks_between(self) -> u64 {
+        match self {
+            Self::CommitInterval(n) | Self::RoundInterval(n) => n,
+            Self::EpochBoundary => CHECKPOINT_INTERVAL,
+        }
+    }
+}
 
 /// Manages checkpoint lifecycle.
 pub struct CheckpointManager {
@@ -34,6 +90,17 @@ pub struct CheckpointManager {
     max_finalized: usize,
     /// Last finalized digest.
     last_digest: CheckpointDigest,
+    /// Committed round at which the last checkpoint was *created*
+    /// (set by [`create_checkpoint`] every time it runs). Used by
+    /// [`should_checkpoint`] to pace new checkpoints. Starts at 0 so
+    /// the first `should_checkpoint(round)` call returns `true` once
+    /// `round >= trigger.ticks_between()` — matching the pre-refactor
+    /// convention where the first checkpoint landed at round
+    /// `CHECKPOINT_INTERVAL`.
+    last_checkpoint_round: u64,
+    /// Trigger that gates [`should_checkpoint`]. Defaults to
+    /// `CommitInterval(CHECKPOINT_INTERVAL)`.
+    trigger: CheckpointTrigger,
     /// Signature verifier.
     verifier: Arc<dyn SignatureVerifier>,
     /// Voter public keys.
@@ -73,11 +140,43 @@ impl CheckpointManager {
             finalized: Vec::new(),
             max_finalized: 1000,
             last_digest: CheckpointDigest([0; 32]),
+            last_checkpoint_round: 0,
+            trigger: CheckpointTrigger::default(),
             verifier,
             voter_pubkeys,
             voter_stakes,
             total_stake,
         }
+    }
+
+    /// Override the trigger that gates [`should_checkpoint`]. Builder style.
+    #[must_use]
+    pub fn with_trigger(mut self, trigger: CheckpointTrigger) -> Self {
+        self.trigger = trigger;
+        self
+    }
+
+    /// The trigger this manager is currently using.
+    #[must_use]
+    pub fn trigger(&self) -> CheckpointTrigger {
+        self.trigger
+    }
+
+    /// Whether a new checkpoint should be created at the given
+    /// `last_committed_round`.
+    ///
+    /// Returns `true` when `last_committed_round` is at least
+    /// [`CheckpointTrigger::ticks_between`] ahead of the round at
+    /// which the previous checkpoint was created. Callers drive this
+    /// from their commit loop and, on `true`, invoke
+    /// [`create_checkpoint`] which advances `last_checkpoint_round`.
+    ///
+    /// This method is side-effect free; sampling it from multiple
+    /// threads is safe as long as the caller holds the manager's
+    /// mutex while deciding whether to call [`create_checkpoint`].
+    #[must_use]
+    pub fn should_checkpoint(&self, last_committed_round: u64) -> bool {
+        last_committed_round >= self.last_checkpoint_round + self.trigger.ticks_between()
     }
 
     /// Create a new checkpoint.
@@ -111,6 +210,12 @@ impl CheckpointManager {
             votes: Vec::new(),
             voters_seen: HashMap::new(),
         });
+
+        // Advance the trigger watermark so that should_checkpoint()
+        // does not re-fire until `trigger.ticks_between()` more rounds
+        // have been committed. Using `max` guards against the (rare)
+        // case where an out-of-order caller passes a stale round.
+        self.last_checkpoint_round = self.last_checkpoint_round.max(last_committed_round);
 
         cp
     }
@@ -355,5 +460,94 @@ mod tests {
             });
         }
         assert_eq!(mgr.next_sequence(), 1); // Now 1
+    }
+
+    // ── Phase 2 Path X R4 tests: trigger + should_checkpoint ──
+
+    #[test]
+    fn default_trigger_is_commit_interval_at_checkpoint_interval() {
+        assert_eq!(
+            CheckpointTrigger::default(),
+            CheckpointTrigger::CommitInterval(CHECKPOINT_INTERVAL)
+        );
+    }
+
+    #[test]
+    fn trigger_ticks_between_matches_variants() {
+        assert_eq!(CheckpointTrigger::CommitInterval(50).ticks_between(), 50);
+        assert_eq!(CheckpointTrigger::RoundInterval(777).ticks_between(), 777);
+        // EpochBoundary falls back to CHECKPOINT_INTERVAL per the
+        // "not yet wired" caveat in the variant docs.
+        assert_eq!(
+            CheckpointTrigger::EpochBoundary.ticks_between(),
+            CHECKPOINT_INTERVAL
+        );
+    }
+
+    #[test]
+    fn default_manager_uses_default_trigger() {
+        let mgr = test_manager(4);
+        assert_eq!(mgr.trigger(), CheckpointTrigger::default());
+    }
+
+    #[test]
+    fn should_checkpoint_fires_after_interval_with_default_trigger() {
+        let mgr = test_manager(4);
+        // last_checkpoint_round starts at 0.
+        assert!(!mgr.should_checkpoint(CHECKPOINT_INTERVAL - 1));
+        assert!(mgr.should_checkpoint(CHECKPOINT_INTERVAL));
+        assert!(mgr.should_checkpoint(CHECKPOINT_INTERVAL + 1));
+    }
+
+    #[test]
+    fn should_checkpoint_respects_custom_commit_interval() {
+        let mgr = test_manager(4).with_trigger(CheckpointTrigger::CommitInterval(50));
+        assert!(!mgr.should_checkpoint(49));
+        assert!(mgr.should_checkpoint(50));
+    }
+
+    #[test]
+    fn commit_interval_and_round_interval_are_arithmetically_equivalent() {
+        let commit_mgr = test_manager(4).with_trigger(CheckpointTrigger::CommitInterval(75));
+        let round_mgr = test_manager(4).with_trigger(CheckpointTrigger::RoundInterval(75));
+        for r in [0u64, 74, 75, 76, 149, 150] {
+            assert_eq!(
+                commit_mgr.should_checkpoint(r),
+                round_mgr.should_checkpoint(r),
+                "CommitInterval and RoundInterval must agree at round={r}"
+            );
+        }
+    }
+
+    #[test]
+    fn create_checkpoint_advances_last_checkpoint_round() {
+        let mut mgr = test_manager(4).with_trigger(CheckpointTrigger::CommitInterval(100));
+        assert!(mgr.should_checkpoint(100));
+
+        mgr.create_checkpoint(100, [1; 32], [2; 32], 500, 1000);
+
+        // After creation, the trigger must not re-fire until 100 more
+        // committed rounds elapse.
+        assert!(!mgr.should_checkpoint(150));
+        assert!(!mgr.should_checkpoint(199));
+        assert!(mgr.should_checkpoint(200));
+    }
+
+    #[test]
+    fn create_checkpoint_with_stale_round_does_not_regress_watermark() {
+        let mut mgr = test_manager(4).with_trigger(CheckpointTrigger::CommitInterval(100));
+        mgr.create_checkpoint(500, [1; 32], [2; 32], 0, 0);
+        // An out-of-order caller passing round=100 should not rewind
+        // the watermark; should_checkpoint must still gate on round 500.
+        mgr.create_checkpoint(100, [3; 32], [4; 32], 0, 0);
+        assert!(!mgr.should_checkpoint(550));
+        assert!(mgr.should_checkpoint(600));
+    }
+
+    #[test]
+    fn epoch_boundary_falls_back_to_checkpoint_interval_until_wired() {
+        let mgr = test_manager(4).with_trigger(CheckpointTrigger::EpochBoundary);
+        assert!(mgr.should_checkpoint(CHECKPOINT_INTERVAL));
+        assert!(!mgr.should_checkpoint(CHECKPOINT_INTERVAL - 1));
     }
 }

@@ -92,7 +92,9 @@ pub use narwhal_ordering::universal_committer::UniversalCommitter;
 // Phase 2c-B D9: BFT types gated behind #[cfg(test)].
 #[cfg(test)]
 pub use narwhal_finality::bft::{BftPhase, BftRound, VoteEquivocation};
-pub use narwhal_finality::checkpoint_manager::{CheckpointManager, CHECKPOINT_INTERVAL};
+pub use narwhal_finality::checkpoint_manager::{
+    CheckpointManager, CheckpointTrigger as NarwhalCheckpointTrigger, CHECKPOINT_INTERVAL,
+};
 pub use narwhal_finality::{
     Checkpoint, CheckpointDigest as NarwhalCheckpointDigest,
     CheckpointVote as NarwhalCheckpointVote, FinalizedCheckpoint,

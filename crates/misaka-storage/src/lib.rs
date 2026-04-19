@@ -51,8 +51,8 @@ pub mod store_registry;
 
 pub use block_store::RocksBlockStore;
 pub use checkpoint::{
-    verify_checkpoint_state, Checkpoint, CheckpointError, CheckpointManager, CHECKPOINT_INTERVAL,
-    MAX_CHECKPOINTS_RETAINED,
+    verify_checkpoint_state, Checkpoint, CheckpointError, CheckpointManager, CheckpointTrigger,
+    CHECKPOINT_INTERVAL, MAX_CHECKPOINTS_RETAINED,
 };
 pub use dag_recovery::{
     bootstrap as dag_bootstrap, compact_wal_after_recovery, discard_incomplete_blocks,

@@ -343,7 +343,7 @@ retain pre-pruning-point data at all".
 No schema change; metrics (`prune_mode_gauge`, `rounds_pruned_total`)
 are additive.
 
-### 11.4 R4 — Checkpoint trigger reconciliation
+### 11.4 R4 — Checkpoint trigger reconciliation (SHIPPED, partial)
 
 **Scope caveat uncovered 2026-04-19**: the codebase carries **two
 distinct** `CheckpointManager` implementations with entirely different
@@ -387,6 +387,37 @@ No schema change. No finality-side change.
 R4 is deferred to its own session — the disambiguation work above is
 more than a single commit, and mixing it with R6/R1 increases
 blast-radius for consensus regressions.
+
+#### 11.4.1 R4 follow-up — 2026-04-19 outcome
+
+Further investigation while scoping R4 code:
+
+- **storage-side manager**: only referenced from its own tests — no
+  production call site currently drives `should_checkpoint()`. The
+  trigger refactor is still valuable (Phase 2 R6 will hook the
+  existing checkpoint + PruneMode loop to it) so we land the API and
+  preserve the legacy default.
+- **narwhal_finality-side manager**: `CHECKPOINT_INTERVAL = 100` was
+  a `pub const` with no call sites in production (unit tests only);
+  `should_checkpoint` did not exist. Added one driven by a
+  `CheckpointTrigger` enum with the same variants the storage-side
+  manager exposes.
+- **`misaka_dag::dag_finality::FinalityManager`** (referenced from
+  `crates/misaka-node/src/main.rs` lines 5525, 5892, 6935, 6941 under
+  `#[cfg(feature = "ghostdag-compat")]`) — the entire
+  `dag_finality` module **does not exist** in `misaka-dag`. Running
+  `cargo check -p misaka-node --features ghostdag-compat` surfaces
+  the missing module alongside ~14 other unresolved imports
+  (`DagNodeState`, `DagStore`, `DagMempool`, `dag_block`,
+  `dag_store`, etc.). The feature is broken legacy dead code. Left
+  untouched in R4 — deleting the references crosses the "user
+  approval for destructive operations" line; flagged as tech debt
+  for a future cleanup pass.
+
+R4 thus shipped the `CheckpointTrigger` API on both live managers
+(storage + narwhal_finality). The `EpochBoundary` variant falls back
+to the legacy interval and is reserved for a γ-5 follow-up. The
+dead `ghostdag-compat`/`dag_finality` path is unchanged.
 
 ### 11.5 R5 — Storage schema version marker (THIS COMMIT)
 
