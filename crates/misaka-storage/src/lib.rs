@@ -23,7 +23,12 @@
 //! ```
 
 // ─── Existing modules (preserved) ───
-pub mod block_store;
+//
+// Phase 2 Path X R1 step 4 (2026-04-19): the legacy `block_store`
+// module (5-CF `RocksBlockStore`) was deleted. Its only live consumer
+// was `recovery.rs::run_startup_check`'s legacy fallback, which R1
+// step 3 made optional and step 4 removes entirely. See
+// `docs/design/v090_phase2_tail_work.md` §2.3 step 4.
 pub mod checkpoint;
 pub mod columns;
 pub mod dag_recovery;
@@ -50,7 +55,6 @@ pub mod store_registry;
 //  Re-exports — Existing
 // ═══════════════════════════════════════════════════════════════
 
-pub use block_store::RocksBlockStore;
 pub use checkpoint::{
     verify_checkpoint_state, Checkpoint, CheckpointError, CheckpointManager, CheckpointTrigger,
     CHECKPOINT_INTERVAL, MAX_CHECKPOINTS_RETAINED,
@@ -62,9 +66,7 @@ pub use dag_recovery::{
 pub use flat_merkle::JellyfishMerkleTree;
 pub use object_store::{ContractEvent, InMemoryObjectStore, ObjectMutation, ObjectStoreAccess};
 pub use quarantine_store::QuarantineStore;
-pub use recovery::{
-    run_startup_check, run_startup_check_kaspa_aware, verify_startup_integrity, StartupCheckResult,
-};
+pub use recovery::{run_startup_check, verify_startup_integrity, StartupCheckResult};
 pub use utxo_set::UtxoSet;
 pub use wal::{
     AcceptPhase, IncompleteBlock, JournalEntry, RecoveryResult, WalError, WriteAheadLog,

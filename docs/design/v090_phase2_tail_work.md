@@ -93,12 +93,26 @@ reports the persisted values.
    in either surfaces via the same `abort_with_reason` exit path as
    the legacy function. `main.rs:1052` now calls the
    `_kaspa_aware` variant.
-4. **Step 4 (deferred)**: after one release of Step 2 live on
-   testnet, remove the legacy fallback and delete `block_store.rs`,
-   its re-export, and `recovery.rs::run_startup_check`.
+4. **Step 4 (shipped this commit)**: remove the legacy fallback.
+   - `crates/misaka-storage/src/block_store.rs` deleted (~650 LoC).
+   - `pub use block_store::RocksBlockStore` removed from `lib.rs`.
+   - `recovery.rs` rewritten: `run_startup_check` now takes
+     `(data_dir, narwhal_consensus_subdir)` and reads only the
+     Kaspa-aligned committed-tip keys. No more `chain.db` /
+     `RocksBlockStore` code path anywhere in the crate.
+   - `StartupCheckResult` and `verify_startup_integrity` retained
+     as the library-level outcome API but now wrap the Kaspa-aligned
+     check only. Four fresh unit tests cover the new surface:
+     nonexistent dir → Fresh, empty DB → Fresh, roundtrip → Ok,
+     partial write → Inconsistent.
+   - `main.rs:1060` updated to the new two-arg signature.
 
-Steps 1–3 are pure additive; step 4 is destructive and needs an
-explicit user sign-off after a live-data window.
+Steps 1–3 were pure additive; step 4 is destructive. User explicitly
+approved the deletion on 2026-04-19. No prior live-data window
+because no v0.9.0-dev build of this branch had been deployed yet —
+current testnet runs v0.8.9, whose `chain.db` was never read by
+production paths on the Narwhal pipeline, so the "legacy data
+window" concern did not materialise.
 
 #### 2.3.1 Write path — what actually happens today
 

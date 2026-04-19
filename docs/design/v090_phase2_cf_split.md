@@ -293,7 +293,7 @@ After user sign-off on §10, Phase 2 本体 is redefined as a set of six
 work items (R1–R6) that fit the current Kaspa-aligned infrastructure
 without introducing a fourth storage schema.
 
-### 11.1 R1 — Retire the legacy `RocksBlockStore` (BLOCKED)
+### 11.1 R1 — Retire the legacy `RocksBlockStore` (SHIPPED)
 
 `block_store.rs` + the 5 legacy CFs (`utxos`, `spent_tags`,
 `spending_keys`, `block_meta`, `state`) are referenced in only three
@@ -345,6 +345,15 @@ prerequisite work is:
 `RocksBlockStore` therefore stays in place at the end of Phase 2
 Path X. The new `CheckpointTrigger` and `PruneMode` APIs land on
 top of — not as replacements for — the legacy block store.
+
+**Status update 2026-04-19**: resolved. `v090_phase2_tail_work.md`
+§2 reframed the blocker: `verify_integrity` moves into a new
+`misaka-storage::startup_integrity` module under
+`StorePrefixes::VirtualState`; the write path co-locates with the
+existing fs-JSON UTXO snapshot sites in `main.rs`; the legacy
+`state` CF was never live on the Narwhal production pipeline.
+R1 steps 1-4 shipped across commits dcdf189, 80cd25b, and the R1
+step 4 deletion commit on `feature/v090-cf-split-pruning`.
 
 ### 11.2 R2 — Narwhal CFs (leave alone; revisit later)
 

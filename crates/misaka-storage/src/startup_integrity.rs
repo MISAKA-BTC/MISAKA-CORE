@@ -5,22 +5,20 @@
 //!
 //! # Why
 //!
-//! Phase 2 Path X R1 retires the legacy `RocksBlockStore`. That store
-//! owned two responsibilities that the new Kaspa-aligned stack does not
-//! provide yet:
+//! Phase 2 Path X R1 retired the legacy `RocksBlockStore`. That
+//! store owned two responsibilities that the new Kaspa-aligned stack
+//! did not provide:
 //!
 //! 1. Persist committed `(height, state_root)` so a restarting node
 //!    does not have to re-derive the chain tip from the DAG.
 //! 2. On open, cross-check that the persisted tip is internally
-//!    consistent (height matches `block_meta` at that height, state
-//!    root matches the block-meta recording).
+//!    consistent.
 //!
-//! This module covers (1) and a caller-driven variant of (2). It is
-//! additive — nothing calls it yet. R1 step 2 (in a follow-up PR)
-//! wires the Kaspa-aligned write path to call
-//! [`write_committed_state`] on every committed block. R1 step 3
-//! re-points `recovery.rs` at [`verify_integrity`] with the legacy
-//! `state` CF as a fallback.
+//! This module covers both (1) and a caller-driven variant of (2).
+//! The write path is wired from the Narwhal commit loop (R1 step 2,
+//! in `misaka-node/src/main.rs`); the read path is called from
+//! `recovery::run_startup_check` (R1 steps 3-4). The legacy block
+//! store was deleted in R1 step 4.
 //!
 //! # Namespace
 //!

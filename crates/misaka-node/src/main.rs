@@ -1048,16 +1048,16 @@ async fn main() -> anyhow::Result<()> {
 
     // ── Crash Recovery Check ──
     //
-    // Phase 2 Path X R1 step 3: prefer Kaspa-aligned committed-tip
-    // keys in the Narwhal consensus RocksDB (populated by R1 step 2
-    // above on every committed block). Falls back to the legacy
-    // `chain.db` state CF when the new keys are absent (DBs from
-    // builds before R1 step 2). The subdir `"narwhal_consensus"`
-    // matches the layout of `RocksDbConsensusStore::open` below.
+    // Phase 2 Path X R1 step 4: legacy-fallback removed. `run_startup_check`
+    // now reads only Kaspa-aligned committed-tip keys under
+    // `StorePrefixes::VirtualState` in the Narwhal consensus RocksDB
+    // (populated by R1 step 2 on every committed block). An old DB
+    // without those keys reports Fresh and the node starts from
+    // genesis. Corruption still aborts with `process::exit(1)`.
     {
         let data_path = std::path::Path::new(&cli.data_dir);
         let (recovered_height, recovered_root) =
-            misaka_storage::run_startup_check_kaspa_aware(data_path, "narwhal_consensus");
+            misaka_storage::run_startup_check(data_path, "narwhal_consensus");
         if recovered_height > 0 {
             info!(
                 "Recovered from persistent state: height={}, root={}",
