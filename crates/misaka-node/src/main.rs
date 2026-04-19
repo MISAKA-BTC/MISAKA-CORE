@@ -2071,6 +2071,21 @@ async fn start_narwhal_node(
     // gate, the propose loop would still run and emit blocks signed by
     // an unknown identity, which committee verifiers would reject and
     // log as `unknown peer pubkey` noise.
+    //
+    // Phase 3a Part B integration (2026-04-19): opt into the adaptive
+    // round-rate scheduler by passing the shared mempool + default
+    // `RoundSchedulerConfig` + `NodeMetrics` into `ProposeLoopConfig`.
+    // With both `scheduler` and `mempool` Some, the loop reads
+    // `mempool.len() / mempool.max_size()` each iteration and sleeps
+    // for the adaptive interval (100 ms..2000 ms) instead of the
+    // fixed `status_poll_ms`. Passing `None` for either field
+    // preserves legacy cadence.
+    //
+    // `NodeMetrics` was previously defined but never instantiated in
+    // production; this commit is its first production call site.
+    // Currently published only through the struct (no `/metrics`
+    // axum route yet); exposing it is a separate follow-up.
+    let node_metrics = crate::metrics::NodeMetrics::new();
     let propose_loop_handle = if is_observer {
         info!("Observer mode: skipping propose loop (read-only node)");
         None
@@ -2081,12 +2096,21 @@ async fn start_narwhal_node(
             crate::narwhal_consensus::ProposeLoopConfig {
                 max_block_txs: cli.dag_max_txs,
                 backpressure: backpressure.clone(),
+                scheduler: Some(
+                    misaka_dag::narwhal_dag::round_scheduler::RoundSchedulerConfig::default(),
+                ),
+                mempool: Some(narwhal_mempool.mempool.clone()),
+                metrics: Some(node_metrics.clone()),
                 ..crate::narwhal_consensus::ProposeLoopConfig::default()
             },
             propose_state_root,
             Some(safe_mode.clone()),
         ))
     };
+    // Keep the metrics handle alive for the lifetime of the node;
+    // the propose loop holds an Arc clone but other future
+    // subsystems (RPC / axum /metrics route) will want one too.
+    let _node_metrics_keep = node_metrics;
 
     // Start RPC server (minimal — submit_tx + status)
     let rpc_port = cli.rpc_port;

@@ -128,7 +128,7 @@ Cert V2 types + design doc (this file). See commit for details.
 Totals: `cargo test -p misaka-dag --lib` 462/462 (455 prior + 7).
 `cargo check --workspace --lib --bins` clean.
 
-### 5.3 Part B — adaptive round-rate scheduler (this commit, 2026-04-19)
+### 5.3 Part B — adaptive round-rate scheduler (342548e, 2026-04-19)
 
 New module `crates/misaka-dag/src/narwhal_dag/round_scheduler.rs`:
 
@@ -179,6 +179,90 @@ Not in this commit:
 
 Regression: `cargo test -p misaka-dag --lib` 481/481 (462 prior + 19).
 `cargo check --workspace --lib --bins` clean.
+
+### 5.4 Part B integration — proposer loop + metrics (this commit, 2026-04-19)
+
+Wires the Part B scheduler into `start_narwhal_node`'s proposer
+loop. Additive and opt-in: if either the scheduler config or the
+mempool reference is `None`, the loop falls back to the pre-existing
+fixed-cadence `status_tick`.
+
+#### Changes
+
+**`crates/misaka-node/src/metrics.rs`** — 4 new fields on
+`NodeMetrics`:
+- `round_interval_ms: Gauge` — most-recent adaptive interval picked.
+- `mempool_utilisation_scaled: Gauge` — `utilisation × 1000` so the
+  `[0, 1]` ratio fits in `u64`.
+- `round_wake_timer_total: Counter` — wakes via the adaptive sleep.
+- `round_wake_mempool_total: Counter` — wakes via mempool tx
+  delivery.
+
+All four are exposed by `render_prometheus()` with names
+`misaka_round_interval_ms`, `misaka_mempool_utilisation_scaled`,
+`misaka_round_wake_timer_total`, `misaka_round_wake_mempool_total`.
+
+**`crates/misaka-node/src/narwhal_consensus.rs`** —
+`ProposeLoopConfig` gains three `Option` fields: `scheduler`,
+`mempool`, `metrics`. The spawn_propose_loop body:
+
+- Computes `utilisation = mempool.len() / mempool.max_size()` each
+  iteration when both `scheduler` and `mempool` are `Some`.
+- Clamps to `[0, 1]`; zero-max degrades to `0.0` without panic.
+- Calls `next_round_interval_ms` to derive the sleep.
+- Publishes `round_interval_ms` + `mempool_utilisation_scaled`
+  via the `metrics` handle (when present) before the `select!`.
+- Uses `tokio::select!` arm guards: the adaptive sleep arm fires
+  only when `adaptive.is_some()`; the legacy `status_tick` arm
+  fires only when it's `None`. Cannot double-fire.
+- Increments `round_wake_mempool_total` or `round_wake_timer_total`
+  on whichever arm won.
+
+Mempool lock on every iteration is held briefly (two field
+accesses: `len()` + `max_size()`) — roughly the same cost as a
+single `tokio::time::interval` tick. No contention concern in the
+steady-state proposer hot path.
+
+**`crates/misaka-node/src/main.rs`** —
+`start_narwhal_node` now:
+- Instantiates `NodeMetrics::new()` — previously a dead-code
+  struct with no production call site.
+- Passes `scheduler: Some(RoundSchedulerConfig::default())`,
+  `mempool: Some(narwhal_mempool.mempool.clone())`, and
+  `metrics: Some(node_metrics.clone())` into `ProposeLoopConfig`.
+- Keeps a `_node_metrics_keep` binding alive for the rest of the
+  node's lifetime so future subsystems (RPC `/metrics` endpoint,
+  dashboard poll) can adopt the Arc.
+
+No `/metrics` HTTP endpoint is wired in this commit; that's a
+separate follow-up. The metrics are still accumulated; exposure is
+the only missing piece.
+
+#### Observable defaults
+
+Freshly booted node with empty mempool:
+- `round_interval_ms = 2000` (adaptive max, since `utilisation = 0`).
+- `mempool_utilisation_scaled = 0`.
+- `round_wake_timer_total` increments every ~2 s; no mempool wakes
+  until txs arrive.
+
+Saturated mempool:
+- `round_interval_ms = 100` (adaptive min).
+- `mempool_utilisation_scaled = 1000`.
+- `round_wake_mempool_total` dominates.
+
+#### Tests / regression
+
+- `cargo test -p misaka-dag --lib`: 481/481 pass (Part B unit
+  tests unchanged).
+- `cargo test -p misaka-node --bin misaka-node`: 194/194 pass.
+- `cargo check --workspace --lib --bins`: clean.
+
+No new unit tests added in this integration commit — the behaviour
+is emergent from the pure logic (already tested in §5.3) plus the
+select! shape (covered by the `wait_until_next_round` async tests
+in §5.3). A 24 h smoke is still required to verify the adaptive
+cadence holds across real mempool fluctuations.
 
 ## 6. Out of scope for this session
 
