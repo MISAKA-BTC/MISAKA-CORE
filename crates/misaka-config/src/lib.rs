@@ -13,11 +13,16 @@
 
 pub mod error;
 pub mod node_config;
+pub mod prune_mode;
 pub mod toml_config;
 pub mod validation;
 
 pub use error::ConfigError;
 pub use node_config::NodeConfig;
+pub use prune_mode::{
+    from_toml_fields as prune_mode_from_toml_fields, PruneMode, DEFAULT_KEEP_ROUNDS,
+    MIN_KEEP_ROUNDS,
+};
 pub use toml_config::TomlConfig;
 pub use validation::TestnetConfig;
 
@@ -41,7 +46,7 @@ pub fn load_config(path: &std::path::Path) -> Result<NodeConfig, ConfigError> {
     let config: NodeConfig = if is_toml {
         let toml_cfg: TomlConfig = toml::from_str(&contents)
             .map_err(|e| ConfigError::ParseError(format!("TOML: {}", e)))?;
-        NodeConfig::from(toml_cfg)
+        NodeConfig::try_from(toml_cfg)?
     } else {
         serde_json::from_str(&contents)
             .map_err(|e| ConfigError::ParseError(format!("JSON: {}", e)))?

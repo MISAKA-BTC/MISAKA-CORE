@@ -6,6 +6,7 @@
 //! Extracted from `misaka-node/src/config.rs`.
 
 use super::error::ConfigError;
+use super::prune_mode::PruneMode;
 use serde::{Deserialize, Serialize};
 
 /// Full node configuration.
@@ -51,6 +52,12 @@ pub struct NodeConfig {
 
     // ── DAG pruning ──
     pub dag_retention_rounds: u64,
+    /// Runtime storage retention mode. Defaults to
+    /// [`PruneMode::Archival`] on new configs; existing JSON configs
+    /// without this field deserialise to the default via
+    /// [`serde(default)`]. See [`PruneMode`] for TOML/JSON shape.
+    #[serde(default)]
+    pub prune_mode: PruneMode,
 
     // ── Security ──
     pub security_require_encrypted_keystore: bool,
@@ -81,6 +88,7 @@ impl Default for NodeConfig {
             consensus_fast_block_time_secs: 2,
             consensus_zkp_block_time_secs: 30,
             dag_retention_rounds: 10_000,
+            prune_mode: PruneMode::default(),
             security_require_encrypted_keystore: true,
         }
     }
@@ -132,6 +140,10 @@ impl NodeConfig {
         }
         if self.max_block_txs == 0 {
             errors.push(ConfigError::Custom("max_block_txs must be > 0".into()));
+        }
+
+        if let Err(e) = self.prune_mode.validate() {
+            errors.push(e);
         }
 
         if errors.is_empty() {
@@ -198,5 +210,61 @@ mod tests {
         let mut c = NodeConfig::default();
         c.listen_port = 0;
         assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn default_prune_mode_is_archival() {
+        let c = NodeConfig::default();
+        assert_eq!(c.prune_mode, PruneMode::Archival);
+        assert!(c.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_pruned_below_floor() {
+        let mut c = NodeConfig::default();
+        c.prune_mode = PruneMode::Pruned { keep_rounds: 1 };
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn validate_accepts_pruned_at_floor_or_above() {
+        let mut c = NodeConfig::default();
+        c.prune_mode = PruneMode::Pruned {
+            keep_rounds: super::super::prune_mode::MIN_KEEP_ROUNDS,
+        };
+        assert!(c.validate().is_ok());
+    }
+
+    #[test]
+    fn json_config_without_prune_mode_field_defaults_to_archival() {
+        // Legacy JSON configs (written before PruneMode was added) must
+        // deserialise — serde(default) on the field fills in Archival.
+        let json = r#"{
+            "chain_id": 2,
+            "listen_addr": "0.0.0.0",
+            "listen_port": 16111,
+            "data_dir": "./data",
+            "log_level": "info",
+            "ws_checkpoint": null,
+            "max_block_txs": 1000,
+            "max_mempool_size": 5000,
+            "max_msg_size": 1048576,
+            "min_fee": 1,
+            "peers": null,
+            "rpc_bind": null,
+            "metrics_bind": null,
+            "faucet_enabled": false,
+            "faucet_amount": 1000000000,
+            "faucet_cooldown_secs": 300,
+            "staking_min_stake": 100000000000,
+            "staking_unbonding_period": 43200,
+            "staking_max_validators": 50,
+            "consensus_fast_block_time_secs": 2,
+            "consensus_zkp_block_time_secs": 30,
+            "dag_retention_rounds": 10000,
+            "security_require_encrypted_keystore": true
+        }"#;
+        let c: NodeConfig = serde_json::from_str(json).expect("legacy JSON must parse");
+        assert_eq!(c.prune_mode, PruneMode::Archival);
     }
 }
