@@ -387,6 +387,18 @@ pub struct ProposeLoopConfig {
     /// rest of the metrics struct is still updated by other call
     /// sites).
     pub metrics: Option<std::sync::Arc<crate::metrics::NodeMetrics>>,
+    /// Phase 3a.5 Step 3 (2026-04-19) — shared
+    /// [`EpochStatsCollector`] updated by this propose loop on
+    /// every proposal attempt. `None` keeps the collector wire
+    /// dormant (legacy behaviour). A separate commit-loop call
+    /// site in `main.rs` feeds `record_non_empty_round()` when
+    /// a commit accepts transactions. Step 4's epoch handler
+    /// reads the snapshot.
+    ///
+    /// [`EpochStatsCollector`]: misaka_dag::narwhal_dag::epoch_stats_collector::EpochStatsCollector
+    pub stats_collector: Option<
+        std::sync::Arc<misaka_dag::narwhal_dag::epoch_stats_collector::EpochStatsCollector>,
+    >,
 }
 
 #[cfg(feature = "dag")]
@@ -399,6 +411,7 @@ impl Default for ProposeLoopConfig {
             scheduler: None,
             mempool: None,
             metrics: None,
+            stats_collector: None,
         }
     }
 }
@@ -584,6 +597,16 @@ pub fn spawn_propose_loop(
                     },
                 )
                 .collect();
+
+            // Phase 3a.5 Step 3 — record this proposal attempt in the
+            // `EpochStatsCollector` for later epoch-boundary
+            // adjustment (Step 4). Lock-free atomic increment;
+            // no hot-path cost. Placed here (just before sending
+            // the proposal) so "one round" corresponds to "one
+            // proposal that actually reached the runtime".
+            if let Some(stats) = config.stats_collector.as_ref() {
+                stats.record_round();
+            }
 
             // Send proposal to consensus runtime
             let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();

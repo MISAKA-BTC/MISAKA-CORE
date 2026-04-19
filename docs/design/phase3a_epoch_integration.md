@@ -263,6 +263,25 @@ For the preferred shape when 3a.5 lands:
    signal (TBD — probably the `msg_tx.try_send` →
    `reply_rx.await` round-trip around `main.rs:4440`).
 
+   **Step 3 status (2026-04-19)**: `record_round()` and
+   `record_non_empty_round()` are wired in the code on the
+   `feature/v091-cert-v2-foundation` branch (alongside
+   Steps 1-2). The RTT call site is intentionally
+   deferred — the current
+   `msg_tx.try_send` → `reply_rx.await` pair does *not*
+   measure a quorum-reply RTT (only an intra-process actor
+   hop), so feeding it into `max_observed_rtt_ms` would
+   produce a mis-leading sub-millisecond value that
+   under-reports `p99 RTT` in `adjust_round_config`. A proper
+   RTT sample requires plumbing through the broadcaster /
+   synchronizer quorum-reply path (Part B Step 3 work) and is
+   tracked as part of Phase 3a.5 Step 4 / 3b. Until then the
+   collector's `max_observed_rtt_ms` stays at its initial
+   `0` and `adjust_round_config` treats it as "no adjustment
+   signal from RTT" — which is exactly the current (pre-Step
+   3) behaviour, so no regression is introduced by the
+   deferral.
+
 6. **At epoch boundary** (after `apply_epoch_change()`
    succeeds): snapshot, derive, persist, swap. Exactly the
    pseudocode from §1.

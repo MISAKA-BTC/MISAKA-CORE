@@ -2099,6 +2099,35 @@ async fn start_narwhal_node(
     // Retain a clone for the future epoch-transition handler; for
     // now it only feeds the propose loop.
     let _shared_scheduler_config_for_epoch = shared_scheduler_config.clone();
+
+    // Phase 3a.5 Step 3 — the per-epoch stats collector feeds the
+    // Step 4 `adjust_round_config` derivation. Lock-free atomic
+    // counters; `record_round()` fires in the propose loop
+    // before each proposal is sent to the runtime, and
+    // `record_non_empty_round()` fires in the commit loop below
+    // when a commit accepts transactions. The RTT recorder is
+    // deferred — no network-layer RTT measurement point surfaces
+    // in the current narwhal runtime; see
+    // `docs/design/phase3a_epoch_integration.md` §7 step 5.
+    //
+    // Epoch label is 0 at startup; Step 4's epoch handler will
+    // `set_epoch()` it after each transition. Leader timeout is
+    // passed from the DAG constants module.
+    // Seed `leader_timeout_ms` with the `LeaderTimeoutConfig::default`
+    // base (500ms); the future Step 4 epoch handler will update this
+    // via `set_leader_timeout_ms` to reflect any adaptive changes
+    // applied by `round_config_adjust`.
+    let epoch_stats: std::sync::Arc<
+        misaka_dag::narwhal_dag::epoch_stats_collector::EpochStatsCollector,
+    > = std::sync::Arc::new(
+        misaka_dag::narwhal_dag::epoch_stats_collector::EpochStatsCollector::new(
+            0,
+            misaka_dag::narwhal_dag::leader_timeout::LeaderTimeoutConfig::default().base_ms,
+        ),
+    );
+    let epoch_stats_for_commit = epoch_stats.clone();
+    // Keep a clone alive for the future Step 4 epoch handler.
+    let _epoch_stats_for_epoch = epoch_stats.clone();
     let propose_loop_handle = if is_observer {
         info!("Observer mode: skipping propose loop (read-only node)");
         None
@@ -2112,6 +2141,14 @@ async fn start_narwhal_node(
                 scheduler: Some(shared_scheduler_config.clone()),
                 mempool: Some(narwhal_mempool.mempool.clone()),
                 metrics: Some(node_metrics.clone()),
+                // Phase 3a.5 Step 3 (2026-04-19): wire the lock-free
+                // atomic-counter bundle into the propose loop so each
+                // iteration records a `round_attempts` observation.
+                // `record_non_empty_round()` is invoked separately
+                // inside the commit loop below (search for
+                // `epoch_stats_for_commit`). See
+                // `docs/design/phase3a_epoch_integration.md` §7 step 3.
+                stats_collector: Some(epoch_stats.clone()),
                 ..crate::narwhal_consensus::ProposeLoopConfig::default()
             },
             propose_state_root,
@@ -4578,6 +4615,17 @@ async fn start_narwhal_node(
                 // synchronously here (blocking) because spawn_blocking + clone
                 // doubles memory usage and triggers OOM on small servers.
                 if exec_result.txs_accepted > 0 {
+                    // Phase 3a.5 Step 3 (2026-04-19): record a
+                    // non-empty round observation into the lock-free
+                    // atomic-counter bundle. The collector is
+                    // snapshot-and-reset at each epoch boundary by
+                    // the future Step 4 handler to drive
+                    // `round_config_adjust`. Pure atomic increment —
+                    // no behaviour change on the commit path. See
+                    // `docs/design/phase3a_epoch_integration.md` §7
+                    // step 3.
+                    epoch_stats_for_commit.record_non_empty_round();
+
                     if let Err(e) = tx_executor.utxo_set().save_to_file(&utxo_snapshot_path) {
                         tracing::warn!("Failed to save UTXO snapshot: {}", e);
                     } else {
