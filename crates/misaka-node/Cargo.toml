@@ -7,21 +7,15 @@ license.workspace = true
 
 [features]
 # ═══ DAG Consensus — Production Default ═══
-# GhostDAG BlockDAG with multi-parent blocks, UTXO/DAG virtual state,
-# PQ-encrypted P2P transport, economic finality checkpoints.
-# This is the mainnet consensus layer.
+# Narwhal/Bullshark DAG with PQ-encrypted P2P transport and
+# economic finality checkpoints. This is the mainnet consensus
+# layer. (GhostDAG was removed in v6; the `ghostdag-compat`
+# feature was retired by v090 dead-code cleanup Plan B.)
 default = ["dag"]
 dag = ["misaka-dag", "misaka-dag/rocksdb", "misaka-mempool/dag"]
-# GhostDAG compatibility layer (legacy — being phased out)
-# Legacy feature alias retained for older builds that still reference it.
+# Legacy feature alias retained for older build scripts that still
+# reference it. Expands to the same as `dag`.
 experimental_dag = ["dag"]
-# Placeholder for the historical `ghostdag-compat` cfg guarded by
-# `#[cfg(feature = "ghostdag-compat")]` in main.rs. The feature
-# was removed in Phase 2 but the cfg checks remain (dead code
-# paths). Declaring it here suppresses `unexpected_cfgs` under
-# `-D warnings`. Safe to delete when all `cfg(feature =
-# "ghostdag-compat")` blocks in main.rs are pruned.
-ghostdag-compat = []
 # REMOVED: Q-DAG-CT — deprecated in v1.0.
 # ═══ Dev-only features (NEVER enable in production) ═══
 swagger-cdn = []
@@ -92,6 +86,9 @@ base64 = "0.22"
 sha2 = "0.10"
 blake3 = { workspace = true }
 bs58 = "0.5"
+# Phase 2 Path X R6-a: direct rocksdb access for the offline `--migrate-to`
+# subcommand. Kept in sync with misaka-storage's own rocksdb entry.
+rocksdb = { version = "0.22", default-features = false, features = ["snappy"] }
 
 [lints]
 workspace = true

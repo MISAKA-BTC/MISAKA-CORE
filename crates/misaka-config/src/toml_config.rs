@@ -82,6 +82,14 @@ pub struct ConsensusSection {
     pub fast_block_time_secs: Option<u64>,
     pub zkp_block_time_secs: Option<u64>,
     pub retention_rounds: Option<u64>,
+    /// Prune mode string: `"archival"` or `"pruned"`. See
+    /// [`crate::prune_mode::PruneMode`]. Absent = archival.
+    pub prune_mode: Option<String>,
+    /// Rounds to retain behind the tip when `prune_mode = "pruned"`.
+    /// Falls back to [`crate::prune_mode::DEFAULT_KEEP_ROUNDS`] when
+    /// `prune_mode = "pruned"` and this field is absent. Ignored when
+    /// `prune_mode = "archival"`.
+    pub prune_keep_rounds: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -114,8 +122,10 @@ pub struct SecuritySection {
     pub require_encrypted_keystore: Option<bool>,
 }
 
-impl From<TomlConfig> for NodeConfig {
-    fn from(t: TomlConfig) -> Self {
+impl TryFrom<TomlConfig> for NodeConfig {
+    type Error = crate::error::ConfigError;
+
+    fn try_from(t: TomlConfig) -> Result<Self, Self::Error> {
         let defaults = NodeConfig::default();
 
         let rpc_bind = t
@@ -123,7 +133,12 @@ impl From<TomlConfig> for NodeConfig {
             .bind
             .or_else(|| t.rpc.port.map(|p| format!("0.0.0.0:{}", p)));
 
-        NodeConfig {
+        let prune_mode = crate::prune_mode::from_toml_fields(
+            t.consensus.prune_mode.as_deref(),
+            t.consensus.prune_keep_rounds,
+        )?;
+
+        Ok(NodeConfig {
             chain_id: t.chain.chain_id.unwrap_or(defaults.chain_id),
             listen_addr: t.p2p.listen_addr.unwrap_or(defaults.listen_addr),
             listen_port: t.p2p.port.unwrap_or(defaults.listen_port),
@@ -164,11 +179,12 @@ impl From<TomlConfig> for NodeConfig {
                 .consensus
                 .retention_rounds
                 .unwrap_or(defaults.dag_retention_rounds),
+            prune_mode,
             security_require_encrypted_keystore: t
                 .security
                 .require_encrypted_keystore
                 .unwrap_or(defaults.security_require_encrypted_keystore),
-        }
+        })
     }
 }
 
@@ -214,7 +230,7 @@ require_encrypted_keystore = false
 checkpoint = "42:abcdef1234567890abcdef1234567890"
 "#;
         let toml_cfg: TomlConfig = toml::from_str(toml_str).unwrap();
-        let config = NodeConfig::from(toml_cfg);
+        let config = NodeConfig::try_from(toml_cfg).unwrap();
         assert_eq!(config.chain_id, 1);
         assert_eq!(config.data_dir, "./misaka-data");
         assert_eq!(config.listen_port, 6690);
@@ -232,7 +248,7 @@ checkpoint = "42:abcdef1234567890abcdef1234567890"
     #[test]
     fn test_empty_toml_uses_defaults() {
         let toml_cfg: TomlConfig = toml::from_str("").unwrap();
-        let config = NodeConfig::from(toml_cfg);
+        let config = NodeConfig::try_from(toml_cfg).unwrap();
         let defaults = NodeConfig::default();
         assert_eq!(config.chain_id, defaults.chain_id);
         assert_eq!(config.listen_port, defaults.listen_port);
@@ -245,11 +261,63 @@ checkpoint = "42:abcdef1234567890abcdef1234567890"
 chain_id = 1
 "#;
         let toml_cfg: TomlConfig = toml::from_str(toml_str).unwrap();
-        let config = NodeConfig::from(toml_cfg);
+        let config = NodeConfig::try_from(toml_cfg).unwrap();
         assert_eq!(config.chain_id, 1);
         // Everything else should be defaults
         let defaults = NodeConfig::default();
         assert_eq!(config.listen_port, defaults.listen_port);
         assert_eq!(config.data_dir, defaults.data_dir);
+    }
+
+    #[test]
+    fn toml_prune_mode_archival() {
+        let toml_str = r#"
+[consensus]
+prune_mode = "archival"
+"#;
+        let toml_cfg: TomlConfig = toml::from_str(toml_str).unwrap();
+        let config = NodeConfig::try_from(toml_cfg).unwrap();
+        assert_eq!(config.prune_mode, crate::prune_mode::PruneMode::Archival);
+    }
+
+    #[test]
+    fn toml_prune_mode_pruned_with_rounds() {
+        let toml_str = r#"
+[consensus]
+prune_mode = "pruned"
+prune_keep_rounds = 15000
+"#;
+        let toml_cfg: TomlConfig = toml::from_str(toml_str).unwrap();
+        let config = NodeConfig::try_from(toml_cfg).unwrap();
+        assert_eq!(
+            config.prune_mode,
+            crate::prune_mode::PruneMode::Pruned { keep_rounds: 15000 }
+        );
+    }
+
+    #[test]
+    fn toml_prune_mode_invalid_is_error() {
+        let toml_str = r#"
+[consensus]
+prune_mode = "bogus"
+"#;
+        let toml_cfg: TomlConfig = toml::from_str(toml_str).unwrap();
+        let err = NodeConfig::try_from(toml_cfg).expect_err("unknown prune_mode rejected");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("bogus"),
+            "error should name the bad value: {msg}"
+        );
+    }
+
+    #[test]
+    fn toml_prune_mode_absent_defaults_to_archival() {
+        let toml_str = r#"
+[consensus]
+fast_block_time_secs = 2
+"#;
+        let toml_cfg: TomlConfig = toml::from_str(toml_str).unwrap();
+        let config = NodeConfig::try_from(toml_cfg).unwrap();
+        assert_eq!(config.prune_mode, crate::prune_mode::PruneMode::Archival);
     }
 }

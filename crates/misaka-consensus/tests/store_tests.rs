@@ -4,7 +4,6 @@ use misaka_consensus::stores::daa::*;
 use misaka_consensus::stores::depth::*;
 use misaka_consensus::stores::ghostdag::*;
 use misaka_consensus::stores::headers::*;
-use misaka_consensus::stores::pruning::*;
 use misaka_consensus::stores::reachability::*;
 use misaka_consensus::stores::relations::*;
 use misaka_consensus::stores::selected_chain::*;
@@ -310,22 +309,10 @@ fn test_depth_store() {
 }
 
 // ── Pruning Store ─────────────────────────────────────────────
-
-#[test]
-fn test_pruning_store() {
-    let (_d, db) = temp_db();
-    let mut store = DbPruningStore::new(db);
-    store
-        .set(&PruningPointInfo {
-            pruning_point: test_hash(5),
-            candidate: test_hash(10),
-            index: 0,
-        })
-        .expect("set");
-    let info = store.get().expect("get");
-    assert_eq!(info.pruning_point, test_hash(5));
-    assert_eq!(info.index, 0);
-}
+//
+// `test_pruning_store` deleted alongside `stores/pruning.rs` in the
+// Plan A dead-code cleanup. The replacement store
+// (`stores/commit_pruning.rs`) carries its own 7 unit tests.
 
 // ── Virtual State Store ───────────────────────────────────────
 

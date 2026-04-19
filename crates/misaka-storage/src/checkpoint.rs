@@ -41,11 +41,73 @@ use tracing::{debug, info};
 //  Constants
 // ═══════════════════════════════════════════════════════════════
 
-/// Create a checkpoint every N blocks.
+/// Default checkpoint creation cadence in `blue_score` units.
+///
+/// Retained as a `pub const` for backward compatibility — external
+/// callers of previous releases read this constant directly. New code
+/// should construct a [`CheckpointTrigger`] and pass it via
+/// [`CheckpointManager::with_trigger`].
 pub const CHECKPOINT_INTERVAL: u64 = 500;
 
-/// Keep at most this many checkpoint files (oldest are pruned).
+/// Default retention count for checkpoint files on disk.
+///
+/// Retained as a `pub const` for backward compatibility. New code
+/// should set the retention limit via [`CheckpointManager::with_retained`].
 pub const MAX_CHECKPOINTS_RETAINED: usize = 5;
+
+/// What counter drives checkpoint creation.
+///
+/// Phase 2 Path X R4 promotes the pre-v0.9.0 hardcoded
+/// `CHECKPOINT_INTERVAL = 500` (blue-score) into a runtime choice.
+/// Current variants:
+///
+/// * [`CheckpointTrigger::BlockInterval`] — checkpoint every N
+///   `blue_score` ticks. This is the legacy behaviour and remains
+///   the default.
+/// * [`CheckpointTrigger::RoundInterval`] — checkpoint every N
+///   `blue_score` ticks, interpreted as Narwhal-style rounds. Same
+///   arithmetic as `BlockInterval`; the variant is kept distinct so
+///   callers can express the *intent* (DAG rounds vs block heights)
+///   without the receiving manager caring.
+/// * [`CheckpointTrigger::EpochBoundary`] — checkpoint when
+///   `blue_score` crosses an epoch boundary. **Not yet wired**: the
+///   storage-side manager has no direct view of epochs; Phase 2 Path X
+///   defers this to R4-follow-up together with the `γ-5` epoch
+///   subsystem integration. Until wired, `EpochBoundary` falls back
+///   to `BlockInterval(CHECKPOINT_INTERVAL)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckpointTrigger {
+    /// Checkpoint every N blocks (of `blue_score`).
+    BlockInterval(u64),
+    /// Checkpoint every N rounds (of `blue_score`).
+    RoundInterval(u64),
+    /// Checkpoint at epoch boundaries. Falls back to
+    /// `BlockInterval(CHECKPOINT_INTERVAL)` until the epoch subsystem
+    /// is wired into the storage checkpoint manager.
+    EpochBoundary,
+}
+
+impl Default for CheckpointTrigger {
+    /// Preserves the legacy behaviour — checkpoint every
+    /// [`CHECKPOINT_INTERVAL`] blocks.
+    fn default() -> Self {
+        Self::BlockInterval(CHECKPOINT_INTERVAL)
+    }
+}
+
+impl CheckpointTrigger {
+    /// How many `blue_score` ticks must elapse between checkpoints
+    /// under this trigger. `EpochBoundary` degrades to the default
+    /// interval until the epoch subsystem is wired (see the variant
+    /// docs).
+    #[must_use]
+    pub const fn ticks_between(self) -> u64 {
+        match self {
+            Self::BlockInterval(n) | Self::RoundInterval(n) => n,
+            Self::EpochBoundary => CHECKPOINT_INTERVAL,
+        }
+    }
+}
 
 // ═══════════════════════════════════════════════════════════════
 //  Checkpoint Data
@@ -117,6 +179,10 @@ pub struct CheckpointManager {
     data_dir: PathBuf,
     /// Blue score at the last checkpoint.
     last_checkpoint_score: u64,
+    /// Counter that gates [`CheckpointManager::should_checkpoint`].
+    trigger: CheckpointTrigger,
+    /// Maximum number of checkpoint files to keep on disk.
+    retained: usize,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -137,16 +203,54 @@ pub enum CheckpointError {
 
 impl CheckpointManager {
     /// Create a checkpoint manager for the given data directory.
+    ///
+    /// Defaults to the legacy trigger ([`CheckpointTrigger::default`],
+    /// `BlockInterval(CHECKPOINT_INTERVAL)`) and legacy retention
+    /// ([`MAX_CHECKPOINTS_RETAINED`]). Use [`with_trigger`] and
+    /// [`with_retained`] to override.
     pub fn new(data_dir: &Path) -> Self {
         Self {
             data_dir: data_dir.to_path_buf(),
             last_checkpoint_score: 0,
+            trigger: CheckpointTrigger::default(),
+            retained: MAX_CHECKPOINTS_RETAINED,
         }
     }
 
+    /// Override the trigger that gates checkpoint creation. Builder style.
+    #[must_use]
+    pub fn with_trigger(mut self, trigger: CheckpointTrigger) -> Self {
+        self.trigger = trigger;
+        self
+    }
+
+    /// Override the on-disk retention count. Builder style. `0` means
+    /// "retain all checkpoints".
+    #[must_use]
+    pub fn with_retained(mut self, retained: usize) -> Self {
+        self.retained = retained;
+        self
+    }
+
+    /// The trigger this manager is currently using.
+    #[must_use]
+    pub fn trigger(&self) -> CheckpointTrigger {
+        self.trigger
+    }
+
+    /// The on-disk retention count this manager is currently using.
+    #[must_use]
+    pub fn retained(&self) -> usize {
+        self.retained
+    }
+
     /// Check if a new checkpoint should be created at the given blue_score.
+    ///
+    /// Logic is delegated to the configured [`CheckpointTrigger`].
+    /// `EpochBoundary` falls back to `CHECKPOINT_INTERVAL` until wired
+    /// into the epoch subsystem (see the variant docs).
     pub fn should_checkpoint(&self, blue_score: u64) -> bool {
-        blue_score >= self.last_checkpoint_score + CHECKPOINT_INTERVAL
+        blue_score >= self.last_checkpoint_score + self.trigger.ticks_between()
     }
 
     /// Create and persist a checkpoint.
@@ -304,14 +408,18 @@ impl CheckpointManager {
         Ok(files)
     }
 
-    /// Remove old checkpoints, keeping only MAX_CHECKPOINTS_RETAINED.
+    /// Remove old checkpoints, keeping only [`CheckpointManager::retained`].
+    /// When `retained == 0`, all checkpoints are kept.
     fn prune_old_checkpoints(&self) -> Result<(), CheckpointError> {
+        if self.retained == 0 {
+            return Ok(());
+        }
         let checkpoints = self.list_checkpoints()?;
-        if checkpoints.len() <= MAX_CHECKPOINTS_RETAINED {
+        if checkpoints.len() <= self.retained {
             return Ok(());
         }
 
-        let to_remove = checkpoints.len() - MAX_CHECKPOINTS_RETAINED;
+        let to_remove = checkpoints.len() - self.retained;
         for path in checkpoints.iter().take(to_remove) {
             debug!("Pruning old checkpoint: {}", path.display());
             fs::remove_file(path)?;
@@ -500,5 +608,95 @@ mod tests {
             cp.prev_checkpoint_hash, [0u8; 32],
             "first checkpoint must have zero prev_checkpoint_hash"
         );
+    }
+
+    // ── Phase 2 Path X R4 tests: trigger + retained runtime config ──
+
+    #[test]
+    fn default_trigger_is_block_interval_at_checkpoint_interval() {
+        assert_eq!(
+            CheckpointTrigger::default(),
+            CheckpointTrigger::BlockInterval(CHECKPOINT_INTERVAL)
+        );
+    }
+
+    #[test]
+    fn trigger_ticks_between_matches_variants() {
+        assert_eq!(CheckpointTrigger::BlockInterval(250).ticks_between(), 250);
+        assert_eq!(CheckpointTrigger::RoundInterval(777).ticks_between(), 777);
+        // EpochBoundary falls back to CHECKPOINT_INTERVAL per the
+        // "not yet wired" caveat in the variant docs.
+        assert_eq!(
+            CheckpointTrigger::EpochBoundary.ticks_between(),
+            CHECKPOINT_INTERVAL
+        );
+    }
+
+    #[test]
+    fn default_manager_preserves_legacy_trigger_and_retention() {
+        let mgr = CheckpointManager::new(Path::new("/tmp/ignored"));
+        assert_eq!(mgr.trigger(), CheckpointTrigger::default());
+        assert_eq!(mgr.retained(), MAX_CHECKPOINTS_RETAINED);
+    }
+
+    #[test]
+    fn with_trigger_overrides_cadence() {
+        let mgr = CheckpointManager::new(Path::new("/tmp/ignored"))
+            .with_trigger(CheckpointTrigger::BlockInterval(100));
+        // Below 100 => no checkpoint.
+        assert!(!mgr.should_checkpoint(99));
+        // At 100 => yes.
+        assert!(mgr.should_checkpoint(100));
+    }
+
+    #[test]
+    fn with_trigger_round_interval_is_arithmetically_equivalent_to_block() {
+        let block = CheckpointManager::new(Path::new("/tmp/ignored"))
+            .with_trigger(CheckpointTrigger::BlockInterval(250));
+        let round = CheckpointManager::new(Path::new("/tmp/ignored"))
+            .with_trigger(CheckpointTrigger::RoundInterval(250));
+        for s in [0u64, 249, 250, 251, 499, 500, 1000] {
+            assert_eq!(
+                block.should_checkpoint(s),
+                round.should_checkpoint(s),
+                "BlockInterval and RoundInterval must agree at score={s}"
+            );
+        }
+    }
+
+    #[test]
+    fn epoch_boundary_falls_back_to_checkpoint_interval_until_wired() {
+        let mgr = CheckpointManager::new(Path::new("/tmp/ignored"))
+            .with_trigger(CheckpointTrigger::EpochBoundary);
+        assert!(mgr.should_checkpoint(CHECKPOINT_INTERVAL));
+        assert!(!mgr.should_checkpoint(CHECKPOINT_INTERVAL - 1));
+    }
+
+    #[test]
+    fn with_retained_overrides_disk_pruning_limit() {
+        let tmp = TempDir::new().unwrap();
+        // Keep only 2 checkpoints on disk.
+        let mut mgr = CheckpointManager::new(tmp.path()).with_retained(2);
+        assert_eq!(mgr.retained(), 2);
+
+        for i in 1..=5u64 {
+            mgr.create_checkpoint(make_checkpoint(i * CHECKPOINT_INTERVAL))
+                .unwrap();
+        }
+        let remaining = mgr.list_checkpoints().unwrap();
+        assert_eq!(remaining.len(), 2);
+    }
+
+    #[test]
+    fn with_retained_zero_keeps_all() {
+        let tmp = TempDir::new().unwrap();
+        let mut mgr = CheckpointManager::new(tmp.path()).with_retained(0);
+
+        for i in 1..=6u64 {
+            mgr.create_checkpoint(make_checkpoint(i * CHECKPOINT_INTERVAL))
+                .unwrap();
+        }
+        let remaining = mgr.list_checkpoints().unwrap();
+        assert_eq!(remaining.len(), 6, "retained=0 must preserve every file");
     }
 }

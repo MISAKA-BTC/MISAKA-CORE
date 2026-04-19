@@ -76,6 +76,7 @@ pub mod genesis_committee;
 pub mod identity;
 pub mod indexer;
 pub mod metrics;
+pub mod migrate;
 pub mod rpc_auth;
 pub mod rpc_rate_limit;
 pub mod safe_mode;
@@ -105,21 +106,17 @@ pub mod sync;
 #[cfg(not(feature = "dag"))]
 pub mod sync_relay_transport;
 
-// ── v2 modules (DAG — GhostDAG compat, REMOVED in BLOCKER E cleanup) ──
+// ── v2 Narwhal/Bullshark modules ──
 //
-// The `ghostdag-compat` feature was retained after 0.9.0 β-2 as a legacy
-// compile path, but its source files (`dag_narwhal_dissemination_service`,
-// `dag_p2p_network` / surface / transport, `dag_rpc`, `dag_rpc_service`,
-// `dag_tx_dissemination_service`) broke against the narwhal-only code
-// elsewhere in the tree. `cargo build --workspace --all-features` failed
-// with 64 errors as of PR E.
-//
-// Cleanup for mainnet readiness (BLOCKER E):
-//   1. Deleted the 6 dead source files (~16 KLOC).
-//   2. Dropped the `ghostdag-compat` feature from Cargo.toml.
-//   3. Removed the gated `pub mod` declarations that used to live here.
-//
-// Active DAG path is the `narwhal_*` modules below (feature = "dag" only).
+// Dead-code cleanup Plan B.2 (2026-04-19): the 8 GhostDAG-era
+// submodules gated on `ghostdag-compat` were deleted alongside
+// their implementation files:
+//   - dag_narwhal_dissemination_service, dag_p2p_network,
+//     dag_p2p_surface, dag_p2p_transport, dag_rpc, dag_rpc_service,
+//     dag_tx_dissemination_service, jsonrpc.
+// The orphan `bft_event_loop.rs` (never declared as a mod) went with
+// them — it only referenced `dag_p2p_network` symbols that no longer
+// exist.
 #[cfg(feature = "dag")]
 pub mod narwhal_block_relay_transport;
 #[cfg(feature = "dag")]
@@ -127,9 +124,6 @@ pub mod narwhal_consensus;
 #[cfg(feature = "dag")]
 pub mod narwhal_runtime_bridge;
 // Phase 2c-B D1: narwhal_tx_executor deleted (replaced by utxo_executor)
-// BLOCKER E: `jsonrpc` module was also gated on `ghostdag-compat`; dropped
-// alongside the other legacy modules. If a production JSON-RPC surface is
-// needed it should be re-added via the narwhal-native RPC path.
 #[cfg(feature = "dag")]
 pub mod utxo_executor;
 pub mod ws;
@@ -440,6 +434,32 @@ struct Cli {
     /// Values from the file serve as defaults; explicit CLI args override them.
     #[arg(long, env = "MISAKA_CONFIG_PATH")]
     config: Option<String>,
+
+    // ─── Phase 2 Path X R6 — storage schema migration ──────
+    /// Run offline migration of the storage DB's schema-version marker
+    /// and exit. Required to trigger migration mode. Must equal the
+    /// current build's `CURRENT_STORAGE_SCHEMA_VERSION` (v0.9.0 = 2).
+    ///
+    /// See `crates/misaka-node/src/migrate.rs` for the full flow.
+    #[arg(long, value_name = "VERSION")]
+    migrate_to: Option<u32>,
+
+    /// Optional expected source schema version. When set, migration
+    /// refuses to proceed unless the DB's observed marker matches.
+    /// Use to guard against running against a DB already stamped by a
+    /// different build.
+    #[arg(long, value_name = "VERSION", requires = "migrate_to")]
+    migrate_from: Option<u32>,
+
+    /// Print the migration plan but do not mutate the DB. Useful to
+    /// verify what will happen before stamping a production DB.
+    #[arg(long, requires = "migrate_to")]
+    migrate_dry_run: bool,
+
+    /// Explicit path to the storage RocksDB directory. Defaults to
+    /// `<data-dir>/storage` — the layout the running node uses.
+    #[arg(long, value_name = "PATH", requires = "migrate_to")]
+    migrate_db: Option<String>,
 }
 
 #[tokio::main]
@@ -611,6 +631,27 @@ async fn main() -> anyhow::Result<()> {
     //   7. VPS$ misaka-node --validator --stake-signature <SIG> --data-dir ./data
     //
     // Solana private keys are NEVER needed on the VPS.
+    // ── Phase 2 Path X R6-a: offline schema migration ─────────────
+    //
+    // Early exit path — runs after config is loaded (so --data-dir and
+    // --migrate-db reflect the effective data directory) and before the
+    // rest of node startup. On success the process returns Ok(()); on
+    // any inconsistency it propagates the anyhow::Error to produce a
+    // non-zero exit code.
+    if let Some(to) = cli.migrate_to {
+        let db_path = match cli.migrate_db.as_deref() {
+            Some(p) => std::path::PathBuf::from(p),
+            None => crate::migrate::default_db_path(std::path::Path::new(&cli.data_dir)),
+        };
+        let args = crate::migrate::MigrateArgs {
+            to,
+            from: cli.migrate_from,
+            dry_run: cli.migrate_dry_run,
+            db_path,
+        };
+        return crate::migrate::run(&args);
+    }
+
     #[cfg(feature = "dag")]
     if cli.keygen_only {
         use misaka_crypto::validator_sig::generate_validator_keypair;
@@ -1018,9 +1059,17 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // ── Crash Recovery Check ──
+    //
+    // Phase 2 Path X R1 step 4: legacy-fallback removed. `run_startup_check`
+    // now reads only Kaspa-aligned committed-tip keys under
+    // `StorePrefixes::VirtualState` in the Narwhal consensus RocksDB
+    // (populated by R1 step 2 on every committed block). An old DB
+    // without those keys reports Fresh and the node starts from
+    // genesis. Corruption still aborts with `process::exit(1)`.
     {
         let data_path = std::path::Path::new(&cli.data_dir);
-        let (recovered_height, recovered_root) = misaka_storage::run_startup_check(data_path);
+        let (recovered_height, recovered_root) =
+            misaka_storage::run_startup_check(data_path, "narwhal_consensus");
         if recovered_height > 0 {
             info!(
                 "Recovered from persistent state: height={}, root={}",
@@ -1075,12 +1124,18 @@ async fn main() -> anyhow::Result<()> {
     //  分岐: v1 (linear chain) vs v2 (DAG)
     // ════════════════════════════════════════════════════════
 
-    #[cfg(all(feature = "dag", feature = "ghostdag-compat"))]
-    {
-        start_dag_node(cli, node_mode, role, p2p_config, loaded_config).await
-    }
+    // Dispatch:
+    //   - `feature = "dag"` (default) → `start_narwhal_node`
+    //     (Narwhal/Bullshark production runtime).
+    //   - `not(feature = "dag")` → `start_v1_node` (legacy linear
+    //     chain; retained for back-compat).
+    //
+    // `node_mode` and `role` are only used by the v1 path; the
+    // `let _ = (...)` silences unused-variable lints under the
+    // default `dag` build.
+    let _ = (node_mode, role);
 
-    #[cfg(all(feature = "dag", not(feature = "ghostdag-compat")))]
+    #[cfg(feature = "dag")]
     {
         start_narwhal_node(cli, p2p_config, loaded_config).await
     }
@@ -1134,7 +1189,7 @@ fn resolve_genesis_committee_path(cli_path: Option<&str>) -> std::path::PathBuf 
 ///
 /// The task owns cheap clones of every handle — no references into the
 /// closure frame — so it outlives the HTTP response.
-#[cfg(all(feature = "dag", not(feature = "ghostdag-compat")))]
+#[cfg(feature = "dag")]
 fn spawn_verify_stake_background(
     validator_id: [u8; 32],
     l1_pubkey_hex: String,
@@ -1252,7 +1307,7 @@ fn spawn_verify_stake_background(
     });
 }
 
-#[cfg(all(feature = "dag", not(feature = "ghostdag-compat")))]
+#[cfg(feature = "dag")]
 async fn start_narwhal_node(
     mut cli: Cli,
     p2p_config: P2pConfig,
@@ -1676,6 +1731,54 @@ async fn start_narwhal_node(
     let tx_index_store = rocks_store.clone();
     let tx_index_store_rpc = rocks_store.clone();
     let addr_index_store_rpc = rocks_store.clone();
+    // Phase 2 Path X R1 step 2: share the consensus RocksDB with the
+    // Kaspa-aligned `startup_integrity` committed-tip writer. Used
+    // below in the Narwhal commit loop to call
+    // `misaka_storage::write_committed_state` on every commit that
+    // advances the UTXO tip, and on shutdown. See
+    // `docs/design/v090_phase2_tail_work.md` §2 for the wider plan.
+    let integrity_store = rocks_store.clone();
+    // Phase 2 Path X R6-b integration: same handle is used to feed
+    // `gc_below_round(round)` when the Narwhal pruning processor
+    // emits a `PruningDecision::Advance`. See
+    // `docs/design/v090_phase2_tail_work.md` §3.4.2.
+    let pruning_gc_store: std::sync::Arc<dyn misaka_dag::narwhal_dag::store::ConsensusStore> =
+        rocks_store.clone();
+
+    // Phase 2 Path X R6-b — construct the Narwhal pruning processor
+    // only when the operator opted into `PruneMode::Pruned{keep_rounds}`.
+    // `Archival` is represented by `None` here (processor not
+    // constructed), matching the semantics documented in
+    // `NarwhalPruningProcessor`'s rustdoc.
+    let narwhal_pruning_processor: Option<
+        std::sync::Arc<
+            misaka_consensus::pipeline::narwhal_pruning_processor::NarwhalPruningProcessor,
+        >,
+    > = match loaded_config.as_ref().map(|c| c.prune_mode) {
+        Some(misaka_config::PruneMode::Pruned { keep_rounds }) => {
+            use misaka_consensus::pipeline::narwhal_pruning_processor::{
+                NarwhalPruningConfig, NarwhalPruningProcessor,
+            };
+            use misaka_consensus::stores::commit_pruning::DbCommitPruningStore;
+            let store = std::sync::Arc::new(parking_lot::RwLock::new(DbCommitPruningStore::new(
+                integrity_store.raw_db().clone(),
+            )));
+            let config = NarwhalPruningConfig {
+                pruning_depth_commits: keep_rounds,
+            };
+            info!(
+                "R6-b: NarwhalPruningProcessor enabled (pruning_depth_commits = {})",
+                keep_rounds
+            );
+            Some(std::sync::Arc::new(NarwhalPruningProcessor::new(
+                config, store,
+            )))
+        }
+        Some(misaka_config::PruneMode::Archival) | None => {
+            info!("R6-b: NarwhalPruningProcessor disabled (prune_mode = archival or unset)");
+            None
+        }
+    };
     let store: std::sync::Arc<dyn misaka_dag::narwhal_dag::store::ConsensusStore> =
         rocks_store.clone();
     info!("startup[5/6]: RocksDB opened OK");
@@ -4198,11 +4301,9 @@ async fn start_narwhal_node(
                 // still held here, so the settle and the commit it follows
                 // are atomic relative to REST-side readers.
                 //
-                // Note: the ghostdag-compat epoch hook lives at
-                // `apply_sr21_election_at_epoch_boundary` (L6085-equivalent)
-                // but that code path does not carry a `UtxoExecutor`, so
                 // γ-5 settlement is wired here in `start_narwhal_node`
-                // instead. See γ-5 preflight notes for the routing detail.
+                // because `apply_sr21_election_at_epoch_boundary` does
+                // not carry a `UtxoExecutor`.
                 let new_height = tx_executor.height();
                 if new_height > 0 {
                     let epoch_len = misaka_types::constants::EPOCH_LENGTH;
@@ -4954,6 +5055,83 @@ async fn start_narwhal_node(
                             exec_result.txs_accepted,
                         );
                     }
+
+                    // Phase 2 Path X R1 step 2: mirror the committed tip
+                    // (height + state_root) under the Kaspa-aligned
+                    // `StorePrefixes::VirtualState` keyspace so crash
+                    // recovery can read it without the legacy
+                    // `RocksBlockStore`. Parallels the fs-JSON snapshot
+                    // above — same cadence, same trigger. Best-effort:
+                    // a failure here does not invalidate the commit.
+                    let committed_state = misaka_storage::CommittedState {
+                        height: tx_executor.utxo_set().height,
+                        state_root: new_root,
+                        tip_hash: [0u8; 32], // reserved — populated in a later step
+                    };
+                    if let Err(e) = misaka_storage::write_committed_state(
+                        integrity_store.raw_db(),
+                        &committed_state,
+                    ) {
+                        tracing::warn!(
+                            "Failed to persist startup_integrity committed state: {}",
+                            e
+                        );
+                    }
+                }
+
+                // Phase 2 Path X R6-b — feed the Narwhal pruning
+                // processor every commit (gated on prune_mode earlier
+                // — processor is `None` under `Archival`). Runs
+                // independent of the `txs_accepted > 0` gate because
+                // empty commits still advance the DAG tip and
+                // therefore the prunable range.
+                if let Some(proc_arc) = narwhal_pruning_processor.as_ref() {
+                    use misaka_consensus::pipeline::narwhal_pruning_processor::{
+                        NarwhalCommitMeta, PruningDecision,
+                    };
+                    let meta = NarwhalCommitMeta {
+                        commit_index: output.commit_index,
+                        timestamp_ms: output.timestamp_ms,
+                    };
+                    match proc_arc.on_committed_subdag(&meta) {
+                        Ok(PruningDecision::NoChange) => {}
+                        Ok(PruningDecision::Advance {
+                            new_pruning_index,
+                            timestamp,
+                        }) => {
+                            // Map the commit-index watermark back to
+                            // a round watermark so the DAG-layer GC
+                            // (`gc_below_round`) knows where to cut.
+                            // The leader of the *current* commit is
+                            // the safest round-watermark we can use:
+                            // every block with `round < leader.round`
+                            // that is not an ancestor of this commit
+                            // is no longer needed for recovery, and
+                            // the processor already guaranteed the
+                            // pruning-depth safety margin is met.
+                            let gc_round = output.leader.round;
+                            match pruning_gc_store.gc_below_round(gc_round) {
+                                Ok(deleted) => tracing::info!(
+                                    "R6-b: pruned {} DAG blocks below round {} \
+                                     (new_pruning_index={}, timestamp={})",
+                                    deleted,
+                                    gc_round,
+                                    new_pruning_index,
+                                    timestamp,
+                                ),
+                                Err(e) => tracing::warn!(
+                                    "R6-b: gc_below_round({}) failed: {}",
+                                    gc_round, e
+                                ),
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "R6-b: NarwhalPruningProcessor::on_committed_subdag failed: {}",
+                                e
+                            );
+                        }
+                    }
                 }
             }
             // Graceful shutdown: save UTXO snapshot so balances survive restart.
@@ -4968,6 +5146,27 @@ async fn start_narwhal_node(
                     tx_executor.utxo_set().height,
                     tx_executor.total_emitted(),
                     tx_executor.processed_burns().len(),
+                );
+            }
+
+            // Phase 2 Path X R1 step 2: persist the final committed
+            // tip on shutdown. `tx_executor.state_root()` recomputes
+            // from the current UTXO set; `tx_executor.utxo_set().height`
+            // is the last applied height. Recomputing on shutdown
+            // avoids depending on the per-commit-loop local
+            // `new_root`, which is out of scope here.
+            let shutdown_committed = misaka_storage::CommittedState {
+                height: tx_executor.utxo_set().height,
+                state_root: tx_executor.state_root(),
+                tip_hash: [0u8; 32],
+            };
+            if let Err(e) = misaka_storage::write_committed_state(
+                integrity_store.raw_db(),
+                &shutdown_committed,
+            ) {
+                tracing::warn!(
+                    "Failed to persist startup_integrity committed state on shutdown: {}",
+                    e
                 );
             }
         } => {
@@ -5057,351 +5256,13 @@ async fn query_utxos_by_address(
 //  v2: DAG Node Startup (GhostDAG compat — being phased out)
 // ════════════════════════════════════════════════════════════════
 
-#[cfg(all(feature = "dag", feature = "ghostdag-compat"))]
-fn local_validator_key_path(
-    data_dir: &std::path::Path,
-    validator_index: usize,
-) -> std::path::PathBuf {
-    data_dir.join(format!("dag_validator_{validator_index}.json"))
-}
-
-// 0.9.0 β-2: removed `#[cfg(feature = "ghostdag-compat")]` so
-// `start_narwhal_node` (the default `dag` path without ghostdag-compat) can
-// call this helper to locate the lifecycle snapshot file.
-//
-// γ-2.5: bumped to `pub(crate)` so the extracted
+// γ-2.5: `pub(crate)` so the extracted
 // `validator_lifecycle_bootstrap` module can share the same path convention.
 pub(crate) fn validator_lifecycle_snapshot_path(
     data_dir: &std::path::Path,
     chain_id: u32,
 ) -> std::path::PathBuf {
     data_dir.join(format!("validator_lifecycle_chain_{chain_id}.json"))
-}
-
-#[cfg(all(feature = "dag", feature = "ghostdag-compat"))]
-fn load_or_create_local_dag_validator(
-    data_dir: &std::path::Path,
-    role: NodeRole,
-    validator_index: usize,
-    chain_id: u32,
-) -> anyhow::Result<Option<misaka_dag::LocalDagValidator>> {
-    use misaka_crypto::keystore::{
-        decrypt_keystore, encrypt_keystore, is_plaintext_keyfile, load_keystore, save_keystore,
-    };
-    use misaka_crypto::validator_sig::{
-        generate_validator_keypair, ValidatorPqPublicKey, ValidatorPqSecretKey,
-    };
-    use misaka_types::validator::{ValidatorIdentity, ValidatorPublicKey};
-
-    if !role.produces_blocks() {
-        return Ok(None);
-    }
-
-    let plaintext_path = local_validator_key_path(data_dir, validator_index);
-    let encrypted_path = data_dir.join(format!("dag_validator_{validator_index}.enc.json"));
-
-    // Read passphrase from env var or file. For testnet, allow empty
-    // passphrase (encrypts with empty string — still better than
-    // plaintext). For mainnet (chain_id=1), require a non-empty
-    // passphrase.
-    //
-    // v0.5.13 audit P0-1: the deploy script writes the passphrase to a
-    // chmod 600 file at `/opt/misaka/.passphrase` and sets
-    // `MISAKA_VALIDATOR_PASSPHRASE_FILE` in the systemd unit, but
-    // previously the runtime only read `MISAKA_VALIDATOR_PASSPHRASE`
-    // (env var). On restart the env var was empty and the node
-    // couldn't decrypt its own keystore. Now we check both: env var
-    // first (convenience for local dev), file fallback (production
-    // systemd contract). The file path is read from
-    // `MISAKA_VALIDATOR_PASSPHRASE_FILE`; its trailing whitespace is
-    // stripped so a trailing newline from `echo > file` doesn't
-    // become part of the key material.
-    fn read_passphrase(chain_id: u32) -> anyhow::Result<Vec<u8>> {
-        let from_env = std::env::var("MISAKA_VALIDATOR_PASSPHRASE")
-            .ok()
-            .filter(|s| !s.is_empty());
-        let passphrase = if let Some(env_value) = from_env {
-            env_value.into_bytes()
-        } else if let Ok(file_path) = std::env::var("MISAKA_VALIDATOR_PASSPHRASE_FILE") {
-            if file_path.is_empty() {
-                Vec::new()
-            } else {
-                let raw = std::fs::read(&file_path).map_err(|e| {
-                    anyhow::anyhow!(
-                        "FATAL: failed to read MISAKA_VALIDATOR_PASSPHRASE_FILE='{}': {}",
-                        file_path,
-                        e
-                    )
-                })?;
-                // Strip trailing newline/whitespace so shells like
-                // `echo "$PASS" > file` do not inject it into the
-                // passphrase bytes.
-                let end = raw
-                    .iter()
-                    .rposition(|b| !matches!(*b, b'\n' | b'\r' | b' ' | b'\t'))
-                    .map(|p| p + 1)
-                    .unwrap_or(0);
-                raw[..end].to_vec()
-            }
-        } else if std::path::Path::new("/run/secrets/validator_passphrase").exists() {
-            let raw = std::fs::read("/run/secrets/validator_passphrase").map_err(|e| {
-                anyhow::anyhow!(
-                    "FATAL: failed to read Docker secret /run/secrets/validator_passphrase: {}",
-                    e
-                )
-            })?;
-            let end = raw
-                .iter()
-                .rposition(|b| !matches!(*b, b'\n' | b'\r' | b' ' | b'\t'))
-                .map(|p| p + 1)
-                .unwrap_or(0);
-            raw[..end].to_vec()
-        } else {
-            Vec::new()
-        };
-        // SEC-FIX: mainnet MUST have a non-empty passphrase
-        if chain_id == 1 && passphrase.is_empty() {
-            anyhow::bail!(
-                "FATAL: MISAKA_VALIDATOR_PASSPHRASE or MISAKA_VALIDATOR_PASSPHRASE_FILE \
-                 must be set and non-empty on mainnet (chain_id=1). An empty passphrase \
-                 means the keystore can be decrypted trivially."
-            );
-        }
-        Ok(passphrase)
-    }
-
-    let keypair_and_identity = if encrypted_path.exists() {
-        // ── Load from encrypted keystore ──
-        let passphrase = read_passphrase(chain_id)?;
-        let keystore = load_keystore(&encrypted_path)
-            .map_err(|e| anyhow::anyhow!("failed to load encrypted keystore: {}", e))?;
-
-        let secret_bytes = decrypt_keystore(&keystore, &passphrase).map_err(|e| {
-            anyhow::anyhow!(
-                "failed to decrypt validator key at '{}': {}. \
-                 Set MISAKA_VALIDATOR_PASSPHRASE env var with the correct passphrase.",
-                encrypted_path.display(),
-                e
-            )
-        })?;
-
-        let validator_id_vec = hex::decode(&keystore.validator_id_hex)?;
-        let mut validator_id = [0u8; 32];
-        if validator_id_vec.len() != 32 {
-            anyhow::bail!(
-                "invalid validator id length in '{}': expected 32, got {}",
-                encrypted_path.display(),
-                validator_id_vec.len()
-            );
-        }
-        validator_id.copy_from_slice(&validator_id_vec);
-
-        let public_key = ValidatorPqPublicKey::from_bytes(&hex::decode(&keystore.public_key_hex)?)
-            .map_err(anyhow::Error::msg)?;
-
-        // SEC-FIX: Use from_bytes() instead of direct field construction.
-        // Ensures length validation (4032 bytes) is always enforced.
-        let secret_key = ValidatorPqSecretKey::from_bytes(&secret_bytes).ok_or_else(|| {
-            anyhow::anyhow!(
-                "invalid validator secret key length: {} (expected 4032)",
-                secret_bytes.len()
-            )
-        })?;
-        let keypair = misaka_crypto::validator_sig::ValidatorKeypair {
-            public_key,
-            secret_key,
-        };
-        let identity = ValidatorIdentity {
-            validator_id,
-            stake_weight: keystore.stake_weight,
-            public_key: ValidatorPublicKey {
-                bytes: keypair.public_key.to_bytes(),
-            },
-            is_active: true,
-        };
-        info!(
-            "Layer 2: loaded encrypted DAG validator key | id={} | file={}",
-            hex::encode(identity.validator_id),
-            encrypted_path.display()
-        );
-        (keypair, identity)
-    } else if plaintext_path.exists() && is_plaintext_keyfile(&plaintext_path) {
-        // SEC-FIX: On mainnet, refuse to start with plaintext keyfile.
-        // Migration leaves a .bak file that may contain the plaintext secret key.
-        // Force operators to manually encrypt and verify before mainnet deployment.
-        if chain_id == 1 {
-            anyhow::bail!(
-                "FATAL: Plaintext validator key detected at '{}' on mainnet (chain_id=1). \
-                 Encrypt the keyfile manually before starting: \
-                 misaka-cli encrypt-keystore --input {} --output {}",
-                plaintext_path.display(),
-                plaintext_path.display(),
-                plaintext_path.with_extension("enc.json").display()
-            );
-        }
-        // ── Migrate plaintext → encrypted (testnet/devnet only) ──
-        warn!(
-            "Layer 2: ⚠ plaintext validator key detected at '{}' — migrating to encrypted format",
-            plaintext_path.display()
-        );
-
-        let raw = std::fs::read_to_string(&plaintext_path)?;
-        let persisted: LocalDagValidatorKeyFile = serde_json::from_str(&raw)?;
-
-        let validator_id_vec = hex::decode(&persisted.validator_id_hex)?;
-        let mut validator_id = [0u8; 32];
-        if validator_id_vec.len() != 32 {
-            anyhow::bail!("invalid validator id in plaintext key file");
-        }
-        validator_id.copy_from_slice(&validator_id_vec);
-
-        let public_key = ValidatorPqPublicKey::from_bytes(&hex::decode(&persisted.public_key_hex)?)
-            .map_err(anyhow::Error::msg)?;
-
-        let secret_bytes = hex::decode(&persisted.secret_key_hex)?;
-        let passphrase = read_passphrase(chain_id)?;
-
-        // Encrypt and save
-        let keystore = encrypt_keystore(
-            &secret_bytes,
-            &persisted.public_key_hex,
-            &persisted.validator_id_hex,
-            persisted.stake_weight,
-            &passphrase,
-        )
-        .map_err(|e| anyhow::anyhow!("encryption failed: {}", e))?;
-
-        save_keystore(&encrypted_path, &keystore)
-            .map_err(|e| anyhow::anyhow!("failed to save encrypted keystore: {}", e))?;
-
-        // Rename old plaintext file to .bak (don't delete — operator may want it)
-        let backup_path = plaintext_path.with_extension("json.plaintext.bak");
-        if let Err(e) = std::fs::rename(&plaintext_path, &backup_path) {
-            warn!(
-                "Could not rename plaintext key file: {} (delete manually)",
-                e
-            );
-        } else {
-            warn!(
-                "Layer 2: plaintext key backed up to '{}' — DELETE THIS FILE after verifying the encrypted key works",
-                backup_path.display()
-            );
-        }
-
-        // SEC-FIX: Use from_bytes() instead of direct field construction.
-        // Ensures length validation (4032 bytes) is always enforced.
-        let secret_key = ValidatorPqSecretKey::from_bytes(&secret_bytes).ok_or_else(|| {
-            anyhow::anyhow!(
-                "invalid validator secret key length: {} (expected 4032)",
-                secret_bytes.len()
-            )
-        })?;
-        let keypair = misaka_crypto::validator_sig::ValidatorKeypair {
-            public_key,
-            secret_key,
-        };
-        let identity = ValidatorIdentity {
-            validator_id,
-            stake_weight: persisted.stake_weight,
-            public_key: ValidatorPublicKey {
-                bytes: keypair.public_key.to_bytes(),
-            },
-            is_active: true,
-        };
-        info!(
-            "Layer 2: migrated to encrypted keystore | id={} | file={}",
-            hex::encode(identity.validator_id),
-            encrypted_path.display()
-        );
-        (keypair, identity)
-    } else {
-        // ── Generate new key → encrypted ──
-        let keypair = generate_validator_keypair();
-        let identity = ValidatorIdentity {
-            validator_id: keypair.public_key.to_canonical_id(),
-            stake_weight: 1_000_000,
-            public_key: ValidatorPublicKey {
-                bytes: keypair.public_key.to_bytes(),
-            },
-            is_active: true,
-        };
-
-        let passphrase = read_passphrase(chain_id)?;
-        let keystore = keypair
-            .secret_key
-            .with_bytes(|sk_bytes| {
-                encrypt_keystore(
-                    sk_bytes,
-                    &hex::encode(&identity.public_key.bytes),
-                    &hex::encode(identity.validator_id),
-                    identity.stake_weight,
-                    &passphrase,
-                )
-            })
-            .map_err(|e| anyhow::anyhow!("encryption failed: {}", e))?;
-
-        save_keystore(&encrypted_path, &keystore)
-            .map_err(|e| anyhow::anyhow!("failed to save encrypted keystore: {}", e))?;
-
-        info!(
-            "Layer 2: created encrypted DAG validator key | id={} | file={}",
-            hex::encode(identity.validator_id),
-            encrypted_path.display()
-        );
-        (keypair, identity)
-    };
-
-    Ok(Some(misaka_dag::LocalDagValidator {
-        keypair: keypair_and_identity.0,
-        identity: keypair_and_identity.1,
-    }))
-}
-
-#[cfg(all(feature = "dag", feature = "ghostdag-compat"))]
-fn normalize_experimental_validator_identity(
-    identity: &misaka_types::validator::ValidatorIdentity,
-) -> anyhow::Result<misaka_types::validator::ValidatorIdentity> {
-    use misaka_crypto::validator_sig::ValidatorPqPublicKey;
-
-    let public_key = ValidatorPqPublicKey::from_bytes(&identity.public_key.bytes)
-        .map_err(|e| anyhow::anyhow!("invalid validator public key: {}", e))?;
-    let expected_id = public_key.to_canonical_id();
-    if expected_id != identity.validator_id {
-        anyhow::bail!(
-            "validator identity mismatch: derived={}, declared={}",
-            hex::encode(expected_id),
-            hex::encode(identity.validator_id)
-        );
-    }
-
-    // SEC-FIX [v9.1]: stake_weight は自己申告値を信用しない。
-    //
-    // 旧実装は stake_weight: 1 に固定していたため、預入枚数がコンセンサスに
-    // 全く反映されていなかった。
-    //
-    // 修正: リモートバリデータの自己申告 stake_weight も信用しない（1 に固定を維持）。
-    // 正しい stake_weight は Solana オンチェーン検証でのみ設定される。
-    // discover_checkpoint_validators_from_rpc_peers() の呼び出し後に
-    // verify_and_update_remote_stakes() で Solana 上の実際の預入額に更新する。
-    //
-    // Phase C compile-hygiene slice:
-    // experimental checkpoint identities stay fail-safe at stake=1 here.
-    // Committee bootstrap and Solana-backed reconciliation are handled on the
-    // explicit committee path; self-reported remote stake is never trusted.
-    let stake_weight = 1;
-
-    Ok(misaka_types::validator::ValidatorIdentity {
-        stake_weight,
-        is_active: true,
-        ..identity.clone()
-    })
-}
-
-#[cfg(all(feature = "dag", feature = "ghostdag-compat"))]
-pub(crate) fn dag_validator_set(
-    state: &misaka_dag::DagNodeState,
-) -> misaka_consensus::ValidatorSet {
-    misaka_consensus::ValidatorSet::new(state.known_validators.clone())
 }
 
 /// DEPRECATED: Count-based quorum calculation. Use stake-weighted quorum instead.
@@ -5413,2151 +5274,25 @@ pub(crate) fn dag_validator_set(
 ///
 /// For production use: `Committee::quorum_threshold()` or
 /// `ValidatorSet::quorum_threshold()`.
-#[cfg(all(feature = "dag", feature = "ghostdag-compat"))]
-#[cfg(test)]
-pub(crate) fn expected_dag_quorum_threshold(validator_count: usize) -> u128 {
-    let total = validator_count.max(1) as u128;
-    total * 2 / 3 + 1
-}
 
 /// Stake-weighted quorum threshold — the ONLY correct function for production.
 ///
 /// Delegates to `Committee::quorum_threshold()` which uses the Sui-aligned
 /// formula: `N - floor((N-1)/3)` where N = total_stake.
-#[cfg(all(feature = "dag", feature = "ghostdag-compat"))]
-pub(crate) fn dag_quorum_threshold_from_committee(
-    committee: &misaka_dag::narwhal_types::committee::Committee,
-) -> u64 {
-    committee.quorum_threshold()
-}
 
-#[cfg(all(feature = "dag", feature = "ghostdag-compat"))]
-pub(crate) fn apply_sr21_election_at_epoch_boundary(
-    state: &mut misaka_dag::DagNodeState,
-    next_epoch: u64,
-) -> sr21_election::ElectionResult {
-    let election_result =
-        sr21_election::run_election_for_chain(&state.known_validators, state.chain_id, next_epoch);
-    state.num_active_srs = election_result.num_active.max(1);
-    state.runtime_active_sr_validator_ids = election_result
-        .active_srs
-        .iter()
-        .map(|elected| elected.validator_id)
-        .collect();
-
-    if let Some(ref lv) = state.local_validator {
-        if let Some(new_index) =
-            sr21_election::find_sr_index(&election_result, &lv.identity.validator_id)
-        {
-            state.sr_index = new_index;
-            info!(
-                "SR21 Election: local validator assigned SR_index={} (epoch={})",
-                new_index, next_epoch
-            );
-        } else {
-            warn!(
-                "SR21 Election: local validator NOT in active set (epoch={}) — block production paused",
-                next_epoch
-            );
-        }
-    }
-
-    election_result
-}
-
-#[cfg(all(feature = "dag", feature = "ghostdag-compat"))]
-pub(crate) fn deterministic_dag_genesis_header(
-    chain_id: u32,
-) -> misaka_dag::dag_block::DagBlockHeader {
-    use misaka_dag::dag_block::{DagBlockHeader, DAG_VERSION, ZERO_HASH};
-    use sha3::{Digest, Sha3_256};
-
-    let mut h = Sha3_256::new();
-    h.update(b"MISAKA_DAG_GENESIS_V1:");
-    h.update(chain_id.to_le_bytes());
-    let proposer_id: [u8; 32] = h.finalize().into();
-
-    DagBlockHeader {
-        version: DAG_VERSION,
-        parents: vec![],
-        timestamp_ms: 0,
-        tx_root: ZERO_HASH,
-        proposer_id,
-        nonce: 0,
-        blue_score: 0,
-        bits: 0,
-    }
-}
-
-#[cfg(all(feature = "dag", feature = "ghostdag-compat"))]
-fn normalize_dag_rpc_peer(peer: &str) -> Option<String> {
-    let trimmed = peer.trim().trim_end_matches('/');
-    if trimmed.is_empty() {
-        return None;
-    }
-
-    let normalized = if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
-        trimmed.to_string()
-    } else {
-        format!("http://{}", trimmed)
-    };
-
-    if reqwest::Url::parse(&normalized).is_err() {
-        return None;
-    }
-
-    Some(normalized)
-}
-
-#[cfg(all(feature = "dag", feature = "ghostdag-compat"))]
-fn normalize_dag_rpc_peers(peers: &[String]) -> Vec<String> {
-    let mut normalized = peers
-        .iter()
-        .filter_map(|peer| normalize_dag_rpc_peer(peer))
-        .collect::<Vec<_>>();
-    normalized.sort();
-    normalized.dedup();
-    normalized
-}
-
-#[cfg(all(feature = "dag", feature = "ghostdag-compat"))]
-#[derive(Debug, serde::Deserialize)]
-struct DagRpcValidatorIdentityWire {
-    #[serde(rename = "validatorId")]
-    validator_id: String,
-    #[serde(rename = "stakeWeight")]
-    stake_weight: String,
-    #[serde(rename = "publicKeyHex")]
-    public_key_hex: String,
-    #[serde(rename = "isActive")]
-    is_active: bool,
-}
-
-#[cfg(all(feature = "dag", feature = "ghostdag-compat"))]
-impl DagRpcValidatorIdentityWire {
-    fn into_validator_identity(self) -> anyhow::Result<misaka_types::validator::ValidatorIdentity> {
-        use misaka_types::validator::{ValidatorIdentity, ValidatorPublicKey};
-
-        let validator_id_vec = hex::decode(&self.validator_id)?;
-        if validator_id_vec.len() != 32 {
-            anyhow::bail!(
-                "invalid validator id length from RPC peer: expected 32 bytes, got {}",
-                validator_id_vec.len()
-            );
-        }
-
-        let mut validator_id = [0u8; 32];
-        validator_id.copy_from_slice(&validator_id_vec);
-
-        let public_key_bytes = hex::decode(&self.public_key_hex)?;
-        let public_key = ValidatorPublicKey::from_bytes(&public_key_bytes)
-            .map_err(|e| anyhow::anyhow!("invalid validator public key from RPC peer: {}", e))?;
-        let stake_weight = self
-            .stake_weight
-            .parse::<u128>()
-            .map_err(|e| anyhow::anyhow!("invalid validator stake weight from RPC peer: {}", e))?;
-
-        Ok(ValidatorIdentity {
-            validator_id,
-            stake_weight,
-            public_key,
-            is_active: self.is_active,
-        })
-    }
-}
-
-#[cfg(all(feature = "dag", feature = "ghostdag-compat"))]
-#[derive(Debug, Default, serde::Deserialize)]
-struct DagRpcValidatorAttestationWire {
-    #[serde(rename = "localValidator")]
-    local_validator: Option<DagRpcValidatorIdentityWire>,
-    #[serde(rename = "knownValidators", default)]
-    known_validators: Vec<DagRpcValidatorIdentityWire>,
-}
-
-#[cfg(all(feature = "dag", feature = "ghostdag-compat"))]
-#[derive(Debug, Default, serde::Deserialize)]
-struct DagRpcChainInfoWire {
-    #[serde(rename = "validatorAttestation", default)]
-    validator_attestation: DagRpcValidatorAttestationWire,
-}
-
-#[cfg(all(feature = "dag", feature = "ghostdag-compat"))]
-fn validator_identity_matches(
-    left: &misaka_types::validator::ValidatorIdentity,
-    right: &misaka_types::validator::ValidatorIdentity,
-) -> bool {
-    left.validator_id == right.validator_id
-        && left.stake_weight == right.stake_weight
-        && left.is_active == right.is_active
-        && left.public_key.bytes == right.public_key.bytes
-}
-
-#[cfg(all(feature = "dag", feature = "ghostdag-compat"))]
-fn merge_discovered_checkpoint_validators(
-    state: &mut misaka_dag::DagNodeState,
-    identities: Vec<misaka_types::validator::ValidatorIdentity>,
-) -> anyhow::Result<bool> {
-    let mut changed = false;
-
-    for identity in identities {
-        let validator_id = identity.validator_id;
-        let before = state
-            .known_validators
-            .iter()
-            .find(|existing| existing.validator_id == validator_id)
-            .cloned();
-        register_experimental_checkpoint_validator(state, identity)?;
-        let after = state
-            .known_validators
-            .iter()
-            .find(|existing| existing.validator_id == validator_id)
-            .cloned();
-
-        changed |= match (before.as_ref(), after.as_ref()) {
-            (None, Some(_)) => true,
-            (Some(before), Some(after)) => !validator_identity_matches(before, after),
-            _ => false,
-        };
-    }
-
-    Ok(changed)
-}
-
-#[cfg(all(feature = "dag", feature = "ghostdag-compat"))]
-async fn discover_checkpoint_validators_from_rpc_peers(
-    peers: &[String],
-) -> Vec<misaka_types::validator::ValidatorIdentity> {
-    use std::collections::BTreeMap;
-
-    if peers.is_empty() {
-        return Vec::new();
-    }
-
-    let client = match reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-    {
-        Ok(client) => client,
-        Err(e) => {
-            warn!("Failed to build DAG validator discovery client: {}", e);
-            return Vec::new();
-        }
-    };
-
-    let mut discovered = BTreeMap::<[u8; 32], misaka_types::validator::ValidatorIdentity>::new();
-
-    for peer in peers {
-        let endpoint = format!("{}/api/get_chain_info", peer);
-        let response = match client
-            .post(&endpoint)
-            .json(&serde_json::json!({}))
-            .send()
-            .await
-        {
-            Ok(resp) => resp,
-            Err(e) => {
-                debug!(
-                    "DAG validator discovery skipped peer {}: request failed: {}",
-                    endpoint, e
-                );
-                continue;
-            }
-        };
-
-        let body = match response.json::<DagRpcChainInfoWire>().await {
-            Ok(body) => body,
-            Err(e) => {
-                debug!(
-                    "DAG validator discovery skipped peer {}: decode failed: {}",
-                    endpoint, e
-                );
-                continue;
-            }
-        };
-
-        let attestation = body.validator_attestation;
-        let mut candidates = attestation.known_validators;
-        if let Some(local) = attestation.local_validator {
-            candidates.push(local);
-        }
-
-        for candidate in candidates {
-            match candidate.into_validator_identity() {
-                Ok(identity) => {
-                    discovered.insert(identity.validator_id, identity);
-                }
-                Err(e) => {
-                    debug!(
-                        "DAG validator discovery ignored malformed identity from {}: {}",
-                        endpoint, e
-                    );
-                }
-            }
-        }
-    }
-
-    discovered.into_values().collect()
-}
-
-#[cfg(all(feature = "dag", feature = "ghostdag-compat"))]
-fn local_vote_gossip_payload(
-    state: &misaka_dag::DagNodeState,
-) -> Option<(
-    misaka_types::validator::DagCheckpointVote,
-    misaka_types::validator::ValidatorIdentity,
-    Vec<String>,
-)> {
-    let vote = state.latest_checkpoint_vote.clone()?;
-    let local_validator = state.local_validator.as_ref()?;
-    if state.attestation_rpc_peers.is_empty() {
-        return None;
-    }
-    let current_target = state
-        .latest_checkpoint
-        .as_ref()
-        .map(|checkpoint| checkpoint.validator_target())?;
-    if vote.target != current_target {
-        return None;
-    }
-    Some((
-        vote,
-        local_validator.identity.clone(),
-        state.attestation_rpc_peers.clone(),
-    ))
-}
-
-#[cfg(all(feature = "dag", feature = "ghostdag-compat"))]
-fn maybe_spawn_local_vote_gossip(state: &misaka_dag::DagNodeState) {
-    if let Some((vote, identity, peers)) = local_vote_gossip_payload(state) {
-        tokio::spawn(async move {
-            gossip_checkpoint_vote_to_peers(peers, vote, identity).await;
-        });
-    }
-}
-
-#[cfg(all(feature = "dag", feature = "ghostdag-compat"))]
-async fn gossip_checkpoint_vote_to_peers(
-    peers: Vec<String>,
-    vote: misaka_types::validator::DagCheckpointVote,
-    validator_identity: misaka_types::validator::ValidatorIdentity,
-) {
-    if peers.is_empty() {
-        return;
-    }
-
-    let client = match reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-    {
-        Ok(client) => client,
-        Err(e) => {
-            warn!("Failed to build DAG attestation gossip client: {}", e);
-            return;
-        }
-    };
-
-    let payload = serde_json::json!({
-        "vote": vote,
-        "validator_identity": validator_identity,
-    });
-
-    for peer in peers {
-        let endpoint = format!("{}/api/submit_checkpoint_vote", peer);
-        match client.post(&endpoint).json(&payload).send().await {
-            Ok(resp) => match resp.json::<serde_json::Value>().await {
-                Ok(body) => {
-                    let accepted = body["accepted"].as_bool().unwrap_or(false);
-                    if accepted {
-                        info!(
-                            "Gossiped DAG checkpoint vote to {} | score={}",
-                            endpoint, body["target"]["blueScore"]
-                        );
-                    } else {
-                        warn!(
-                            "DAG checkpoint vote rejected by {}: {}",
-                            endpoint,
-                            body["error"].as_str().unwrap_or("unknown error")
-                        );
-                    }
-                }
-                Err(e) => {
-                    warn!(
-                        "Failed to decode DAG checkpoint gossip response from {}: {}",
-                        endpoint, e
-                    );
-                }
-            },
-            Err(e) => {
-                warn!(
-                    "Failed to gossip DAG checkpoint vote to {}: {}",
-                    endpoint, e
-                );
-            }
-        }
-    }
-}
-
-#[cfg(all(feature = "dag", feature = "ghostdag-compat"))]
-fn prune_checkpoint_attestation_state(state: &mut misaka_dag::DagNodeState) {
-    let Some(current_target) = state
-        .latest_checkpoint
-        .as_ref()
-        .map(|checkpoint| checkpoint.validator_target())
-    else {
-        state.latest_checkpoint_vote = None;
-        state.latest_checkpoint_finality = None;
-        state.checkpoint_vote_pool.clear();
-        return;
-    };
-
-    state
-        .checkpoint_vote_pool
-        .retain(|target, _| *target == current_target);
-
-    if state
-        .latest_checkpoint_vote
-        .as_ref()
-        .map(|vote| vote.target != current_target)
-        .unwrap_or(false)
-    {
-        state.latest_checkpoint_vote = None;
-    }
-
-    if state
-        .latest_checkpoint_finality
-        .as_ref()
-        .map(|proof| proof.target != current_target)
-        .unwrap_or(false)
-    {
-        state.latest_checkpoint_finality = None;
-    }
-}
-
-#[cfg(all(feature = "dag", feature = "ghostdag-compat"))]
-fn checkpoint_rollover_blocked_by_pending_finality(state: &misaka_dag::DagNodeState) -> bool {
-    let Some(current_target) = state
-        .latest_checkpoint
-        .as_ref()
-        .map(|checkpoint| checkpoint.validator_target())
-    else {
-        return false;
-    };
-
-    // Validators should not roll to a newer checkpoint target until the
-    // current target has reached local finality. Otherwise peers can keep
-    // pruning each other's votes as stale and never accumulate quorum.
-    if state.local_validator.is_none() {
-        return false;
-    }
-
-    !state
-        .latest_checkpoint_finality
-        .as_ref()
-        .map(|proof| proof.target == current_target)
-        .unwrap_or(false)
-}
-
-#[cfg(all(feature = "dag", feature = "ghostdag-compat"))]
-fn register_experimental_checkpoint_validator(
-    state: &mut misaka_dag::DagNodeState,
-    identity: misaka_types::validator::ValidatorIdentity,
-) -> anyhow::Result<()> {
-    let normalized = normalize_experimental_validator_identity(&identity)?;
-
-    if let Some(existing) = state
-        .known_validators
-        .iter_mut()
-        .find(|existing| existing.validator_id == normalized.validator_id)
-    {
-        *existing = normalized;
-        return Ok(());
-    }
-
-    let max_validators = state.validator_count.max(1);
-    if state.known_validators.len() >= max_validators {
-        anyhow::bail!(
-            "validator registry full: known={}, max={}",
-            state.known_validators.len(),
-            max_validators
-        );
-    }
-
-    state.known_validators.push(normalized);
-    state
-        .known_validators
-        .sort_by(|a, b| a.validator_id.cmp(&b.validator_id));
-    Ok(())
-}
-
-#[cfg(all(feature = "dag", feature = "ghostdag-compat"))]
-fn recompute_latest_checkpoint_finality(
-    state: &mut misaka_dag::DagNodeState,
-) -> anyhow::Result<()> {
-    use misaka_consensus::verify_dag_checkpoint_finality;
-    use misaka_types::validator::DagCheckpointFinalityProof;
-
-    prune_checkpoint_attestation_state(state);
-    state.latest_checkpoint_finality = None;
-
-    let checkpoint = match &state.latest_checkpoint {
-        Some(checkpoint) => checkpoint,
-        None => return Ok(()),
-    };
-    let target = checkpoint.validator_target();
-    let commits = state
-        .checkpoint_vote_pool
-        .get(&target)
-        .cloned()
-        .unwrap_or_default();
-    if commits.is_empty() || state.known_validators.len() < state.validator_count.max(1) {
-        return Ok(());
-    }
-
-    let proof = DagCheckpointFinalityProof { target, commits };
-    let validator_set = dag_validator_set(state);
-    if verify_dag_checkpoint_finality(&validator_set, &proof).is_ok() {
-        state.latest_checkpoint_finality = Some(proof);
-    }
-
-    Ok(())
-}
-
-#[cfg(all(feature = "dag", feature = "ghostdag-compat"))]
-pub(crate) fn ingest_checkpoint_vote(
-    state: &mut misaka_dag::DagNodeState,
-    vote: misaka_types::validator::DagCheckpointVote,
-    validator_identity: Option<misaka_types::validator::ValidatorIdentity>,
-) -> anyhow::Result<()> {
-    use misaka_consensus::verify_dag_checkpoint_vote;
-    let had_validator_identity = validator_identity.is_some();
-
-    prune_checkpoint_attestation_state(state);
-    let checkpoint = state
-        .latest_checkpoint
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("no latest checkpoint available"))?;
-    let expected_target = checkpoint.validator_target();
-    if vote.target != expected_target {
-        anyhow::bail!(
-            "checkpoint vote target mismatch: expected_score={}, got_score={}",
-            expected_target.blue_score,
-            vote.target.blue_score
-        );
-    }
-
-    if let Some(identity) = validator_identity {
-        if identity.validator_id != vote.voter {
-            anyhow::bail!(
-                "validator identity mismatch for vote: identity={}, vote={}",
-                hex::encode(identity.validator_id),
-                hex::encode(vote.voter)
-            );
-        }
-        register_experimental_checkpoint_validator(state, identity)?;
-    }
-
-    if !state
-        .known_validators
-        .iter()
-        .any(|validator| validator.validator_id == vote.voter)
-    {
-        anyhow::bail!(
-            "unknown checkpoint voter {}; provide validator identity first",
-            hex::encode(vote.voter)
-        );
-    }
-
-    let validator_set = dag_validator_set(state);
-    verify_dag_checkpoint_vote(&validator_set, &vote)
-        .map_err(|e| anyhow::anyhow!("checkpoint vote verification failed: {}", e))?;
-
-    let commits = state
-        .checkpoint_vote_pool
-        .entry(vote.target.clone())
-        .or_default();
-    if commits.iter().any(|existing| existing.voter == vote.voter) {
-        return Ok(());
-    }
-    commits.push(vote);
-    commits.sort_by(|a, b| a.voter.cmp(&b.voter));
-
-    recompute_latest_checkpoint_finality(state)?;
-    if had_validator_identity {
-        maybe_spawn_local_vote_gossip(state);
-    }
-    Ok(())
-}
-
-#[cfg(all(feature = "dag", feature = "ghostdag-compat"))]
-pub(crate) fn make_local_checkpoint_vote(
-    local_validator: &misaka_dag::LocalDagValidator,
-    checkpoint: &misaka_dag::DagCheckpoint,
-) -> anyhow::Result<misaka_types::validator::DagCheckpointVote> {
-    use misaka_crypto::validator_sig::validator_sign;
-    use misaka_types::validator::{DagCheckpointVote, ValidatorSignature};
-
-    let target = checkpoint.validator_target();
-    let stub = DagCheckpointVote {
-        voter: local_validator.identity.validator_id,
-        target,
-        signature: ValidatorSignature { bytes: vec![] },
-    };
-    let sig = validator_sign(&stub.signing_bytes(), &local_validator.keypair.secret_key)
-        .map_err(|e| anyhow::anyhow!("failed to sign DAG checkpoint vote: {}", e))?;
-    Ok(DagCheckpointVote {
-        signature: ValidatorSignature {
-            bytes: sig.to_bytes(),
-        },
-        ..stub
-    })
-}
-
-#[cfg(all(feature = "dag", feature = "ghostdag-compat"))]
-pub(crate) fn refresh_local_checkpoint_attestation(
-    state: &mut misaka_dag::DagNodeState,
-) -> anyhow::Result<()> {
-    let (identity, vote) = match (&state.local_validator, &state.latest_checkpoint) {
-        (Some(local_validator), Some(checkpoint)) => (
-            local_validator.identity.clone(),
-            make_local_checkpoint_vote(local_validator, checkpoint)?,
-        ),
-        _ => {
-            state.latest_checkpoint_vote = None;
-            state.latest_checkpoint_finality = None;
-            return Ok(());
-        }
-    };
-
-    register_experimental_checkpoint_validator(state, identity)?;
-    state.latest_checkpoint_vote = Some(vote.clone());
-    ingest_checkpoint_vote(state, vote, None)
-}
-
-#[cfg(all(feature = "dag", feature = "ghostdag-compat"))]
-async fn start_dag_node(
-    cli: Cli,
-    node_mode: NodeMode,
-    role: NodeRole,
-    _p2p_config: P2pConfig,
-    loaded_config: Option<misaka_config::NodeConfig>,
-) -> anyhow::Result<()> {
-    // SEC-FIX: Block ghostdag-compat on mainnet.
-    // The GhostDAG compatibility path is the legacy runtime (pre-Narwhal).
-    // It uses serde_json TX deserialization (vs borsh in Narwhal), has privacy
-    // endpoint remnants, and lacks many security fixes applied to Narwhal path.
-    // Mainnet MUST use the Narwhal/Bullshark runtime (start_narwhal_node).
-    if cli.chain_id == 1 {
-        anyhow::bail!(
-            "FATAL: ghostdag-compat mode is not supported on mainnet (chain_id=1). \
-             Use the default Narwhal/Bullshark runtime. \
-             Remove the ghostdag-compat feature flag from the build."
-        );
-    }
-
-    // Extract guard config before the p2p_config is consumed
-    let guard_config = _p2p_config.guard.clone();
-    use misaka_dag::{
-        dag_block_producer::run_dag_block_producer_dual, dag_finality::FinalityManager,
-        dag_store::ThreadSafeDagStore, load_runtime_snapshot, save_runtime_snapshot, DagMempool,
-        DagNodeState, DagStateManager, DagStore, GhostDagEngine, ZERO_HASH,
-    };
-    use std::collections::HashSet;
-    use std::path::PathBuf;
-    use std::sync::Arc;
-    use tokio::sync::RwLock;
-
-    // ══════════════════════════════════════════════════════
-    //  DAG Consensus — Production Mode
-    //
-    //  Known limitations (tracked for mainnet):
-    //  - DAG-native wallet / explorer integration in progress
-    //  - Finality checkpoints persisted inside local runtime snapshot
-    //
-    //  Testnet operation:
-    //  - JSON snapshot restore + periodic save implemented
-    //  - P2P DAG relay + IBD pipeline operational
-    // ══════════════════════════════════════════════════════
-
-    info!("╔═══════════════════════════════════════════════════════════╗");
-    info!("║  MISAKA Network — DAG Consensus (GhostDAG)              ║");
-    info!("╚═══════════════════════════════════════════════════════════╝");
-
-    let snapshot_path: PathBuf =
-        std::path::Path::new(&cli.data_dir).join("dag_runtime_snapshot.json");
-    let validator_lifecycle_path =
-        validator_lifecycle_snapshot_path(std::path::Path::new(&cli.data_dir), cli.chain_id);
-    let runtime_recovery_observation =
-        Arc::new(RwLock::new(dag_rpc::DagRuntimeRecoveryObservation::new(
-            snapshot_path.clone(),
-            validator_lifecycle_path.clone(),
-            std::path::Path::new(&cli.data_dir).join("dag_wal.journal"),
-            std::path::Path::new(&cli.data_dir).join("dag_wal.journal.tmp"),
-        )));
-    if let Err(e) = std::fs::create_dir_all(&cli.data_dir) {
-        anyhow::bail!("failed to create data dir '{}': {}", cli.data_dir, e);
-    }
-    let local_validator = load_or_create_local_dag_validator(
-        std::path::Path::new(&cli.data_dir),
-        role,
-        cli.validator_index,
-        cli.chain_id,
-    )?;
-    let attestation_rpc_peers = normalize_dag_rpc_peers(&cli.dag_rpc_peers);
-    let genesis_path = resolve_genesis_committee_path(cli.genesis_path.as_deref());
-    let manifest = crate::genesis_committee::GenesisCommitteeManifest::load(&genesis_path)?;
-    let genesis_bootstrap_known_validators = if cli.chain_id == 1 {
-        Vec::new()
-    } else {
-        manifest.bootstrap_validator_identities(cli.chain_id)?
-    };
-    let genesis_bootstrap_runtime_active_sr_validator_ids = genesis_bootstrap_known_validators
-        .iter()
-        .take(misaka_types::constants::NUM_SUPER_REPRESENTATIVES)
-        .map(|validator| validator.validator_id)
-        .collect::<Vec<_>>();
-    let parsed_seeds: Vec<misaka_types::seed_entry::SeedEntry> = if cli.seeds.is_empty() {
-        vec![]
-    } else if cli.seed_pubkeys.is_empty() {
-        anyhow::bail!(
-            "FATAL: --seeds provided ({}) but --seed-pubkeys is empty. \
-             The committee relay handshake is PK-pinned; there is no TOFU mode.",
-            cli.seeds.len()
-        );
-    } else if cli.seed_pubkeys.len() != cli.seeds.len() {
-        anyhow::bail!(
-            "FATAL: --seed-pubkeys count ({}) != --seeds count ({}). \
-             Each seed requires a corresponding pubkey in the same order.",
-            cli.seed_pubkeys.len(),
-            cli.seeds.len()
-        );
-    } else {
-        cli.seeds
-            .iter()
-            .zip(cli.seed_pubkeys.iter())
-            .map(|(addr, pk)| misaka_types::seed_entry::SeedEntry {
-                address: addr.clone(),
-                transport_pubkey: pk.clone(),
-            })
-            .collect()
-    };
-
-    // γ-2.5 / γ-3: bootstrap StakingRegistry via the shared extraction.
-    // Behavior matches the pre-γ-2.5 inline dag path (seed_on_fresh=true,
-    // log_prefix="Layer 6"). γ-3 adds a process-wide `Arc<StakingConfig>`
-    // that is threaded through to downstream consumers.
-    // Group 1: same config glue helper as the narwhal path above.
-    // Option A: `loaded_config` threaded in via function parameter.
-    let staking_config: Arc<misaka_consensus::staking::StakingConfig> = Arc::new(
-        crate::staking_config_builder::build_staking_config_for_chain(
-            cli.chain_id,
-            loaded_config.as_ref(),
-        ),
-    );
-    tracing::info!(
-        "StakingConfig[dag]: chain_id={}, unbonding_epochs={}, min_stake={}, max_validators={}, nodeconfig={}",
-        cli.chain_id,
-        staking_config.unbonding_epochs,
-        staking_config.min_validator_stake,
-        staking_config.max_active_validators,
-        if loaded_config.is_some() { "provided" } else { "none" },
-    );
-    let lifecycle_bootstrap = crate::validator_lifecycle_bootstrap::bootstrap_validator_lifecycle(
-        std::path::Path::new(&cli.data_dir),
-        cli.chain_id,
-        staking_config.clone(),
-        &genesis_path,
-        "Layer 6",
-        /* seed_on_fresh = */ true,
-    )
-    .await?;
-    let validator_lifecycle_store = lifecycle_bootstrap.store;
-    let validator_registry = lifecycle_bootstrap.registry;
-    // γ-3.1: dag path uses misaka_dag::DagMempool (different mempool type
-    // than narwhal_consensus::NarwhalMempoolIngress), which does not yet
-    // carry StakingConfig. This binding stays underscore-prefixed until the
-    // DagMempool admit path is γ-3.1-equivalent (separate follow-up; misaka-mempool
-    // vs misaka-dag are independent crates with parallel admission pipelines).
-    let _staking_config_arc = lifecycle_bootstrap.staking_config;
-    let restored_epoch = lifecycle_bootstrap.current_epoch;
-    let restored_epoch_progress = lifecycle_bootstrap.epoch_progress;
-
-    // ── Extract PQ transport keys before local_validator is moved into DagNodeState ──
-    let transport_keys: Option<(
-        misaka_crypto::validator_sig::ValidatorPqPublicKey,
-        misaka_crypto::validator_sig::ValidatorPqSecretKey,
-    )> = local_validator
-        .as_ref()
-        .map(|lv| (lv.keypair.public_key.clone(), lv.keypair.secret_key.clone()));
-
-    // ══════════════════════════════════════════════════════
-    //  Banner
-    // ══════════════════════════════════════════════════════
-
-    info!("╔═══════════════════════════════════════════════════════════╗");
-    info!("║  MISAKA Network v2.0.0-alpha — Privacy BlockDAG (DAG)  ║");
-    info!(
-        "║  Consensus: GhostDAG (k={})                             ║",
-        cli.dag_k
-    );
-    info!("╚═══════════════════════════════════════════════════════════╝");
-
-    let mode_label = match node_mode {
-        NodeMode::Public => "🌐 PUBLIC  — accepts inbound, advertises IP",
-        NodeMode::Hidden => "🔒 HIDDEN  — outbound only, IP never advertised",
-        NodeMode::Seed => "🌱 SEED    — bootstrap node, peer discovery",
-    };
-    info!("Mode: {}", mode_label);
-    info!(
-        "Role: {} (block production {})",
-        role,
-        if role.produces_blocks() {
-            "ENABLED"
-        } else {
-            "disabled"
-        }
-    );
-    if !attestation_rpc_peers.is_empty() {
-        info!(
-            "Layer 5: experimental DAG attestation gossip peers = {}",
-            attestation_rpc_peers.join(", ")
-        );
-    }
-
-    // ══════════════════════════════════════════════════════
-    //  Layer 1: Storage & State (基盤層)
-    // ══════════════════════════════════════════════════════
-
-    // ── 1a. Restore from snapshot if available, otherwise bootstrap genesis ──
-    let (
-        dag_store,
-        utxo_set,
-        state_manager,
-        latest_checkpoint,
-        known_validators,
-        runtime_active_sr_validator_ids,
-        latest_checkpoint_vote,
-        latest_checkpoint_finality,
-        checkpoint_vote_pool,
-        genesis_hash,
-    ) = match load_runtime_snapshot(&snapshot_path, 1000) {
-        Ok(Some(restored)) => {
-            {
-                let mut recovery = runtime_recovery_observation.write().await;
-                recovery.mark_startup_snapshot_restored(true);
-            }
-            info!(
-                "Layer 1: restored DAG runtime snapshot | genesis={} | height={}",
-                hex::encode(&restored.genesis_hash[..8]),
-                restored.utxo_set.height,
-            );
-            if let Some(cp) = restored.latest_checkpoint.as_ref() {
-                info!(
-                    "Layer 1: restored latest checkpoint | score={} | block={}",
-                    cp.blue_score,
-                    hex::encode(&cp.block_hash[..8]),
-                );
-            }
-            (
-                Arc::new(restored.dag_store),
-                restored.utxo_set,
-                restored.state_manager,
-                restored.latest_checkpoint,
-                restored.known_validators,
-                restored.runtime_active_sr_validator_ids,
-                restored.latest_checkpoint_vote,
-                restored.latest_checkpoint_finality,
-                restored.checkpoint_vote_pool,
-                restored.genesis_hash,
-            )
-        }
-        Ok(None) => {
-            {
-                let mut recovery = runtime_recovery_observation.write().await;
-                recovery.mark_startup_snapshot_restored(false);
-            }
-            let utxo_set = misaka_storage::utxo_set::UtxoSet::new(1000);
-            info!("Layer 1: UtxoSet initialized (max_delta_history=1000)");
-
-            let genesis_header = deterministic_dag_genesis_header(cli.chain_id);
-            let genesis_hash = genesis_header.compute_hash();
-            let dag_store = Arc::new(ThreadSafeDagStore::new(genesis_hash, genesis_header));
-            let state_manager = DagStateManager::new(HashSet::new(), HashSet::new());
-
-            if let Err(e) = save_runtime_snapshot(
-                &snapshot_path,
-                &dag_store,
-                &utxo_set,
-                &state_manager.stats,
-                None,
-                &[],
-                &[],
-                None,
-                None,
-                &std::collections::HashMap::new(),
-            ) {
-                warn!("Failed to persist initial DAG snapshot: {}", e);
-            }
-
-            info!(
-                "Layer 1: DAG Store initialized | genesis={}",
-                hex::encode(&genesis_hash[..8])
-            );
-            (
-                dag_store,
-                utxo_set,
-                state_manager,
-                None,
-                Vec::new(),
-                Vec::new(),
-                None,
-                None,
-                std::collections::HashMap::new(),
-                genesis_hash,
-            )
-        }
-        Err(e) => anyhow::bail!("failed to load DAG runtime snapshot: {}", e),
-    };
-
-    let mut known_validators: Vec<misaka_types::validator::ValidatorIdentity> = known_validators;
-    let mut runtime_active_sr_validator_ids: Vec<[u8; 32]> = runtime_active_sr_validator_ids;
-    let mut seeded_known_validators_from_genesis = false;
-
-    if known_validators.is_empty() && !genesis_bootstrap_known_validators.is_empty() {
-        info!(
-            "Layer 1 / Phase C: seeding validator registry from genesis committee | validators={} | chain_id={}",
-            genesis_bootstrap_known_validators.len(),
-            cli.chain_id
-        );
-        known_validators = genesis_bootstrap_known_validators.clone();
-        seeded_known_validators_from_genesis = true;
-    }
-
-    if runtime_active_sr_validator_ids.is_empty() && !known_validators.is_empty() {
-        if seeded_known_validators_from_genesis {
-            runtime_active_sr_validator_ids =
-                genesis_bootstrap_runtime_active_sr_validator_ids.clone();
-            info!(
-                "Layer 1 / Phase C: seeding runtime active SR set from genesis committee | active={} | min_stake={}",
-                runtime_active_sr_validator_ids.len(),
-                sr21_election::effective_min_sr_stake(cli.chain_id),
-            );
-        } else {
-            let bootstrap_election = sr21_election::run_election_for_chain(
-                &known_validators,
-                cli.chain_id,
-                manifest.epoch,
-            );
-            runtime_active_sr_validator_ids = bootstrap_election
-                .active_srs
-                .iter()
-                .map(|elected| elected.validator_id)
-                .collect();
-            info!(
-                "Layer 1 / Phase C: seeding runtime active SR set from restored validator registry | active={} | min_stake={}",
-                runtime_active_sr_validator_ids.len(),
-                sr21_election::effective_min_sr_stake(cli.chain_id),
-            );
-        }
-    }
-
-    let initial_sr_index = local_validator
-        .as_ref()
-        .and_then(|validator| {
-            runtime_active_sr_validator_ids
-                .iter()
-                .position(|validator_id| *validator_id == validator.identity.validator_id)
-        })
-        .unwrap_or(cli.validator_index);
-    let initial_num_active_srs = runtime_active_sr_validator_ids.len().max(1);
-
-    // ══════════════════════════════════════════════════════
-    //  Layer 2: Consensus & Finality (合意形成層)
-    // ══════════════════════════════════════════════════════
-
-    // ── 2a. GhostDAG エンジン ──
-    let ghostdag = GhostDagEngine::new(cli.dag_k, genesis_hash);
-    let mut reachability = misaka_dag::reachability::ReachabilityStore::new(genesis_hash);
-
-    // ── 2a-fix: チェックポイント復元時に reachability tree を再構築 ──
-    //
-    // ReachabilityStore はシリアライズされないため、スナップショット復元後は
-    // genesis のみが tree に存在する。dag_store に残っている全ブロックの
-    // selected_parent → child 関係を blue_score 昇順で再挿入する。
-    {
-        let snap = dag_store.snapshot();
-        let all = snap.all_hashes();
-        if all.len() > 1 {
-            // blue_score でトポロジカルソート（genesis が最小）
-            let mut blocks_with_score: Vec<([u8; 32], u64)> = all
-                .iter()
-                .filter(|h| **h != genesis_hash)
-                .filter_map(|h| snap.get_ghostdag_data(h).map(|gd| (*h, gd.blue_score)))
-                .collect();
-            blocks_with_score.sort_by_key(|&(_, score)| score);
-
-            let mut rebuilt = 0usize;
-            let mut skipped = 0usize;
-            for (hash, _score) in &blocks_with_score {
-                if let Some(gd) = snap.get_ghostdag_data(hash) {
-                    let sp = gd.selected_parent;
-                    if sp != ZERO_HASH {
-                        match reachability.add_child(sp, *hash) {
-                            Ok(()) => rebuilt += 1,
-                            Err(_) => skipped += 1,
-                        }
-                    }
-                }
-            }
-            if rebuilt > 0 {
-                info!(
-                    "Layer 2: rebuilt reachability tree from snapshot ({} blocks, {} skipped)",
-                    rebuilt, skipped
-                );
-            }
-        }
-    }
-
-    info!(
-        "Layer 2: GhostDAG engine initialized (k={}, genesis={})",
-        cli.dag_k,
-        hex::encode(&genesis_hash[..8])
-    );
-
-    // ── 2b. Finality マネージャ ──
-    let _finality_manager = FinalityManager::new(cli.dag_checkpoint_interval);
-    info!(
-        "Layer 2: Finality manager initialized (checkpoint_interval={})",
-        cli.dag_checkpoint_interval
-    );
-
-    // ══════════════════════════════════════════════════════
-    //  Layer 3: Execution (遅延状態評価層)
-    // ══════════════════════════════════════════════════════
-
-    info!("Layer 3: DAG State Manager initialized (delayed evaluation mode)");
-
-    // ══════════════════════════════════════════════════════
-    //  Layer 4: Mempool & Block Production (生成層)
-    // ══════════════════════════════════════════════════════
-
-    // ── 4a. DAG Mempool ──
-    let mempool = DagMempool::new(cli.dag_mempool_size);
-    info!(
-        "Layer 4: DAG Mempool initialized (max_size={})",
-        cli.dag_mempool_size
-    );
-
-    // ── 4b. Proposer ID (バリデータ公開鍵ハッシュ) ──
-    let proposer_id: [u8; 32] = {
-        use sha3::{Digest, Sha3_256};
-        let mut h = Sha3_256::new();
-        h.update(b"MISAKA_DAG_PROPOSER:");
-        h.update(cli.name.as_bytes());
-        h.update(cli.validator_index.to_le_bytes());
-        h.finalize().into()
-    };
-
-    // ══════════════════════════════════════════════════════
-    //  DI 結合: DagNodeState (全レイヤーの統合)
-    // ══════════════════════════════════════════════════════
-    //
-    // ┌─────────────────────────────────────────────────┐
-    // │              DagNodeState                       │
-    // │  ┌────────────┐  ┌───────────────┐             │
-    // │  │  dag_store  │  │   ghostdag     │  Layer 1+2 │
-    // │  └────────────┘  └───────────────┘             │
-    // │  ┌────────────────────┐  ┌───────────┐         │
-    // │  │  state_manager      │  │  utxo_set  │ Layer 3 │
-    // │  └────────────────────┘  └───────────┘         │
-    // │  ┌────────────┐  ┌──────────────┐              │
-    // │  │  mempool    │  │  finality_mgr │  Layer 4    │
-    // │  └────────────┘  └──────────────┘              │
-    // └─────────────────────────────────────────────────┘
-
-    let known_block_hashes: HashSet<_> = dag_store.snapshot().all_hashes().into_iter().collect();
-
-    let dag_node_state = DagNodeState {
-        dag_store: dag_store.clone(),
-        ghostdag,
-        state_manager,
-        utxo_set,
-        virtual_state: misaka_dag::VirtualState::new(genesis_hash),
-        ingestion_pipeline: misaka_dag::IngestionPipeline::new(known_block_hashes),
-        quarantined_blocks: std::collections::HashSet::new(),
-        mempool,
-        chain_id: cli.chain_id,
-        validator_count: cli.validators,
-        known_validators,
-        proposer_id,
-        sr_index: initial_sr_index,
-        num_active_srs: initial_num_active_srs,
-        runtime_active_sr_validator_ids,
-        local_validator,
-        genesis_hash,
-        snapshot_path: snapshot_path.clone(),
-        latest_checkpoint,
-        latest_checkpoint_vote,
-        latest_checkpoint_finality,
-        checkpoint_vote_pool,
-        attestation_rpc_peers,
-        blocks_produced: 0,
-        reachability,
-        persistent_backend: None, // Set below after RocksDB initialization
-        faucet_cooldowns: std::collections::HashMap::new(),
-        pending_transactions: std::collections::HashMap::new(),
-    };
-    #[allow(unused_mut)]
-    let mut dag_node_state = dag_node_state;
-
-    // ── 1b. RocksDB Persistent Backend (optional, feature-gated) ──
-    #[cfg(feature = "rocksdb")]
-    {
-        use misaka_dag::persistent_store::{PersistentDagBackend, RocksDbDagStore};
-
-        let rocks_path = std::path::Path::new(&cli.data_dir).join("dag_rocksdb");
-        match RocksDbDagStore::open(&rocks_path, genesis_hash, {
-            // Re-create genesis header for RocksDB init (idempotent if already exists)
-            let snapshot = dag_node_state.dag_store.snapshot();
-            snapshot
-                .get_header(&genesis_hash)
-                .cloned()
-                .unwrap_or_else(|| deterministic_dag_genesis_header(cli.chain_id))
-        }) {
-            Ok(rocks) => {
-                let rocks = Arc::new(rocks);
-
-                // Migration: if RocksDB has only genesis but in-memory has more blocks,
-                // import the in-memory dump into RocksDB.
-                let rocks_count = rocks.block_count();
-                let mem_count = dag_node_state.dag_store.block_count();
-                if rocks_count <= 1 && mem_count > 1 {
-                    info!(
-                        "Layer 1: Migrating {} blocks from in-memory store to RocksDB...",
-                        mem_count,
-                    );
-                    let dump = dag_node_state.dag_store.export_dump();
-                    if let Err(e) =
-                        misaka_dag::persistent_store::import_from_memory_dump(&rocks, &dump)
-                    {
-                        error!(
-                            "RocksDB migration failed: {} — continuing with in-memory only",
-                            e
-                        );
-                    } else {
-                        info!("Layer 1: RocksDB migration complete ({} blocks)", mem_count);
-                    }
-                }
-
-                dag_node_state.persistent_backend = Some(rocks);
-                info!(
-                    "Layer 1: RocksDB persistent backend opened at {} ({} blocks)",
-                    rocks_path.display(),
-                    dag_node_state
-                        .persistent_backend
-                        .as_ref()
-                        .map(|r| r.block_count())
-                        .unwrap_or(0),
-                );
-            }
-            Err(e) => {
-                error!(
-                    "Layer 1: RocksDB open failed: {} — falling back to in-memory + JSON snapshot",
-                    e,
-                );
-                // persistent_backend remains None — node continues with in-memory store
-            }
-        }
-    }
-
-    #[cfg(not(feature = "rocksdb"))]
-    {
-        info!("Layer 1: RocksDB feature not enabled — using in-memory store + JSON snapshot");
-    }
-
-    let shared_state: Arc<RwLock<DagNodeState>> = Arc::new(RwLock::new(dag_node_state));
-    info!("DI wiring complete — all layers bound to DagNodeState");
-    info!("Narwhal dissemination shadow ingress service ready");
-
-    // ══════════════════════════════════════════════════════
-    //  Layer 5: Network (DAG P2P)
-    // ══════════════════════════════════════════════════════
-
-    // ── 5a. Crash-Safe Recovery: WAL scan + discard incomplete ──
-    {
-        use misaka_storage::dag_recovery;
-        let data_dir = std::path::Path::new(&cli.data_dir);
-        let recovery = dag_recovery::bootstrap(data_dir, 1000);
-        match recovery {
-            dag_recovery::DagRecoveryResult::Recovered { rolled_back, .. } => {
-                {
-                    let mut recovery = runtime_recovery_observation.write().await;
-                    recovery.mark_startup_wal_state("recovered", rolled_back);
-                }
-                if rolled_back > 0 {
-                    warn!(
-                        "Layer 5: DAG recovery rolled back {} incomplete block(s) from WAL",
-                        rolled_back
-                    );
-                } else {
-                    info!("Layer 5: DAG recovery — WAL clean, no incomplete blocks");
-                }
-            }
-            dag_recovery::DagRecoveryResult::Fresh => {
-                {
-                    let mut recovery = runtime_recovery_observation.write().await;
-                    recovery.mark_startup_wal_state("fresh", 0);
-                }
-                info!("Layer 5: DAG recovery — fresh start (no WAL)");
-            }
-            dag_recovery::DagRecoveryResult::Failed { reason } => {
-                {
-                    let mut recovery = runtime_recovery_observation.write().await;
-                    recovery.mark_startup_wal_state("failed", 0);
-                }
-                error!("Layer 5: DAG recovery FAILED: {}", reason);
-                error!("Node cannot start safely. Delete data dir and resync.");
-                std::process::exit(1);
-            }
-        }
-
-        if let Err(e) = dag_recovery::compact_wal_after_recovery(data_dir) {
-            warn!("Layer 5: DAG recovery cleanup skipped: {}", e);
-        }
-    }
-
-    // Refresh and gossip checkpoint attestation only after crash recovery has
-    // settled the DAG view, so we never rebroadcast a vote against a stale
-    // pre-recovery checkpoint target.
-    {
-        let startup_gossip = {
-            let mut guard = shared_state.write().await;
-            prune_checkpoint_attestation_state(&mut guard);
-            if let Err(e) = refresh_local_checkpoint_attestation(&mut guard) {
-                warn!(
-                    "Failed to refresh local checkpoint attestation on startup: {}",
-                    e
-                );
-            }
-            local_vote_gossip_payload(&guard)
-        };
-
-        if let Some((vote, identity, peers)) = startup_gossip {
-            tokio::spawn(async move {
-                gossip_checkpoint_vote_to_peers(peers, vote, identity).await;
-            });
-        }
-    }
-    {
-        let state = shared_state.clone();
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
-            loop {
-                interval.tick().await;
-                let peers = {
-                    let guard = state.read().await;
-                    guard.attestation_rpc_peers.clone()
-                };
-                if peers.is_empty() {
-                    continue;
-                }
-
-                let discovered = discover_checkpoint_validators_from_rpc_peers(&peers).await;
-                if discovered.is_empty() {
-                    continue;
-                }
-
-                let follow_up = {
-                    let mut guard = state.write().await;
-                    match merge_discovered_checkpoint_validators(&mut guard, discovered) {
-                        Ok(false) => None,
-                        Ok(true) => {
-                            if let Err(e) = recompute_latest_checkpoint_finality(&mut guard) {
-                                warn!(
-                                    "Failed to recompute checkpoint finality after validator discovery: {}",
-                                    e
-                                );
-                            }
-                            if guard.local_validator.is_some() && guard.latest_checkpoint.is_some()
-                            {
-                                if let Err(e) = refresh_local_checkpoint_attestation(&mut guard) {
-                                    warn!(
-                                        "Failed to refresh local checkpoint attestation after validator discovery: {}",
-                                        e
-                                    );
-                                }
-                            }
-                            if let Err(e) = save_runtime_snapshot(
-                                &guard.snapshot_path,
-                                &guard.dag_store,
-                                &guard.utxo_set,
-                                &guard.state_manager.stats,
-                                guard.latest_checkpoint.as_ref(),
-                                &guard.known_validators,
-                                &guard.runtime_active_sr_validator_ids,
-                                guard.latest_checkpoint_vote.as_ref(),
-                                guard.latest_checkpoint_finality.as_ref(),
-                                &guard.checkpoint_vote_pool,
-                            ) {
-                                warn!(
-                                    "Failed to persist DAG snapshot after validator discovery: {}",
-                                    e
-                                );
-                            }
-                            local_vote_gossip_payload(&guard)
-                        }
-                        Err(e) => {
-                            warn!("Failed to merge discovered DAG validators: {}", e);
-                            None
-                        }
-                    }
-                };
-
-                if let Some((vote, identity, peers)) = follow_up {
-                    gossip_checkpoint_vote_to_peers(peers, vote, identity).await;
-                }
-            }
-        });
-    }
-    {
-        let state = shared_state.clone();
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
-            loop {
-                interval.tick().await;
-                let gossip = {
-                    let mut guard = state.write().await;
-                    if let Err(e) = refresh_local_checkpoint_attestation(&mut guard) {
-                        warn!("Failed to refresh local checkpoint attestation: {}", e);
-                        None
-                    } else {
-                        local_vote_gossip_payload(&guard)
-                    }
-                };
-
-                if let Some((vote, identity, peers)) = gossip {
-                    gossip_checkpoint_vote_to_peers(peers, vote, identity).await;
-                }
-            }
-        });
-    }
-
-    // ── 5b. P2P Event Loop ──
-    let (p2p_event_loop, p2p_inbound_tx, mut p2p_outbound_rx, dag_p2p_observation) =
-        dag_p2p_network::DagP2pEventLoop::new(shared_state.clone(), cli.chain_id);
-
-    // Spawn the P2P event loop
-    let _p2p_handle = tokio::spawn(async move {
-        p2p_event_loop.run().await;
-    });
-
-    // Spawn outbound message consumer.
-    // ── STOP LINE REMOVED (v4 semantic finalization) ──
-    // The outbound channel is now consumed by dag_p2p_transport::run_dag_p2p_transport,
-    // which handles PQ-encrypted TCP connections with ML-KEM-768 + ML-DSA-65 handshake.
-    //
-    // If no transport keys are available (non-validator node), fall back to
-    // observation-only mode (log outbound traffic without sending).
-    let p2p_listen_addr: SocketAddr = format!("0.0.0.0:{}", cli.p2p_port).parse()?;
-
-    // Parse seed peer addresses for outbound P2P connections
-    let seed_addrs: Vec<SocketAddr> = cli
-        .seeds
-        .iter()
-        .filter_map(|s| {
-            s.parse::<SocketAddr>().ok().or_else(|| {
-                warn!("Invalid seed address '{}' — skipping", s);
-                None
-            })
-        })
-        .collect();
-
-    if let Some((transport_pk, transport_sk)) = transport_keys {
-        let seed_count = seed_addrs.len();
-        let transport_inbound_tx = p2p_inbound_tx.clone();
-        let transport_observation = dag_p2p_observation.clone();
-        let transport_state = shared_state.clone();
-        let transport_node_name = cli.name.clone();
-        let transport_guard_config = guard_config.clone();
-        let _transport_handle = tokio::spawn(async move {
-            dag_p2p_transport::run_dag_p2p_transport(
-                p2p_listen_addr,
-                transport_pk,
-                transport_sk,
-                transport_inbound_tx,
-                p2p_outbound_rx,
-                cli.chain_id,
-                transport_node_name,
-                node_mode,
-                transport_state,
-                seed_addrs,
-                parsed_seeds.clone(),
-                transport_observation,
-                transport_guard_config,
-            )
-            .await;
-        });
-        info!(
-            "Layer 5: DAG P2P PQ-encrypted transport on {} | seeds={} (ML-KEM-768 + ChaCha20-Poly1305)",
-            p2p_listen_addr, seed_count,
-        );
-    } else {
-        // Non-validator: observation-only outbound consumer
-        let _outbound_handle = tokio::spawn(async move {
-            while let Some(event) = p2p_outbound_rx.recv().await {
-                let target = event
-                    .peer_id
-                    .map(|id| hex::encode(&id.0[..4]))
-                    .unwrap_or_else(|| "broadcast".to_string());
-                tracing::debug!(
-                    "DAG P2P outbound → {} (no transport — observation only): {:?}",
-                    target,
-                    std::mem::discriminant(&event.message)
-                );
-            }
-        });
-        warn!("Layer 5: DAG P2P transport NOT started — no local validator keys");
-    }
-
-    info!(
-        "Layer 5: DAG P2P event loop started (inbound_ch={}, outbound_ch={})",
-        dag_p2p_network::INBOUND_CHANNEL_SIZE,
-        dag_p2p_network::OUTBOUND_CHANNEL_SIZE,
-    );
-
-    // ══════════════════════════════════════════════════════
-    //  Layer 6: RPC Server (DAG RPC)
-    // ══════════════════════════════════════════════════════
-
-    // SECURITY: default to localhost-only binding. Use --rpc-bind 0.0.0.0 for public.
-    let rpc_addr: SocketAddr = format!("127.0.0.1:{}", cli.rpc_port).parse()?;
-    let rpc_state = shared_state.clone();
-    let rpc_observation = dag_p2p_observation.clone();
-    let rpc_runtime_recovery = runtime_recovery_observation.clone();
-
-    // ── Validator Staking Registry ──
-    //
-    // 0.9.0 β-1 / γ-2.5: the `registered_validators.json` → StakingRegistry
-    // migration used to fire here. γ-2.5 moved it inside
-    // `bootstrap_validator_lifecycle` (called far above, at the snapshot
-    // load point) so that both narwhal + dag paths share the same order of
-    // operations. `validator_registry` is already Arc<RwLock<_>>'d by the
-    // bootstrap; only `current_epoch` and `epoch_progress` still need their
-    // caller-specific lock shapes.
-    let current_epoch: Arc<RwLock<u64>> = Arc::new(RwLock::new(restored_epoch));
-    let epoch_progress: Arc<Mutex<validator_lifecycle_persistence::ValidatorEpochProgress>> =
-        Arc::new(Mutex::new(restored_epoch_progress));
-    info!(
-        "Layer 6: Validator staking registry initialized (min_stake={})",
-        if cli.chain_id == 1 {
-            "10M MISAKA (mainnet)"
-        } else {
-            "1M MISAKA (testnet)"
-        }
-    );
-
-    // ── SEC-STAKE: Auto-register local validator with stake proof from misakastake.com ──
-    //
-    // If --stake-signature is provided (from misakastake.com), the node:
-    // 1. Calls Solana RPC to verify the TX (finalized, correct program, correct L1 key)
-    // 2. Extracts the REAL staked amount from the on-chain event
-    // 3. Registers with solana_stake_verified=true and the verified amount
-    //
-    // If Solana RPC is not configured, accepts the signature format-only (backward compat).
-    {
-        let local_validator_ref = shared_state.read().await;
-        if let Some(ref lv) = local_validator_ref.local_validator {
-            let validator_id = lv.identity.validator_id;
-            let has_stake_sig = cli.stake_signature.is_some();
-            drop(local_validator_ref);
-
-            // R3-H2 FIX: Pre-fetch config with read lock before Solana RPC
-            // to avoid holding write lock across external network calls.
-            let (already_registered, min_validator_stake) = {
-                let registry = validator_registry.read().await;
-                (
-                    registry.get(&validator_id).is_some(),
-                    registry.config().min_validator_stake,
-                )
-            };
-            let epoch = *current_epoch.read().await;
-
-            if !already_registered {
-                let shared_guard = shared_state.read().await;
-                if let Some(lv) = shared_guard.local_validator.as_ref() {
-                    let pubkey_bytes = lv.identity.public_key.bytes.clone();
-                    let mut reward_address = [0u8; 32];
-                    reward_address.copy_from_slice(&validator_id);
-                    drop(shared_guard);
-
-                    // Read L1 public key from key file (for Solana event matching)
-                    let l1_pubkey_hex = {
-                        let key_path =
-                            std::path::Path::new(&cli.data_dir).join("l1-public-key.json");
-                        if key_path.exists() {
-                            let raw = std::fs::read_to_string(&key_path).unwrap_or_default();
-                            let parsed: serde_json::Value =
-                                serde_json::from_str(&raw).unwrap_or_default();
-                            parsed["l1PublicKey"].as_str().unwrap_or("").to_string()
-                        } else {
-                            String::new()
-                        }
-                    };
-
-                    // Determine stake amount and verification status
-                    // (Solana RPC calls happen here WITHOUT holding registry lock)
-                    let (stake_amount, stake_verified, stake_sig) = if let Some(ref sig) =
-                        cli.stake_signature
-                    {
-                        let rpc_url = solana_stake_verify::solana_rpc_url();
-                        let program_id = cli
-                            .staking_program_id
-                            .clone()
-                            .unwrap_or_else(solana_stake_verify::staking_program_id);
-
-                        if !rpc_url.is_empty()
-                            && !program_id.is_empty()
-                            && !l1_pubkey_hex.is_empty()
-                        {
-                            // Full on-chain verification
-                            let min_stake = min_validator_stake;
-                            match solana_stake_verify::verify_solana_stake(
-                                &rpc_url,
-                                sig,
-                                &l1_pubkey_hex,
-                                &program_id,
-                                min_stake,
-                            )
-                            .await
-                            {
-                                Ok(verified) => {
-                                    info!(
-                                        "SEC-STAKE: On-chain verification SUCCESS — \
-                                     amount={} l1_key={}... program={}",
-                                        verified.amount,
-                                        &verified.l1_public_key[..16],
-                                        &verified.program_id[..16.min(verified.program_id.len())],
-                                    );
-                                    (verified.amount, true, Some(sig.clone()))
-                                }
-                                Err(e) => {
-                                    error!(
-                                        "SEC-STAKE: On-chain verification FAILED: {} — \
-                                     validator will NOT be activated until verified. \
-                                     Fix the issue and restart with --stake-signature",
-                                        e
-                                    );
-                                    // SEC-FIX [v9.1]: verification failure → verified=false.
-                                    // 旧実装は verified=true を返しており、RPC タイムアウトや
-                                    // 不正な signature でもバリデータが ACTIVE になれた。
-                                    // 修正: 検証失敗時は LOCKED 状態で留まり、activate() を拒否する。
-                                    (min_validator_stake, false, Some(sig.clone()))
-                                }
-                            }
-                        } else {
-                            // SEC-FIX [v9.1]: Solana RPC not configured → verified=false.
-                            // 旧実装は verified=true を返しており、RPC 未設定でも
-                            // 適当な --stake-signature を渡すだけで ACTIVE になれた。
-                            // 修正: RPC が未設定の場合は検証不可能なので LOCKED で留まる。
-                            if rpc_url.is_empty() {
-                                error!(
-                                    "SEC-STAKE: MISAKA_SOLANA_RPC_URL not set — \
-                                 cannot verify stake. Set env var and restart."
-                                );
-                            }
-                            if program_id.is_empty() {
-                                error!(
-                                    "SEC-STAKE: MISAKA_STAKING_PROGRAM_ID not set — \
-                                 cannot verify stake. Set env var and restart."
-                                );
-                            }
-                            (min_validator_stake, false, Some(sig.clone()))
-                        }
-                    } else {
-                        // No signature provided — unverified
-                        (min_validator_stake, false, None)
-                    };
-
-                    // R3-H2: Write lock acquired only AFTER Solana RPC completes
-                    let mut registry = validator_registry.write().await;
-                    // Re-check after lock reacquisition (another task may have registered)
-                    if registry.get(&validator_id).is_some() {
-                        drop(registry);
-                    } else {
-                        match registry.register(
-                            validator_id,
-                            pubkey_bytes,
-                            stake_amount,
-                            500, // 5% default commission
-                            reward_address,
-                            epoch,
-                            [0u8; 32], // stake_tx_hash placeholder
-                            0,
-                            stake_verified,
-                            stake_sig.clone(),
-                            // 0.9.0: bootstrap path is the Solana/off-chain variant.
-                            // l1_stake_verified is written only by `utxo_executor`
-                            // when a L1 StakeDeposit tx is finalized (γ-3).
-                            false,
-                        ) {
-                            Ok(()) => {
-                                if stake_verified {
-                                    info!(
-                                    "SEC-STAKE: Local validator {} registered with verified stake \
-                                 (amount={}, sig={}...)",
-                                    hex::encode(validator_id),
-                                    stake_amount,
-                                    stake_sig
-                                        .as_deref()
-                                        .map(|s| &s[..16.min(s.len())])
-                                        .unwrap_or("?"),
-                                );
-
-                                    // SEC-FIX [v9.1]: Solana 検証済みの実際の預入額を
-                                    // ValidatorIdentity.stake_weight に反映する。
-                                    //
-                                    // 旧実装: stake_weight は keystore ファイルから読み込んだ値のまま
-                                    // (デフォルト 1_000_000) で、Solana 上の実際の預入額と無関係だった。
-                                    // つまり VRF 提案者選出も BFT クォーラムも全バリデータ等重みで
-                                    // 動作しており、10M 預けても 100M 預けても同じ影響力だった。
-                                    //
-                                    // 修正: Solana 検証成功時に verified.amount を stake_weight に設定。
-                                    // これにより VRF 選出確率とコンセンサス重みが預入枚数に比例する。
-                                    {
-                                        let mut guard = shared_state.write().await;
-                                        if let Some(ref mut lv) = guard.local_validator {
-                                            let old_weight = lv.identity.stake_weight;
-                                            lv.identity.stake_weight = stake_amount as u128;
-                                            info!(
-                                            "SEC-STAKE: Updated local validator stake_weight: {} → {} \
-                                         (consensus weight now reflects Solana deposit)",
-                                            old_weight, lv.identity.stake_weight,
-                                        );
-                                        }
-                                        // known_validators 内の自分のエントリも更新
-                                        if let Some(kv) = guard
-                                            .known_validators
-                                            .iter_mut()
-                                            .find(|v| v.validator_id == validator_id)
-                                        {
-                                            kv.stake_weight = stake_amount as u128;
-                                        }
-                                    }
-                                } else {
-                                    warn!(
-                                    "SEC-STAKE: Local validator {} registered WITHOUT stake proof. \
-                                 Cannot activate until you stake at misakastake.com and restart \
-                                 with --stake-signature <SOLANA_TX_SIG>",
-                                    hex::encode(validator_id),
-                                );
-                                }
-                            }
-                            Err(e) => {
-                                warn!("SEC-STAKE: Failed to auto-register local validator: {}", e);
-                            }
-                        }
-                    } // end re-check else
-                    drop(registry);
-                    // γ-persistence: snapshot after auto-register so that a
-                    // Solana-verified local validator survives a restart
-                    // without re-running the full bootstrap path.
-                    if let Err(e) = crate::validator_lifecycle_persistence::persist_global_state(
-                        &validator_registry,
-                        &current_epoch,
-                        &epoch_progress,
-                    )
-                    .await
-                    {
-                        warn!(
-                            "SEC-STAKE: persist_global_state after auto-register                              failed (change stays in-memory): {}",
-                            e
-                        );
-                    }
-                } // end if let Some(lv)
-            } else if has_stake_sig {
-                // Already registered — update stake verification if new sig provided
-                let mut registry = validator_registry.write().await;
-                if let Some(account) = registry.get(&validator_id) {
-                    if !account.solana_stake_verified {
-                        if let Some(ref sig) = cli.stake_signature {
-                            // SEC-FIX: Pass None for on_chain_amount in local validator path.
-                            // Local validators have their stake verified via CLI (trusted path).
-                            match registry.mark_stake_verified(&validator_id, sig.clone(), None) {
-                                Ok(()) => {
-                                    info!(
-                                        "SEC-STAKE: Local validator {} stake verified on restart (sig={}...)",
-                                        hex::encode(validator_id),
-                                        &sig[..16.min(sig.len())],
-                                    );
-                                }
-                                Err(e) => {
-                                    warn!("SEC-STAKE: Failed to verify stake: {}", e);
-                                }
-                            }
-                        }
-                    } else {
-                        info!(
-                            "SEC-STAKE: Local validator {} already verified",
-                            hex::encode(validator_id),
-                        );
-                    }
-                }
-                drop(registry);
-                // γ-persistence: if mark_stake_verified fired, durably
-                // snapshot the registry so the verification survives a
-                // restart without re-reading the CLI --stake-signature.
-                if let Err(e) = crate::validator_lifecycle_persistence::persist_global_state(
-                    &validator_registry,
-                    &current_epoch,
-                    &epoch_progress,
-                )
-                .await
-                {
-                    warn!(
-                        "SEC-STAKE: persist_global_state after                          mark_stake_verified failed (change stays in-memory): {}",
-                        e
-                    );
-                }
-            }
-        } else {
-            drop(local_validator_ref);
-        }
-    }
-
-    let rpc_registry = validator_registry.clone();
-    let rpc_epoch = current_epoch.clone();
-    let rpc_epoch_progress = epoch_progress.clone();
-    let lifecycle_registry = validator_registry.clone();
-    let lifecycle_epoch = current_epoch.clone();
-    let lifecycle_epoch_progress = epoch_progress.clone();
-    let lifecycle_store = validator_lifecycle_store.clone();
-    let finality_epoch_state = shared_state.clone();
-    let finality_epoch_registry = validator_registry.clone();
-    let finality_epoch = current_epoch.clone();
-    let finality_epoch_progress = epoch_progress.clone();
-    let finality_epoch_store = validator_lifecycle_store.clone();
-    let finality_runtime_recovery = runtime_recovery_observation.clone();
-    let checkpoint_interval = cli.dag_checkpoint_interval.max(1);
-    let startup_finalized_score = {
-        let guard = shared_state.read().await;
-        guard
-            .latest_checkpoint_finality
-            .as_ref()
-            .map(|proof| proof.target.blue_score)
-    };
-    if let Some(finalized_score) = startup_finalized_score {
-        let mut recovery = finality_runtime_recovery.write().await;
-        recovery.mark_checkpoint_finality(Some(finalized_score));
-    }
-    let startup_replayed_finality = validator_lifecycle_store
-        .replay_restored_finality_and_persist(
-            &validator_registry,
-            &current_epoch,
-            &epoch_progress,
-            startup_finalized_score,
-            checkpoint_interval,
-        )
-        .await?;
-    if startup_replayed_finality {
-        let next_epoch = *current_epoch.read().await;
-        info!(
-            "Layer 6: validator lifecycle replayed restored finality on startup | epoch={} | finalized_blue_score={}",
-            next_epoch,
-            startup_finalized_score.unwrap_or_default()
-        );
-    }
-    let validator_epoch_secs = std::env::var("MISAKA_VALIDATOR_EPOCH_SECONDS")
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
-        .filter(|v| *v > 0)
-        .unwrap_or(86_400);
-    tokio::spawn(async move {
-        let mut ticker =
-            tokio::time::interval(tokio::time::Duration::from_secs(validator_epoch_secs));
-        loop {
-            ticker.tick().await;
-            let should_use_fallback_clock = {
-                lifecycle_epoch_progress
-                    .lock()
-                    .await
-                    .should_use_fallback_clock()
-            };
-            if !should_use_fallback_clock {
-                continue;
-            }
-            let next_epoch = {
-                let mut epoch = lifecycle_epoch.write().await;
-                *epoch = epoch.saturating_add(1);
-                *epoch
-            };
-            info!(
-                "Layer 6: validator lifecycle epoch advanced to {} via fallback clock",
-                next_epoch
-            );
-            if let Err(e) = lifecycle_store
-                .persist_state(
-                    &lifecycle_registry,
-                    &lifecycle_epoch,
-                    &lifecycle_epoch_progress,
-                )
-                .await
-            {
-                warn!(
-                    "Layer 6: failed to persist validator lifecycle epoch tick: {}",
-                    e
-                );
-            }
-        }
-    });
-
-    // ═══════════════════════════════════════════════════════════════
-    //  SEC-FIX [v9.1]: Epoch 毎の Solana ステーク再検証
-    //
-    //  1. ローカルバリデータ: verify_stake_still_active() でアンステーク検出
-    //  2. 全バリデータ: scrape_all_validator_stakes() で実際の預入額を取得
-    //  3. known_validators の stake_weight を Solana 上の実データで更新
-    // ═══════════════════════════════════════════════════════════════
-    let stake_verify_state = shared_state.clone();
-    let stake_verify_registry = validator_registry.clone();
-    let stake_verify_data_dir = cli.data_dir.clone();
-    tokio::spawn(async move {
-        // 初回は起動3分後、以降は6時間毎に再検証
-        tokio::time::sleep(tokio::time::Duration::from_secs(180)).await;
-        let mut ticker = tokio::time::interval(tokio::time::Duration::from_secs(6 * 3600));
-        loop {
-            ticker.tick().await;
-            info!("SEC-STAKE: Starting periodic Solana stake re-verification...");
-
-            // ── ローカルバリデータの l1_public_key を読む ──
-            let l1_pubkey_hex = {
-                let key_path =
-                    std::path::Path::new(&stake_verify_data_dir).join("l1-public-key.json");
-                if key_path.exists() {
-                    let raw = std::fs::read_to_string(&key_path).unwrap_or_default();
-                    let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap_or_default();
-                    parsed["l1PublicKey"].as_str().unwrap_or("").to_string()
-                } else {
-                    String::new()
-                }
-            };
-
-            // ── Solana から全バリデータのステーク情報を一括取得 ──
-            match solana_stake_verify::scrape_all_validator_stakes().await {
-                Ok(stake_map) => {
-                    info!(
-                        "SEC-STAKE: Scraped {} validator stakes from Solana",
-                        stake_map.len()
-                    );
-
-                    // ── ローカルバリデータの再検証 ──
-                    if !l1_pubkey_hex.is_empty() {
-                        if let Some(info) = stake_map.get(&l1_pubkey_hex) {
-                            let min_stake = {
-                                let reg = stake_verify_registry.read().await;
-                                reg.config().min_validator_stake
-                            };
-                            let staked_misaka = info.total_staked as f64 / 1_000_000_000.0;
-
-                            if info.total_staked >= min_stake {
-                                // ステーク有効 → stake_weight を更新
-                                let mut guard = stake_verify_state.write().await;
-                                if let Some(ref mut lv) = guard.local_validator {
-                                    let old = lv.identity.stake_weight;
-                                    lv.identity.stake_weight = info.total_staked as u128;
-                                    if old != lv.identity.stake_weight {
-                                        info!(
-                                            "SEC-STAKE: Local validator stake_weight updated: {} → {} ({:.0} MISAKA)",
-                                            old, lv.identity.stake_weight, staked_misaka,
-                                        );
-                                    }
-                                    // known_validators 内の自分も更新
-                                    let vid = lv.identity.validator_id;
-                                    if let Some(kv) = guard
-                                        .known_validators
-                                        .iter_mut()
-                                        .find(|v| v.validator_id == vid)
-                                    {
-                                        kv.stake_weight = info.total_staked as u128;
-                                    }
-                                }
-                            } else {
-                                // ステーク不足 → 警告（自動 exit は将来実装）
-                                warn!(
-                                    "SEC-STAKE: ⚠️ Local validator stake BELOW MINIMUM! \
-                                     staked={:.0} MISAKA < min={:.0} MISAKA. \
-                                     Validator may be deactivated.",
-                                    staked_misaka,
-                                    min_stake as f64 / 1_000_000_000.0,
-                                );
-                            }
-                        } else {
-                            warn!(
-                                "SEC-STAKE: Local validator L1 key {}... NOT FOUND on Solana. \
-                                 Stake may have been withdrawn.",
-                                &l1_pubkey_hex[..16.min(l1_pubkey_hex.len())],
-                            );
-                        }
-                    }
-
-                    // ── リモートバリデータの stake_weight 更新 ──
-                    //
-                    // Solana 上の全登録 PDA を走査し、l1_public_key → validator_id
-                    // のマッピングを構築。known_validators の stake_weight を更新。
-                    //
-                    // 注: l1_public_key と L1 の validator_id は異なる鍵体系。
-                    // ここでは Solana 上の l1_key バイトと L1 ノードの公開鍵の
-                    // SHA3 アドレスを突き合わせることはできないため、
-                    // リモートバリデータの更新は l1_key を RPC で共有する
-                    // 仕組みが必要（将来課題）。
-                    // 現時点ではローカルバリデータのみ stake_weight を更新する。
-                }
-                Err(e) => {
-                    warn!(
-                        "SEC-STAKE: Solana scraping failed (non-fatal, will retry next epoch): {}",
-                        e
-                    );
-                }
-            }
-        }
-    });
-    tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(tokio::time::Duration::from_secs(10));
-        loop {
-            ticker.tick().await;
-            let Some(finalized_score) = ({
-                let guard = finality_epoch_state.read().await;
-                guard
-                    .latest_checkpoint_finality
-                    .as_ref()
-                    .map(|proof| proof.target.blue_score)
-            }) else {
-                continue;
-            };
-
-            let maybe_next_epoch = {
-                let mut progress = finality_epoch_progress.lock().await;
-                let mut epoch = finality_epoch.write().await;
-                if progress.apply_finalized_checkpoint_score(
-                    &mut *epoch,
-                    finalized_score,
-                    checkpoint_interval,
-                ) {
-                    Some(*epoch)
-                } else {
-                    None
-                }
-            };
-
-            if let Some(next_epoch) = maybe_next_epoch {
-                info!(
-                    "Layer 6: validator lifecycle synchronized to finalized checkpoint | epoch={} | finalized_blue_score={}",
-                    next_epoch, finalized_score
-                );
-
-                // ── SR21 Auto-Election at epoch boundary ──
-                //
-                // γ-5 NOTE: `StakingRegistry::settle_unlocks` is deliberately
-                // NOT called here. This epoch hook runs only under
-                // `#[cfg(all(dag, ghostdag-compat))]` (=> `start_dag_node`),
-                // which does not instantiate a `UtxoExecutor` and therefore
-                // has no `staked_receipt_table` to drain or `utxo_set` to
-                // issue the unlocked-stake UTXO into. γ-5 settlement is
-                // wired in `start_narwhal_node`'s commit loop instead
-                // (the default `dag`-without-`ghostdag-compat` build). If a
-                // future reconciliation unifies the two paths (or moves
-                // UtxoExecutor into this path), add a
-                // `settle_unlocks(next_epoch) + apply_settled_unlocks(..)`
-                // pair here as well.
-                {
-                    let mut wguard = finality_epoch_state.write().await;
-                    apply_sr21_election_at_epoch_boundary(&mut wguard, next_epoch);
-                }
-                {
-                    let mut recovery = finality_runtime_recovery.write().await;
-                    recovery.mark_checkpoint_finality(Some(finalized_score));
-                }
-                if let Err(e) = finality_epoch_store
-                    .persist_state(
-                        &finality_epoch_registry,
-                        &finality_epoch,
-                        &finality_epoch_progress,
-                    )
-                    .await
-                {
-                    warn!(
-                        "Layer 6: failed to persist finalized-checkpoint epoch progress: {}",
-                        e
-                    );
-                }
-            }
-        }
-    });
-    let _rpc_service = crate::dag_rpc_service::DagRpcServerService::new(
-        rpc_state,
-        Some(rpc_observation),
-        Some(rpc_runtime_recovery),
-        Some(rpc_registry),
-        rpc_epoch,
-        Some(rpc_epoch_progress),
-        rpc_addr,
-        cli.chain_id,
-        [0u8; 32], // ghostdag compat path — genesis_hash not used
-    );
-    _rpc_service.start().await?;
-
-    info!("Layer 6: DAG RPC server starting on :{}", cli.rpc_port);
-
-    // ══════════════════════════════════════════════════════
-    //  Layer 7: Block Production Loop
-    // ══════════════════════════════════════════════════════
-
-    info!(
-        "Node '{}' ready | mode={} | role={} | consensus=GhostDAG(k={}) | RPC=:{} | SR={}/21",
-        cli.name, node_mode, role, cli.dag_k, cli.rpc_port, cli.validator_index,
-    );
-
-    if role.produces_blocks() {
-        let fast_time = cli.fast_block_time.unwrap_or(2);
-        let zkp_time = cli.zkp_batch_time.unwrap_or(30);
-        let startup_sync_grace_secs = std::env::var("MISAKA_DAG_STARTUP_SYNC_GRACE_SECS")
-            .ok()
-            .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(0);
-        info!(
-            "Starting SR21 DUAL-LANE block production | SR_index={} | fast={}s | zkp={}s | max_txs={}",
-            cli.validator_index, fast_time, zkp_time, cli.dag_max_txs
-        );
-        info!(
-            "21 SR Round-Robin: {} produces when block_count % {} == {}",
-            cli.name, cli.validators, cli.validator_index
-        );
-        if startup_sync_grace_secs > 0 {
-            info!(
-                "Layer 7: delaying DAG block production for {}s to allow startup sync",
-                startup_sync_grace_secs
-            );
-            tokio::time::sleep(tokio::time::Duration::from_secs(startup_sync_grace_secs)).await;
-        }
-
-        // ── Finality monitoring task ──
-        let finality_state = shared_state.clone();
-        let runtime_recovery = runtime_recovery_observation.clone();
-        let finality_interval = cli.dag_checkpoint_interval;
-        tokio::spawn(async move {
-            run_finality_monitor(finality_state, runtime_recovery, finality_interval).await;
-        });
-
-        // ── Dual-lane block production (メインループ — ブロッキング) ──
-        run_dag_block_producer_dual(shared_state.clone(), fast_time, zkp_time, cli.dag_max_txs)
-            .await;
-    } else {
-        info!("Block production disabled — running as DAG full node");
-        // Keep alive
-        loop {
-            tokio::time::sleep(tokio::time::Duration::from_secs(3600)).await;
-        }
-    }
-
-    Ok(())
-}
+// Dead-code cleanup Plan B.1 (2026-04-19): the 1,426-line
+// `start_dag_node` function was deleted here. It was a GhostDAG-era
+// runtime behind the broken `ghostdag-compat` feature flag. Every
+// module it imported from `misaka_dag` had been removed when
+// GhostDAG was retired in v6; `cargo check --features
+// ghostdag-compat` emitted 15+ unresolved-import errors. The
+// Narwhal replacement `start_narwhal_node` at :1299 is the only
+// production runtime.
+//
+// Cfg-gated test helpers + tests later in the file also reference
+// the same missing imports and will be removed in Plan B.3.
 
 /// ファイナリティ監視タスク — 定期的にチェックポイントを作成する。
-#[cfg(all(feature = "dag", feature = "ghostdag-compat"))]
-async fn run_finality_monitor(
-    state: Arc<RwLock<misaka_dag::DagNodeState>>,
-    runtime_recovery: Arc<RwLock<dag_rpc::DagRuntimeRecoveryObservation>>,
-    checkpoint_interval: u64,
-) {
-    use misaka_dag::dag_finality::FinalityManager;
-    use misaka_dag::save_runtime_snapshot;
-    let initial_checkpoint = {
-        let guard = state.read().await;
-        guard.latest_checkpoint.clone()
-    };
-    let mut finality = FinalityManager::new(checkpoint_interval);
-    if let Some(checkpoint) = initial_checkpoint {
-        finality = finality.with_checkpoint(checkpoint);
-    }
-    // Do not anchor checkpoint creation to a coarse per-process 30s phase.
-    // In natural multi-validator starts, staggered boot times can otherwise
-    // make one validator finalize bucket N while another is still waiting to
-    // even create it. A shorter poll interval keeps checkpoint creation tied
-    // to DAG progress rather than process start time.
-    let mut ticker = tokio::time::interval(tokio::time::Duration::from_secs(5));
-
-    loop {
-        ticker.tick().await;
-
-        let mut guard = state.write().await;
-        let snapshot = guard.dag_store.snapshot();
-        let max_score = guard.dag_store.max_blue_score();
-        let blocked_by_pending_finality = checkpoint_rollover_blocked_by_pending_finality(&guard);
-
-        // Keep voting for the current checkpoint target until it reaches
-        // local finality. Rolling over here prunes the previous vote pool and
-        // can strand peers at voteCount=1 on different targets.
-        if blocked_by_pending_finality {
-            continue;
-        }
-
-        let should_advance_bucket = finality.should_checkpoint(max_score);
-
-        if should_advance_bucket {
-            let Some((checkpoint_tip, checkpoint_score)) =
-                finality.checkpoint_candidate(&guard.ghostdag, &snapshot)
-            else {
-                continue;
-            };
-            let stats = &guard.state_manager.stats;
-            let cp = finality.create_checkpoint(
-                checkpoint_tip,
-                checkpoint_score,
-                // Use the current UTXO state commitment from storage.
-                guard.utxo_set.compute_state_root(),
-                stats.txs_applied + stats.txs_coinbase,
-                stats.txs_applied,
-            );
-            guard.latest_checkpoint = Some(cp.clone());
-            prune_checkpoint_attestation_state(&mut guard);
-            if let Err(e) = refresh_local_checkpoint_attestation(&mut guard) {
-                warn!("Failed to refresh local checkpoint attestation: {}", e);
-            }
-            let vote_gossip = local_vote_gossip_payload(&guard);
-            if let Err(e) = save_runtime_snapshot(
-                &guard.snapshot_path,
-                &guard.dag_store,
-                &guard.utxo_set,
-                &guard.state_manager.stats,
-                guard.latest_checkpoint.as_ref(),
-                &guard.known_validators,
-                &guard.runtime_active_sr_validator_ids,
-                guard.latest_checkpoint_vote.as_ref(),
-                guard.latest_checkpoint_finality.as_ref(),
-                &guard.checkpoint_vote_pool,
-            ) {
-                error!("Failed to persist checkpoint snapshot: {}", e);
-            } else {
-                let mut recovery = runtime_recovery.write().await;
-                recovery.mark_checkpoint_persisted(cp.blue_score, cp.block_hash);
-                recovery.mark_checkpoint_finality(
-                    guard
-                        .latest_checkpoint_finality
-                        .as_ref()
-                        .map(|proof| proof.target.blue_score),
-                );
-            }
-            info!(
-                "Checkpoint created: score={}, txs={}, ki={}",
-                cp.blue_score, cp.total_applied_txs, cp.total_spent_count,
-            );
-            if let Some((vote, identity, peers)) = vote_gossip {
-                tokio::spawn(async move {
-                    gossip_checkpoint_vote_to_peers(peers, vote, identity).await;
-                });
-            }
-        }
-    }
-}
 
 // ════════════════════════════════════════════════════════════════
 //  v1: Linear Chain Node Startup (既存コード — 変更なし)
@@ -7944,514 +5679,6 @@ mod tests {
         ));
     }
 
-    #[cfg(all(feature = "dag", feature = "ghostdag-compat"))]
-    #[test]
-    fn test_make_local_checkpoint_vote_binds_checkpoint_target() {
-        use misaka_crypto::validator_sig::generate_validator_keypair;
-        use misaka_dag::{DagCheckpoint, LocalDagValidator};
-        use misaka_types::validator::{ValidatorIdentity, ValidatorPublicKey};
-
-        let keypair = generate_validator_keypair();
-        let identity = ValidatorIdentity {
-            validator_id: keypair.public_key.to_canonical_id(),
-            stake_weight: 1_000_000,
-            public_key: ValidatorPublicKey {
-                bytes: keypair.public_key.to_bytes(),
-            },
-            is_active: true,
-        };
-        let local = LocalDagValidator { identity, keypair };
-        let checkpoint = DagCheckpoint {
-            block_hash: [0xA1; 32],
-            blue_score: 12,
-            utxo_root: [0xB2; 32],
-            total_spent_count: 4,
-            total_applied_txs: 7,
-            timestamp_ms: 1_700_000_000_000,
-        };
-
-        let vote = make_local_checkpoint_vote(&local, &checkpoint).unwrap();
-        assert_eq!(vote.voter, local.identity.validator_id);
-        assert_eq!(vote.target, checkpoint.validator_target());
-        assert!(!vote.signature.bytes.is_empty());
-    }
-
-    #[cfg(all(feature = "dag", feature = "ghostdag-compat"))]
-    fn make_test_dag_state(
-        validator_count: usize,
-        local_validator: Option<misaka_dag::LocalDagValidator>,
-        latest_checkpoint: Option<misaka_dag::DagCheckpoint>,
-    ) -> misaka_dag::DagNodeState {
-        use misaka_dag::dag_block::{DagBlockHeader, DAG_VERSION, ZERO_HASH};
-        use misaka_dag::dag_store::ThreadSafeDagStore;
-        use misaka_dag::reachability::ReachabilityStore;
-        use misaka_dag::{DagMempool, DagStateManager, GhostDagEngine};
-        use std::collections::HashSet;
-        use std::path::PathBuf;
-        use std::sync::Arc;
-
-        let genesis_header = DagBlockHeader {
-            version: DAG_VERSION,
-            parents: vec![],
-            timestamp_ms: 1_700_000_000_000,
-            tx_root: ZERO_HASH,
-            proposer_id: [0u8; 32],
-            nonce: 0,
-            blue_score: 0,
-            bits: 0,
-        };
-        let genesis_hash = genesis_header.compute_hash();
-
-        misaka_dag::DagNodeState {
-            dag_store: Arc::new(ThreadSafeDagStore::new(genesis_hash, genesis_header)),
-            ghostdag: GhostDagEngine::new(18, genesis_hash),
-            state_manager: DagStateManager::new(HashSet::new(), HashSet::new()),
-            utxo_set: misaka_storage::utxo_set::UtxoSet::new(32),
-            virtual_state: misaka_dag::VirtualState::new(genesis_hash),
-            ingestion_pipeline: misaka_dag::IngestionPipeline::new(
-                [genesis_hash].into_iter().collect(),
-            ),
-            quarantined_blocks: HashSet::new(),
-            mempool: DagMempool::new(32),
-            chain_id: 31337,
-            validator_count,
-            known_validators: Vec::new(),
-            proposer_id: [0xAB; 32],
-            sr_index: 0,
-            num_active_srs: 1,
-            runtime_active_sr_validator_ids: Vec::new(),
-            local_validator,
-            genesis_hash,
-            snapshot_path: PathBuf::from("/tmp/misaka-node-test-snapshot.json"),
-            latest_checkpoint,
-            latest_checkpoint_vote: None,
-            latest_checkpoint_finality: None,
-            checkpoint_vote_pool: std::collections::HashMap::new(),
-            attestation_rpc_peers: Vec::new(),
-            blocks_produced: 0,
-            reachability: ReachabilityStore::new(genesis_hash),
-            persistent_backend: None,
-            faucet_cooldowns: std::collections::HashMap::new(),
-            pending_transactions: std::collections::HashMap::new(),
-        }
-    }
-
-    #[cfg(all(feature = "dag", feature = "ghostdag-compat"))]
-    fn make_test_validator(
-        stake_weight: u128,
-    ) -> (
-        misaka_types::validator::ValidatorIdentity,
-        misaka_crypto::validator_sig::ValidatorKeypair,
-    ) {
-        use misaka_crypto::validator_sig::generate_validator_keypair;
-        use misaka_types::validator::{ValidatorIdentity, ValidatorPublicKey};
-
-        let keypair = generate_validator_keypair();
-        let identity = ValidatorIdentity {
-            validator_id: keypair.public_key.to_canonical_id(),
-            stake_weight,
-            public_key: ValidatorPublicKey {
-                bytes: keypair.public_key.to_bytes(),
-            },
-            is_active: true,
-        };
-        (identity, keypair)
-    }
-
-    #[cfg(all(feature = "dag", feature = "ghostdag-compat"))]
-    fn make_signed_checkpoint_vote(
-        identity: &misaka_types::validator::ValidatorIdentity,
-        keypair: &misaka_crypto::validator_sig::ValidatorKeypair,
-        checkpoint: &misaka_dag::DagCheckpoint,
-    ) -> misaka_types::validator::DagCheckpointVote {
-        use misaka_crypto::validator_sig::validator_sign;
-        use misaka_types::validator::{DagCheckpointVote, ValidatorSignature};
-
-        let stub = DagCheckpointVote {
-            voter: identity.validator_id,
-            target: checkpoint.validator_target(),
-            signature: ValidatorSignature { bytes: vec![] },
-        };
-        let sig = validator_sign(&stub.signing_bytes(), &keypair.secret_key).unwrap();
-        DagCheckpointVote {
-            signature: ValidatorSignature {
-                bytes: sig.to_bytes(),
-            },
-            ..stub
-        }
-    }
-
-    #[cfg(all(feature = "dag", feature = "ghostdag-compat"))]
-    fn make_finality_proof_for_checkpoint(
-        checkpoint: &misaka_dag::DagCheckpoint,
-        votes: Vec<misaka_types::validator::DagCheckpointVote>,
-    ) -> misaka_types::validator::DagCheckpointFinalityProof {
-        misaka_types::validator::DagCheckpointFinalityProof {
-            target: checkpoint.validator_target(),
-            commits: votes,
-        }
-    }
-
-    #[cfg(all(feature = "dag", feature = "ghostdag-compat"))]
-    #[test]
-    fn test_ingest_checkpoint_vote_forms_two_validator_local_quorum() {
-        use misaka_dag::{DagCheckpoint, LocalDagValidator};
-
-        let (local_identity, local_keypair) = make_test_validator(1_000_000);
-        let local_validator = LocalDagValidator {
-            identity: local_identity.clone(),
-            keypair: local_keypair,
-        };
-        let (remote_identity, remote_keypair) = make_test_validator(1_000_000);
-        let checkpoint = DagCheckpoint {
-            block_hash: [0xC1; 32],
-            blue_score: 42,
-            utxo_root: [0xD2; 32],
-            total_spent_count: 4,
-            total_applied_txs: 9,
-            timestamp_ms: 1_700_000_000_000,
-        };
-
-        let mut state = make_test_dag_state(2, Some(local_validator), Some(checkpoint.clone()));
-        refresh_local_checkpoint_attestation(&mut state).unwrap();
-        assert_eq!(state.known_validators.len(), 1);
-        assert!(state.latest_checkpoint_finality.is_none());
-
-        let remote_vote =
-            make_signed_checkpoint_vote(&remote_identity, &remote_keypair, &checkpoint);
-        ingest_checkpoint_vote(&mut state, remote_vote, Some(remote_identity)).unwrap();
-
-        assert_eq!(state.known_validators.len(), 2);
-        assert!(state.latest_checkpoint_finality.is_some());
-        let proof = state.latest_checkpoint_finality.unwrap();
-        assert_eq!(proof.target, checkpoint.validator_target());
-        assert_eq!(proof.commits.len(), 2);
-    }
-
-    #[cfg(all(feature = "dag", feature = "ghostdag-compat"))]
-    #[test]
-    fn test_ingest_checkpoint_vote_rejects_target_mismatch() {
-        use misaka_dag::{DagCheckpoint, LocalDagValidator};
-
-        let (local_identity, local_keypair) = make_test_validator(1_000_000);
-        let local_validator = LocalDagValidator {
-            identity: local_identity.clone(),
-            keypair: local_keypair,
-        };
-        let (remote_identity, remote_keypair) = make_test_validator(1_000_000);
-        let checkpoint = DagCheckpoint {
-            block_hash: [0x91; 32],
-            blue_score: 7,
-            utxo_root: [0x82; 32],
-            total_spent_count: 1,
-            total_applied_txs: 2,
-            timestamp_ms: 1_700_000_000_000,
-        };
-        let mut wrong_checkpoint = checkpoint.clone();
-        wrong_checkpoint.blue_score += 1;
-
-        let mut state = make_test_dag_state(2, Some(local_validator), Some(checkpoint));
-        refresh_local_checkpoint_attestation(&mut state).unwrap();
-
-        let wrong_vote =
-            make_signed_checkpoint_vote(&remote_identity, &remote_keypair, &wrong_checkpoint);
-        let err = ingest_checkpoint_vote(&mut state, wrong_vote, Some(remote_identity))
-            .expect_err("mismatched checkpoint target should be rejected");
-        assert!(err.to_string().contains("target mismatch"));
-    }
-
-    #[cfg(all(feature = "dag", feature = "ghostdag-compat"))]
-    #[test]
-    fn test_prune_checkpoint_attestation_state_discards_stale_targets() {
-        use misaka_dag::DagCheckpoint;
-
-        let current_checkpoint = DagCheckpoint {
-            block_hash: [0x21; 32],
-            blue_score: 11,
-            utxo_root: [0x31; 32],
-            total_spent_count: 2,
-            total_applied_txs: 3,
-            timestamp_ms: 1_700_000_000_000,
-        };
-        let stale_checkpoint = DagCheckpoint {
-            block_hash: [0x41; 32],
-            blue_score: 9,
-            utxo_root: [0x51; 32],
-            total_spent_count: 1,
-            total_applied_txs: 2,
-            timestamp_ms: 1_699_999_999_000,
-        };
-
-        let (current_identity, current_keypair) = make_test_validator(1_000_000);
-        let (stale_identity, stale_keypair) = make_test_validator(1_000_000);
-        let current_vote =
-            make_signed_checkpoint_vote(&current_identity, &current_keypair, &current_checkpoint);
-        let stale_vote =
-            make_signed_checkpoint_vote(&stale_identity, &stale_keypair, &stale_checkpoint);
-
-        let mut state = make_test_dag_state(2, None, Some(current_checkpoint.clone()));
-        state.latest_checkpoint_vote = Some(stale_vote.clone());
-        state.latest_checkpoint_finality = Some(make_finality_proof_for_checkpoint(
-            &stale_checkpoint,
-            vec![stale_vote.clone()],
-        ));
-        state
-            .checkpoint_vote_pool
-            .insert(stale_checkpoint.validator_target(), vec![stale_vote]);
-        state.checkpoint_vote_pool.insert(
-            current_checkpoint.validator_target(),
-            vec![current_vote.clone()],
-        );
-
-        prune_checkpoint_attestation_state(&mut state);
-
-        assert_eq!(state.checkpoint_vote_pool.len(), 1);
-        assert!(state
-            .checkpoint_vote_pool
-            .contains_key(&current_checkpoint.validator_target()));
-        assert!(state.latest_checkpoint_vote.is_none());
-        assert!(state.latest_checkpoint_finality.is_none());
-        assert_eq!(
-            state
-                .checkpoint_vote_pool
-                .get(&current_checkpoint.validator_target())
-                .unwrap()
-                .len(),
-            1
-        );
-    }
-
-    #[cfg(all(feature = "dag", feature = "ghostdag-compat"))]
-    #[test]
-    fn test_prune_checkpoint_attestation_state_clears_when_checkpoint_missing() {
-        use misaka_dag::DagCheckpoint;
-
-        let checkpoint = DagCheckpoint {
-            block_hash: [0x61; 32],
-            blue_score: 4,
-            utxo_root: [0x71; 32],
-            total_spent_count: 1,
-            total_applied_txs: 1,
-            timestamp_ms: 1_700_000_000_000,
-        };
-        let (identity, keypair) = make_test_validator(1_000_000);
-        let vote = make_signed_checkpoint_vote(&identity, &keypair, &checkpoint);
-
-        let mut state = make_test_dag_state(1, None, None);
-        state.latest_checkpoint_vote = Some(vote.clone());
-        state.latest_checkpoint_finality = Some(make_finality_proof_for_checkpoint(
-            &checkpoint,
-            vec![vote.clone()],
-        ));
-        state
-            .checkpoint_vote_pool
-            .insert(checkpoint.validator_target(), vec![vote]);
-
-        prune_checkpoint_attestation_state(&mut state);
-
-        assert!(state.latest_checkpoint_vote.is_none());
-        assert!(state.latest_checkpoint_finality.is_none());
-        assert!(state.checkpoint_vote_pool.is_empty());
-    }
-
-    #[cfg(all(feature = "dag", feature = "ghostdag-compat"))]
-    #[test]
-    fn test_checkpoint_rollover_blocked_by_pending_finality_for_validator() {
-        use misaka_dag::{DagCheckpoint, LocalDagValidator};
-
-        let (local_identity, local_keypair) = make_test_validator(1_000_000);
-        let local_validator = LocalDagValidator {
-            identity: local_identity,
-            keypair: local_keypair,
-        };
-        let checkpoint = DagCheckpoint {
-            block_hash: [0x71; 32],
-            blue_score: 12,
-            utxo_root: [0x72; 32],
-            total_spent_count: 3,
-            total_applied_txs: 4,
-            timestamp_ms: 1_700_000_000_000,
-        };
-
-        let mut state = make_test_dag_state(2, Some(local_validator), Some(checkpoint));
-        assert!(checkpoint_rollover_blocked_by_pending_finality(&state));
-
-        refresh_local_checkpoint_attestation(&mut state).unwrap();
-        let (remote_identity, remote_keypair) = make_test_validator(1_000_000);
-        let remote_vote = make_signed_checkpoint_vote(
-            &remote_identity,
-            &remote_keypair,
-            state.latest_checkpoint.as_ref().unwrap(),
-        );
-        ingest_checkpoint_vote(&mut state, remote_vote, Some(remote_identity)).unwrap();
-
-        assert!(!checkpoint_rollover_blocked_by_pending_finality(&state));
-    }
-
-    #[cfg(all(feature = "dag", feature = "ghostdag-compat"))]
-    #[test]
-    fn test_checkpoint_rollover_not_blocked_without_local_validator() {
-        use misaka_dag::DagCheckpoint;
-
-        let checkpoint = DagCheckpoint {
-            block_hash: [0x81; 32],
-            blue_score: 8,
-            utxo_root: [0x82; 32],
-            total_spent_count: 1,
-            total_applied_txs: 2,
-            timestamp_ms: 1_700_000_000_000,
-        };
-        let state = make_test_dag_state(2, None, Some(checkpoint));
-
-        assert!(!checkpoint_rollover_blocked_by_pending_finality(&state));
-    }
-
-    #[cfg(all(feature = "dag", feature = "ghostdag-compat"))]
-    #[test]
-    fn test_checkpoint_rollover_stays_blocked_until_finality_even_if_chain_advances() {
-        use misaka_dag::dag_block::{DagBlockHeader, GhostDagData, DAG_VERSION, ZERO_HASH};
-        use misaka_dag::DagCheckpoint;
-
-        let (local_identity, local_keypair) = make_test_validator(1_000_000);
-        let local_validator = misaka_dag::LocalDagValidator {
-            identity: local_identity,
-            keypair: local_keypair,
-        };
-        let checkpoint = DagCheckpoint {
-            block_hash: [0x91; 32],
-            blue_score: 12,
-            utxo_root: [0x92; 32],
-            total_spent_count: 1,
-            total_applied_txs: 1,
-            timestamp_ms: 1_700_000_000_000,
-        };
-
-        let state = make_test_dag_state(3, Some(local_validator), Some(checkpoint));
-        assert!(checkpoint_rollover_blocked_by_pending_finality(&state));
-
-        let header = DagBlockHeader {
-            version: DAG_VERSION,
-            parents: vec![state.genesis_hash],
-            timestamp_ms: 1_700_000_000_100,
-            tx_root: ZERO_HASH,
-            proposer_id: [0xAB; 32],
-            nonce: 1,
-            blue_score: 13,
-            bits: 0,
-        };
-        let block_hash = header.compute_hash();
-        state
-            .dag_store
-            .insert_block(block_hash, header, Vec::new())
-            .expect("test block inserted");
-        state.dag_store.set_ghostdag(
-            block_hash,
-            GhostDagData {
-                blue_score: 13,
-                blue_work: 13,
-                selected_parent: state.genesis_hash,
-                mergeset_blues: vec![],
-                mergeset_reds: vec![],
-                blues_anticone_sizes: vec![],
-            },
-        );
-
-        assert!(checkpoint_rollover_blocked_by_pending_finality(&state));
-    }
-
-    #[cfg(all(feature = "dag", feature = "ghostdag-compat"))]
-    #[test]
-    fn test_normalize_dag_rpc_peers_adds_scheme_and_dedups() {
-        let peers = normalize_dag_rpc_peers(&[
-            "127.0.0.1:3001".to_string(),
-            "http://127.0.0.1:3001/".to_string(),
-            "https://example.com/rpc".to_string(),
-            "".to_string(),
-        ]);
-
-        assert_eq!(peers.len(), 2);
-        assert_eq!(peers[0], "http://127.0.0.1:3001");
-        assert_eq!(peers[1], "https://example.com/rpc");
-    }
-
-    #[cfg(all(feature = "dag", feature = "ghostdag-compat"))]
-    #[tokio::test]
-    async fn test_gossip_checkpoint_vote_to_peers_posts_vote_payload() {
-        use axum::{extract::State, routing::post, Json, Router};
-        use serde_json::Value;
-        use std::sync::Arc;
-        use tokio::sync::Mutex;
-
-        async fn handler(
-            State(captured): State<Arc<Mutex<Vec<Value>>>>,
-            Json(payload): Json<Value>,
-        ) -> Json<Value> {
-            captured.lock().await.push(payload);
-            Json(serde_json::json!({
-                "accepted": true,
-                "target": { "blueScore": 42 }
-            }))
-        }
-
-        let captured = Arc::new(Mutex::new(Vec::new()));
-        let app = Router::new()
-            .route("/api/submit_checkpoint_vote", post(handler))
-            .with_state(captured.clone());
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind test listener");
-        let addr = listener.local_addr().expect("read test listener addr");
-        let server = tokio::spawn(async move {
-            axum::serve(listener, app).await.expect("serve test app");
-        });
-
-        let checkpoint = misaka_dag::DagCheckpoint {
-            block_hash: [0x81; 32],
-            blue_score: 42,
-            utxo_root: [0x82; 32],
-            total_spent_count: 2,
-            total_applied_txs: 3,
-            timestamp_ms: 1_700_000_000_000,
-        };
-        let (identity, keypair) = make_test_validator(1_000_000);
-        let vote = make_signed_checkpoint_vote(&identity, &keypair, &checkpoint);
-
-        gossip_checkpoint_vote_to_peers(
-            vec![format!("http://{}", addr)],
-            vote.clone(),
-            identity.clone(),
-        )
-        .await;
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-        let payloads = captured.lock().await.clone();
-        server.abort();
-
-        assert_eq!(payloads.len(), 1);
-        assert_eq!(
-            payloads[0]["vote"]["target"]["blue_score"],
-            serde_json::Value::from(42u64)
-        );
-        assert_eq!(
-            payloads[0]["validator_identity"]["stake_weight"],
-            serde_json::Value::from(1_000_000u64)
-        );
-    }
-
-    #[cfg(all(feature = "dag", feature = "ghostdag-compat"))]
-    #[test]
-    fn test_deterministic_dag_genesis_header_is_stable_per_chain_id() {
-        let header_a1 = deterministic_dag_genesis_header(2);
-        let header_a2 = deterministic_dag_genesis_header(2);
-        let header_b = deterministic_dag_genesis_header(9);
-
-        assert_eq!(header_a1.timestamp_ms, 0);
-        assert_eq!(header_a1.parents, Vec::<[u8; 32]>::new());
-        assert_eq!(header_a1.compute_hash(), header_a2.compute_hash());
-        assert_ne!(header_a1.proposer_id, header_b.proposer_id);
-        assert_ne!(header_a1.compute_hash(), header_b.compute_hash());
-    }
-
     // ─── BLOCKER J: GenesisBuilder wiring tests ──────────────────────────
     //
     // Pins down the contract of the wiring added in BLOCKER J:
@@ -8642,166 +5869,6 @@ mod tests {
             "BLOCKER D: out-of-range authority index must NOT map to a validator id"
         );
     }
-
-    #[cfg(all(feature = "dag", feature = "ghostdag-compat"))]
-    #[tokio::test]
-    async fn test_remote_vote_gossip_forms_live_local_quorum_when_checkpoint_matches() {
-        use misaka_dag::{DagCheckpoint, LocalDagValidator};
-        use std::sync::Arc;
-        use tokio::sync::RwLock;
-
-        let _guard = env_lock();
-
-        let checkpoint = DagCheckpoint {
-            block_hash: [0x91; 32],
-            blue_score: 77,
-            utxo_root: [0x92; 32],
-            total_spent_count: 5,
-            total_applied_txs: 9,
-            timestamp_ms: 1_700_000_000_000,
-        };
-
-        let (validator_a_identity, validator_a_keypair) = make_test_validator(1_000_000);
-        let (validator_b_identity, validator_b_keypair) = make_test_validator(1_000_000);
-
-        let local_validator_a = LocalDagValidator {
-            identity: validator_a_identity.clone(),
-            keypair: validator_a_keypair,
-        };
-        let local_validator_b = LocalDagValidator {
-            identity: validator_b_identity.clone(),
-            keypair: validator_b_keypair,
-        };
-
-        let mut state_b = make_test_dag_state(2, Some(local_validator_b), Some(checkpoint.clone()));
-        refresh_local_checkpoint_attestation(&mut state_b).unwrap();
-        assert!(state_b.latest_checkpoint_finality.is_none());
-
-        let shared_state_b = Arc::new(RwLock::new(state_b));
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind test port");
-        let addr = listener.local_addr().expect("read test addr");
-        drop(listener);
-
-        let server_state = shared_state_b.clone();
-        let server = tokio::spawn(async move {
-            crate::dag_rpc::run_dag_rpc_server_with_observation(
-                server_state,
-                None,
-                None,
-                None,
-                None,
-                Arc::new(RwLock::new(0)),
-                None,
-                addr,
-                31337,
-            )
-            .await
-            .expect("run dag rpc server");
-        });
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-        let mut state_a = make_test_dag_state(2, Some(local_validator_a), Some(checkpoint.clone()));
-        state_a.attestation_rpc_peers = vec![format!("http://{}", addr)];
-        refresh_local_checkpoint_attestation(&mut state_a).unwrap();
-        let (vote, identity, peers) =
-            local_vote_gossip_payload(&state_a).expect("local vote gossip payload");
-
-        gossip_checkpoint_vote_to_peers(peers, vote, identity).await;
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-
-        let client = reqwest::Client::new();
-        let chain_info = client
-            .post(format!("http://{}/api/get_chain_info", addr))
-            .json(&serde_json::json!({}))
-            .send()
-            .await
-            .expect("request chain info")
-            .json::<serde_json::Value>()
-            .await
-            .expect("decode chain info");
-
-        server.abort();
-
-        assert_eq!(
-            chain_info["validatorAttestation"]["currentCheckpointVotes"]["voteCount"],
-            serde_json::Value::from(2u64)
-        );
-        assert_eq!(
-            chain_info["validatorAttestation"]["currentCheckpointVotes"]["quorumReached"],
-            serde_json::Value::Bool(true)
-        );
-        assert_eq!(
-            chain_info["validatorAttestation"]["currentCheckpointStatus"]["bridgeReadiness"],
-            serde_json::Value::String("ready".into())
-        );
-        assert_eq!(
-            chain_info["validatorAttestation"]["currentCheckpointStatus"]
-                ["explorerConfirmationLevel"],
-            serde_json::Value::String("checkpointFinalized".into())
-        );
-    }
-
-    #[cfg(all(feature = "dag", feature = "ghostdag-compat"))]
-    #[tokio::test]
-    async fn test_discover_checkpoint_validators_from_rpc_peers_reads_local_validator_identity() {
-        use misaka_dag::{DagCheckpoint, LocalDagValidator};
-        use std::sync::Arc;
-        use tokio::sync::RwLock;
-
-        let _guard = env_lock();
-
-        let checkpoint = DagCheckpoint {
-            block_hash: [0xA1; 32],
-            blue_score: 21,
-            utxo_root: [0xA2; 32],
-            total_spent_count: 1,
-            total_applied_txs: 2,
-            timestamp_ms: 1_700_000_000_000,
-        };
-
-        let (identity, keypair) = make_test_validator(1_000_000);
-        let shared_state = Arc::new(RwLock::new(make_test_dag_state(
-            2,
-            Some(LocalDagValidator {
-                identity: identity.clone(),
-                keypair,
-            }),
-            Some(checkpoint),
-        )));
-
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind test port");
-        let addr = listener.local_addr().expect("read test addr");
-        drop(listener);
-
-        let server_state = shared_state.clone();
-        let server = tokio::spawn(async move {
-            crate::dag_rpc::run_dag_rpc_server_with_observation(
-                server_state,
-                None,
-                None,
-                None,
-                None,
-                Arc::new(RwLock::new(0)),
-                None,
-                addr,
-                31337,
-            )
-            .await
-            .expect("run dag rpc server");
-        });
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-        let discovered =
-            discover_checkpoint_validators_from_rpc_peers(&[format!("http://{}", addr)]).await;
-
-        server.abort();
-
-        assert_eq!(discovered.len(), 1);
-        assert_eq!(discovered[0].validator_id, identity.validator_id);
-        assert_eq!(discovered[0].stake_weight, identity.stake_weight);
-        assert_eq!(discovered[0].public_key.bytes, identity.public_key.bytes);
-    }
-
     // ─── Permissionless SR: OBSERVER dynamic-validator expansion ─────
     //
     // Verifies the Phase 8.5 gate: a validator that is NOT in the
