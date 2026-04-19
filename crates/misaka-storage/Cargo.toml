@@ -8,6 +8,10 @@ license.workspace = true
 misaka-types = { path = "../misaka-types" }
 misaka-crypto = { path = "../misaka-crypto" }
 misaka-muhash = { path = "../misaka-muhash" }
+# v1.0 hard fork: SMT (Sparse Merkle Tree) parallel-runs alongside
+# MuHash during the migration window. See
+# `docs/design/v100_smt_migration.md`.
+misaka-smt = { path = "../misaka-smt" }
 borsh = { workspace = true }
 sha3 = { workspace = true }
 serde = { workspace = true }
