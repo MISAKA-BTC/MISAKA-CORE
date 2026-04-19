@@ -62,7 +62,9 @@ pub use dag_recovery::{
 pub use flat_merkle::JellyfishMerkleTree;
 pub use object_store::{ContractEvent, InMemoryObjectStore, ObjectMutation, ObjectStoreAccess};
 pub use quarantine_store::QuarantineStore;
-pub use recovery::{run_startup_check, verify_startup_integrity, StartupCheckResult};
+pub use recovery::{
+    run_startup_check, run_startup_check_kaspa_aware, verify_startup_integrity, StartupCheckResult,
+};
 pub use utxo_set::UtxoSet;
 pub use wal::{
     AcceptPhase, IncompleteBlock, JournalEntry, RecoveryResult, WalError, WriteAheadLog,

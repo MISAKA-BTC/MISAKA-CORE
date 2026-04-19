@@ -1047,9 +1047,17 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // ── Crash Recovery Check ──
+    //
+    // Phase 2 Path X R1 step 3: prefer Kaspa-aligned committed-tip
+    // keys in the Narwhal consensus RocksDB (populated by R1 step 2
+    // above on every committed block). Falls back to the legacy
+    // `chain.db` state CF when the new keys are absent (DBs from
+    // builds before R1 step 2). The subdir `"narwhal_consensus"`
+    // matches the layout of `RocksDbConsensusStore::open` below.
     {
         let data_path = std::path::Path::new(&cli.data_dir);
-        let (recovered_height, recovered_root) = misaka_storage::run_startup_check(data_path);
+        let (recovered_height, recovered_root) =
+            misaka_storage::run_startup_check_kaspa_aware(data_path, "narwhal_consensus");
         if recovered_height > 0 {
             info!(
                 "Recovered from persistent state: height={}, root={}",
@@ -1657,6 +1665,13 @@ async fn start_narwhal_node(
     let tx_index_store = rocks_store.clone();
     let tx_index_store_rpc = rocks_store.clone();
     let addr_index_store_rpc = rocks_store.clone();
+    // Phase 2 Path X R1 step 2: share the consensus RocksDB with the
+    // Kaspa-aligned `startup_integrity` committed-tip writer. Used
+    // below in the Narwhal commit loop to call
+    // `misaka_storage::write_committed_state` on every commit that
+    // advances the UTXO tip, and on shutdown. See
+    // `docs/design/v090_phase2_tail_work.md` §2 for the wider plan.
+    let integrity_store = rocks_store.clone();
     let store: std::sync::Arc<dyn misaka_dag::narwhal_dag::store::ConsensusStore> =
         rocks_store.clone();
     info!("startup[5/6]: RocksDB opened OK");
@@ -4470,6 +4485,28 @@ async fn start_narwhal_node(
                             exec_result.txs_accepted,
                         );
                     }
+
+                    // Phase 2 Path X R1 step 2: mirror the committed tip
+                    // (height + state_root) under the Kaspa-aligned
+                    // `StorePrefixes::VirtualState` keyspace so crash
+                    // recovery can read it without the legacy
+                    // `RocksBlockStore`. Parallels the fs-JSON snapshot
+                    // above — same cadence, same trigger. Best-effort:
+                    // a failure here does not invalidate the commit.
+                    let committed_state = misaka_storage::CommittedState {
+                        height: tx_executor.utxo_set().height,
+                        state_root: new_root,
+                        tip_hash: [0u8; 32], // reserved — populated in a later step
+                    };
+                    if let Err(e) = misaka_storage::write_committed_state(
+                        integrity_store.raw_db(),
+                        &committed_state,
+                    ) {
+                        tracing::warn!(
+                            "Failed to persist startup_integrity committed state: {}",
+                            e
+                        );
+                    }
                 }
             }
             // Graceful shutdown: save UTXO snapshot so balances survive restart.
@@ -4480,6 +4517,27 @@ async fn start_narwhal_node(
                 tracing::info!(
                     "UTXO snapshot saved on shutdown (height={})",
                     tx_executor.utxo_set().height,
+                );
+            }
+
+            // Phase 2 Path X R1 step 2: persist the final committed
+            // tip on shutdown. `tx_executor.state_root()` recomputes
+            // from the current UTXO set; `tx_executor.utxo_set().height`
+            // is the last applied height. Recomputing on shutdown
+            // avoids depending on the per-commit-loop local
+            // `new_root`, which is out of scope here.
+            let shutdown_committed = misaka_storage::CommittedState {
+                height: tx_executor.utxo_set().height,
+                state_root: tx_executor.state_root(),
+                tip_hash: [0u8; 32],
+            };
+            if let Err(e) = misaka_storage::write_committed_state(
+                integrity_store.raw_db(),
+                &shutdown_committed,
+            ) {
+                tracing::warn!(
+                    "Failed to persist startup_integrity committed state on shutdown: {}",
+                    e
                 );
             }
         } => {

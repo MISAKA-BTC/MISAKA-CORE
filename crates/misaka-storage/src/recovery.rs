@@ -129,21 +129,97 @@ pub fn run_startup_check(data_dir: &std::path::Path) -> (u64, [u8; 32]) {
             (0, [0u8; 32])
         }
         StartupCheckResult::Inconsistent { reason } => {
-            error!("╔═══════════════════════════════════════════════════════════╗");
-            error!("║  DATABASE INTEGRITY CHECK FAILED                        ║");
-            error!("╚═══════════════════════════════════════════════════════════╝");
-            error!("");
-            error!("Reason: {}", reason);
-            error!("");
-            error!("The node cannot start safely with inconsistent state.");
-            error!("Options:");
-            error!("  1. Restore from a known-good backup");
-            error!("  2. Delete the data directory and resync from the network");
-            error!("  3. Contact the MISAKA team for manual recovery assistance");
-            error!("");
-            error!("DO NOT attempt to run the node with corrupt state —");
-            error!("this could cause consensus forks or loss of funds.");
-            std::process::exit(1);
+            abort_with_reason(&reason);
         }
     }
+}
+
+/// Phase 2 Path X R1 step 3 — Kaspa-aligned-aware startup check.
+///
+/// Preference order:
+///
+/// 1. Kaspa-aligned committed-tip keys under
+///    `StorePrefixes::VirtualState` in the Narwhal consensus RocksDB
+///    at `<data_dir>/<narwhal_consensus_subdir>` (typically
+///    `"narwhal_consensus"`). This is the path populated by R1 step 2.
+/// 2. Legacy `state` CF inside `<data_dir>/chain.db` via the existing
+///    `RocksBlockStore`-backed integrity check, when (1) returns
+///    `Fresh` (new keys absent). Preserves recovery for DBs upgraded
+///    from pre-R1-step-2 builds.
+/// 3. Treat as `Fresh` when both are absent.
+///
+/// On corruption in (1) or (2), aborts with `process::exit(1)` exactly
+/// like [`run_startup_check`]. Callers therefore see either a
+/// `(height, state_root)` pair to trust or a clean exit — never an
+/// inconsistent boot.
+///
+/// This function is side-effect free w.r.t. the DB (it does not stamp
+/// or repair anything). R1 step 4, a follow-up, will delete the
+/// legacy fallback once enough testnet time has elapsed on step 2
+/// data.
+pub fn run_startup_check_kaspa_aware(
+    data_dir: &std::path::Path,
+    narwhal_consensus_subdir: &str,
+) -> (u64, [u8; 32]) {
+    use crate::startup_integrity::{verify_integrity, IntegrityStatus};
+
+    let consensus_path = data_dir.join(narwhal_consensus_subdir);
+    if consensus_path.exists() {
+        // Open read-only so a running node (which holds a write lock)
+        // is not disturbed. This should only be called pre-node-start
+        // in practice, but read-only keeps the contract safe.
+        let opts = rocksdb::Options::default();
+        match rocksdb::DB::open_for_read_only(&opts, &consensus_path, false) {
+            Ok(db) => match verify_integrity(&db, None) {
+                IntegrityStatus::Ok(state) => {
+                    info!(
+                        "Kaspa-aligned startup check PASSED: height={}, state_root={}, db={}",
+                        state.height,
+                        hex::encode(&state.state_root[..8]),
+                        consensus_path.display()
+                    );
+                    return (state.height, state.state_root);
+                }
+                IntegrityStatus::Inconsistent { reason } => {
+                    abort_with_reason(&reason);
+                }
+                IntegrityStatus::Fresh => {
+                    // Keys absent — fall through to legacy path so
+                    // DBs written by pre-R1-step-2 builds still boot.
+                }
+            },
+            Err(e) => {
+                // Not fatal on its own — the DB may simply not be
+                // initialised yet (fresh node that has never called
+                // RocksDbConsensusStore::open). Fall through.
+                info!(
+                    "Kaspa-aligned consensus DB at {} is not openable read-only ({}); \
+                     falling back to legacy recovery.",
+                    consensus_path.display(),
+                    e,
+                );
+            }
+        }
+    }
+
+    // Legacy fallback.
+    run_startup_check(data_dir)
+}
+
+fn abort_with_reason(reason: &str) -> ! {
+    error!("╔═══════════════════════════════════════════════════════════╗");
+    error!("║  DATABASE INTEGRITY CHECK FAILED                        ║");
+    error!("╚═══════════════════════════════════════════════════════════╝");
+    error!("");
+    error!("Reason: {}", reason);
+    error!("");
+    error!("The node cannot start safely with inconsistent state.");
+    error!("Options:");
+    error!("  1. Restore from a known-good backup");
+    error!("  2. Delete the data directory and resync from the network");
+    error!("  3. Contact the MISAKA team for manual recovery assistance");
+    error!("");
+    error!("DO NOT attempt to run the node with corrupt state —");
+    error!("this could cause consensus forks or loss of funds.");
+    std::process::exit(1);
 }

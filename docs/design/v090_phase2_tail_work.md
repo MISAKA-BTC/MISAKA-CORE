@@ -76,22 +76,56 @@ reports the persisted values.
 
 ### 2.3 Migration steps (multi-commit)
 
-1. **Step 1 (lands in this branch)**: add the
-   `startup_integrity` module alongside the legacy `recovery.rs`.
-   No caller touches it yet. Tests cover fresh / roundtrip /
-   corrupt / mismatch.
-2. **Step 2**: wire `RocksBlockStore::apply_block_atomic` (or its
-   Kaspa-aligned replacement) to also call `write_committed_state`,
-   so that live v0.9.0 testnet DBs begin carrying the new keys.
-3. **Step 3**: teach `recovery.rs` to prefer the new keys, falling
-   back to the legacy `state` CF only when the new keys are absent.
-   No behaviour change on healthy DBs.
-4. **Step 4**: after one release of Step 2 live on testnet, remove
-   the legacy fallback and delete `block_store.rs`, its re-export,
-   and `recovery.rs`'s legacy call path.
+1. **Step 1 (dcdf189)**: add the `startup_integrity` module
+   alongside the legacy `recovery.rs`. No caller touches it yet.
+2. **Step 2 (shipped this commit)**: call `write_committed_state`
+   in the Narwhal commit loop (`main.rs` per-commit site, gated on
+   `txs_accepted > 0`) and on graceful shutdown. Uses the existing
+   `Arc<RocksDbConsensusStore>` handle via a new `raw_db()` accessor;
+   the committed-tip keys live under `StorePrefixes::VirtualState` in
+   the *same* RocksDB instance as Narwhal consensus data, not a
+   separate sidecar DB.
+3. **Step 3 (shipped this commit)**: add
+   `recovery::run_startup_check_kaspa_aware(data_dir, narwhal_subdir)`.
+   Preference order: (a) Kaspa-aligned keys in
+   `<data_dir>/narwhal_consensus` → (b) legacy `chain.db` state CF
+   via the existing `RocksBlockStore` path → (c) `Fresh`. Corruption
+   in either surfaces via the same `abort_with_reason` exit path as
+   the legacy function. `main.rs:1052` now calls the
+   `_kaspa_aware` variant.
+4. **Step 4 (deferred)**: after one release of Step 2 live on
+   testnet, remove the legacy fallback and delete `block_store.rs`,
+   its re-export, and `recovery.rs::run_startup_check`.
 
-Step 1 is pure additive; steps 2–4 each land in their own PR and
-smoke-test window.
+Steps 1–3 are pure additive; step 4 is destructive and needs an
+explicit user sign-off after a live-data window.
+
+#### 2.3.1 Write path — what actually happens today
+
+Discovered during step 2 implementation: `UtxoSet::apply_block_atomic`
+is **in-memory only** (a HashMap + Vec of deltas). Neither it nor
+`execute_block` persists anything to RocksDB. The live production
+persistence on the Narwhal path is:
+
+- `main.rs:4471` — `tx_executor.utxo_set().save_to_file(...)`
+  (fs-JSON) on every commit with `txs_accepted > 0`.
+- `main.rs:4492` — same on graceful shutdown.
+
+Legacy `RocksBlockStore::apply_block_atomic` exists but has no
+production call site. Step 2 therefore does *not* hook into any
+block-apply pipeline; it co-locates with the fs-JSON snapshot
+writes. Same cadence, same trigger, same guarantees. A future PR
+that introduces a true persistent UTXO write path should add a
+third `write_committed_state` call there; until then this is the
+only alive write site.
+
+#### 2.3.2 Path alignment with R6-a
+
+R6-a's `misaka-node --migrate-to` tool defaulted to
+`<data_dir>/storage` in its original draft. That subdir does not
+exist in any live layout. Fixed this commit to
+`<data_dir>/narwhal_consensus`, matching `main.rs:1615` (the
+`RocksDbConsensusStore::open` path) and the step-3 recovery subdir.
 
 ### 2.4 Out of scope for R1
 

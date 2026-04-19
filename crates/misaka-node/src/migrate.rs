@@ -93,9 +93,16 @@ pub struct MigrateArgs {
 /// Kept as a free function so the caller in `main.rs` can compose it
 /// out of the effective `cli.data_dir` after config-file overrides
 /// have been applied.
+///
+/// The path component matches where `start_narwhal_node` opens its
+/// RocksDB (`crates/misaka-node/src/main.rs:1615` —
+/// `data_dir.join("narwhal_consensus")`). An earlier draft of this
+/// helper returned `data_dir/storage`; that did not match any live
+/// layout and is corrected here — callers of the public migrate API
+/// should use this function instead of hard-coding a path.
 #[must_use]
 pub fn default_db_path(data_dir: &Path) -> PathBuf {
-    data_dir.join("storage")
+    data_dir.join("narwhal_consensus")
 }
 
 /// Execute the migration.
@@ -338,9 +345,9 @@ mod tests {
     // ── default_db_path ───────────────────────────────────────────
 
     #[test]
-    fn default_db_path_appends_storage() {
+    fn default_db_path_appends_narwhal_consensus() {
         let p = default_db_path(Path::new("/data"));
-        assert_eq!(p, PathBuf::from("/data/storage"));
+        assert_eq!(p, PathBuf::from("/data/narwhal_consensus"));
     }
 
     // ── End-to-end with a real temp RocksDB ───────────────────────

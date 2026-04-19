@@ -233,6 +233,23 @@ impl RocksDbConsensusStore {
     // ─── TX index persistence ─────────────────────────────────
 
     /// Store a committed transaction detail (JSON bytes).
+    /// Expose the underlying `Arc<DB>` handle.
+    ///
+    /// Added for Phase 2 Path X R1 step 2: the node's Kaspa-aligned
+    /// `startup_integrity` persistence writes the committed chain tip
+    /// under `StorePrefixes::VirtualState` inside this same RocksDB
+    /// instance. Sharing the single DB keeps the schema-version marker,
+    /// the tip snapshot, and the Narwhal consensus state in one
+    /// file for crash-atomicity and backup simplicity.
+    ///
+    /// Callers outside the consensus-store module MUST only write to
+    /// `StorePrefixes::*` keyspaces they own — touching Narwhal CFs
+    /// through this handle bypasses all the invariants `RocksDbConsensusStore`
+    /// enforces.
+    pub fn raw_db(&self) -> &Arc<rocksdb::DB> {
+        &self.db
+    }
+
     pub fn put_tx_detail(&self, tx_hash: &[u8; 32], detail: &[u8]) -> Result<(), StoreError> {
         self.db
             .put_cf(self.cf_tx_index()?, tx_hash, detail)
