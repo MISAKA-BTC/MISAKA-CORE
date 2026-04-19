@@ -345,27 +345,48 @@ are additive.
 
 ### 11.4 R4 — Checkpoint trigger reconciliation
 
-`checkpoint::Checkpoint` already exists with:
+**Scope caveat uncovered 2026-04-19**: the codebase carries **two
+distinct** `CheckpointManager` implementations with entirely different
+semantics:
 
-- `CHECKPOINT_INTERVAL = 500` blocks,
-- filesystem-JSON persistence in the data directory,
-- `content_hash` (SHA3-256) + `prev_checkpoint_hash` (chain-of-trust),
-- `MAX_CHECKPOINTS_RETAINED = 5`.
+| File                                                                | Interval default | Unit        | Purpose                                                     |
+|---------------------------------------------------------------------|------------------|-------------|-------------------------------------------------------------|
+| `crates/misaka-storage/src/checkpoint.rs`                           | 500              | `blue_score`| fs-JSON UTXO state snapshot for local crash recovery         |
+| `crates/misaka-dag/src/narwhal_finality/checkpoint_manager.rs`      | 100              | commits     | stake-weighted finality attestation, validator-signed       |
 
-Phase 2 prompt asked for "epoch boundary + every 10 000 rounds" —
-closer to Kaspa's pruning-point cadence than the current 500-block
-block cadence. R4 changes the trigger, not the data shape:
+The Phase 2 memo's "epoch boundary + every 10 000 rounds" does not
+disambiguate which of these it refers to. The `state_root` language
+points at storage; the "epoch boundary" language points at
+consensus/finality. A misinterpretation breaks either crash recovery
+(storage side) or liveness/finality (dag side), so R4 is *not* a
+quick refactor.
+
+Required before R4 lands:
+
+1. Pick which `CheckpointManager` owns the "Phase 2 checkpoint". My
+   current read: the storage-side checkpoint is the one the memo means
+   (state_root + epoch boundary + rollback boundary), and the finality
+   checkpoint is independent consensus machinery that should stay
+   untouched here.
+2. Verify the γ-5 epoch subsystem is in main (or plan the stub).
+3. Audit every `CheckpointManager::new` call site and decide
+   whether `MAX_CHECKPOINTS_RETAINED` promotion to runtime config is
+   backward-compatible.
+
+Then the core change is narrow:
 
 - Add `CheckpointTrigger::{BlockInterval(u64), EpochBoundary,
-  RoundInterval(u64)}`.
-- Default remains `BlockInterval(500)` (current behaviour).
-- v0.9.0 adds an optional `EpochBoundary` trigger wired off the epoch
-  subsystem (Group 1 `γ-5` work).
-- v0.9.0 adds an optional `RoundInterval(10_000)` trigger driven by
-  the Narwhal commit loop.
-- `MAX_CHECKPOINTS_RETAINED` becomes a runtime config, not a const.
+  RoundInterval(u64)}` in `misaka-storage::checkpoint`.
+- `CheckpointManager::should_checkpoint()` becomes trigger-driven.
+- Default remains `BlockInterval(500)` (no behaviour change).
+- `MAX_CHECKPOINTS_RETAINED` becomes runtime config with the existing
+  `5` as default.
 
-No schema change required — the stored `Checkpoint` shape is unchanged.
+No schema change. No finality-side change.
+
+R4 is deferred to its own session — the disambiguation work above is
+more than a single commit, and mixing it with R6/R1 increases
+blast-radius for consensus regressions.
 
 ### 11.5 R5 — Storage schema version marker (THIS COMMIT)
 
