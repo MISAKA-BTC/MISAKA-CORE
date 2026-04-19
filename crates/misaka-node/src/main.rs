@@ -1781,6 +1781,29 @@ async fn start_narwhal_node(
     };
     let store: std::sync::Arc<dyn misaka_dag::narwhal_dag::store::ConsensusStore> =
         rocks_store.clone();
+    // Phase 3a.5 Step 5 (2026-04-19): capture the `emit_cert_v2`
+    // config flag once at startup. The Narwhal commit loop below
+    // reads this boolean to decide whether to write a
+    // `CertificateV2` per commit. Default `false` keeps legacy
+    // configs untouched; operators opt in after verifying
+    // schema v3 migration. See
+    // `docs/design/phase3a_finalizer_integration.md` §5.
+    let emit_cert_v2: bool = loaded_config
+        .as_ref()
+        .map(|c| c.emit_cert_v2)
+        .unwrap_or(false);
+    if emit_cert_v2 {
+        info!(
+            "Phase 3a.5 Step 5: Cert V2 archival emission ENABLED \
+             (emit_cert_v2=true) — each commit writes a CertificateV2 \
+             under narwhal_votes + narwhal_cert_mapping"
+        );
+    } else {
+        info!(
+            "Phase 3a.5 Step 5: Cert V2 archival emission disabled \
+             (emit_cert_v2=false; default)"
+        );
+    }
     info!("startup[5/6]: RocksDB opened OK");
     let committee_pks: Vec<Vec<u8>> = committee
         .authorities
@@ -2194,6 +2217,68 @@ async fn start_narwhal_node(
     // gate, the propose loop would still run and emit blocks signed by
     // an unknown identity, which committee verifiers would reject and
     // log as `unknown peer pubkey` noise.
+    //
+    // Phase 3a Part B integration (2026-04-19): opt into the adaptive
+    // round-rate scheduler by passing the shared mempool + default
+    // `RoundSchedulerConfig` + `NodeMetrics` into `ProposeLoopConfig`.
+    // With both `scheduler` and `mempool` Some, the loop reads
+    // `mempool.len() / mempool.max_size()` each iteration and sleeps
+    // for the adaptive interval (100 ms..2000 ms) instead of the
+    // fixed `status_poll_ms`. Passing `None` for either field
+    // preserves legacy cadence.
+    //
+    // `NodeMetrics` was previously defined but never instantiated in
+    // production; this commit is its first production call site.
+    // Currently published only through the struct (no `/metrics`
+    // axum route yet); exposing it is a separate follow-up.
+    let node_metrics = crate::metrics::NodeMetrics::new();
+
+    // Phase 3a.5 Step 2 — the scheduler config is now shared so a
+    // future epoch-boundary handler (Step 4) can swap it in place
+    // without restarting the propose loop. Initialised with the
+    // same default as before.
+    let shared_scheduler_config: std::sync::Arc<
+        tokio::sync::RwLock<misaka_dag::narwhal_dag::round_scheduler::RoundSchedulerConfig>,
+    > = std::sync::Arc::new(tokio::sync::RwLock::new(
+        misaka_dag::narwhal_dag::round_scheduler::RoundSchedulerConfig::default(),
+    ));
+    // `shared_scheduler_config` is also used directly by the
+    // Step 4 epoch-boundary handler in the commit loop below
+    // (which is inline in this same function), so no extra
+    // clone is needed here.
+
+    // Phase 3a.5 Step 3 — the per-epoch stats collector feeds the
+    // Step 4 `adjust_round_config` derivation. Lock-free atomic
+    // counters; `record_round()` fires in the propose loop
+    // before each proposal is sent to the runtime, and
+    // `record_non_empty_round()` fires in the commit loop below
+    // when a commit accepts transactions. The RTT recorder is
+    // deferred — no network-layer RTT measurement point surfaces
+    // in the current narwhal runtime; see
+    // `docs/design/phase3a_epoch_integration.md` §7 step 5.
+    //
+    // Epoch label is 0 at startup; Step 4's epoch handler will
+    // `set_epoch()` it after each transition. Leader timeout is
+    // passed from the DAG constants module.
+    // Seed `leader_timeout_ms` with the `LeaderTimeoutConfig::default`
+    // base (500ms); the future Step 4 epoch handler will update this
+    // via `set_leader_timeout_ms` to reflect any adaptive changes
+    // applied by `round_config_adjust`.
+    let epoch_stats: std::sync::Arc<
+        misaka_dag::narwhal_dag::epoch_stats_collector::EpochStatsCollector,
+    > = std::sync::Arc::new(
+        misaka_dag::narwhal_dag::epoch_stats_collector::EpochStatsCollector::new(
+            0,
+            misaka_dag::narwhal_dag::leader_timeout::LeaderTimeoutConfig::default().base_ms,
+        ),
+    );
+    let epoch_stats_for_commit = epoch_stats.clone();
+    // `epoch_stats_for_commit` is used in two sites inside the
+    // commit loop below: `record_non_empty_round()` on every
+    // accepted commit (Step 3, already wired), and
+    // `snapshot_and_reset()` / `set_epoch()` on the epoch
+    // boundary (Step 4, wired below). No additional clones
+    // needed since the commit loop is inline in this function.
     let propose_loop_handle = if is_observer {
         info!("Observer mode: skipping propose loop (read-only node)");
         None
@@ -2204,12 +2289,38 @@ async fn start_narwhal_node(
             crate::narwhal_consensus::ProposeLoopConfig {
                 max_block_txs: cli.dag_max_txs,
                 backpressure: backpressure.clone(),
+                scheduler: Some(shared_scheduler_config.clone()),
+                mempool: Some(narwhal_mempool.mempool.clone()),
+                metrics: Some(node_metrics.clone()),
+                // Phase 3a.5 Step 3 (2026-04-19): wire the lock-free
+                // atomic-counter bundle into the propose loop so each
+                // iteration records a `round_attempts` observation.
+                // `record_non_empty_round()` is invoked separately
+                // inside the commit loop below (search for
+                // `epoch_stats_for_commit`). See
+                // `docs/design/phase3a_epoch_integration.md` §7 step 3.
+                stats_collector: Some(epoch_stats.clone()),
                 ..crate::narwhal_consensus::ProposeLoopConfig::default()
             },
             propose_state_root,
             Some(safe_mode.clone()),
         ))
     };
+    // Keep the metrics handle alive for the lifetime of the node;
+    // the propose loop holds an Arc clone. Also pass an Arc clone
+    // into the RPC router so `/api/metrics/node` can render the
+    // `NodeMetrics` in Prometheus exposition format. The bare
+    // binding (formerly `_node_metrics_keep`) is replaced by
+    // `node_metrics_rpc` for clarity.
+    let node_metrics_rpc = node_metrics.clone();
+    // Retain an unused clone so the Arc is kept alive even if
+    // the RPC router is not spawned (e.g. observer mode). Without
+    // this, dropping the last clone on the propose-loop side would
+    // leave a dangling `Arc::weak_count` but never break. Cloned
+    // rather than moved so the commit loop's Phase 3a.5 Step 5
+    // Cert V2 emission path can still reach `node_metrics` via
+    // the original binding.
+    let _node_metrics_keep = node_metrics.clone();
 
     // Start RPC server (minimal — submit_tx + status)
     let rpc_port = cli.rpc_port;
@@ -2307,6 +2418,27 @@ async fn start_narwhal_node(
                         let m = m.clone();
                         async move {
                             misaka_dag::narwhal_dag::prometheus::PrometheusExporter::new(m).export()
+                        }
+                    }
+                }))
+                // Phase 3a integration: expose `NodeMetrics` (distinct
+                // from the above `narwhal_dag::Metrics`) so operators
+                // can scrape the 4 new Part B adaptive-scheduler metrics
+                // + the 2 Phase 3a Part C epoch-audit placeholders +
+                // every other `NodeMetrics` field. Content-Type matches
+                // the Prometheus exposition format.
+                .route("/node", axum::routing::get({
+                    let nm = node_metrics_rpc.clone();
+                    move || {
+                        let nm = nm.clone();
+                        async move {
+                            (
+                                [(
+                                    axum::http::header::CONTENT_TYPE,
+                                    "text/plain; version=0.0.4; charset=utf-8",
+                                )],
+                                nm.render_prometheus(),
+                            )
                         }
                     }
                 }))
@@ -4310,6 +4442,95 @@ async fn start_narwhal_node(
                     let prev_epoch = new_height.saturating_sub(1) / epoch_len;
                     let new_epoch = new_height / epoch_len;
                     if new_epoch > prev_epoch {
+                        // Phase 3a.5 Step 4 (2026-04-19): scheduler
+                        // config adjustment at the epoch boundary.
+                        //
+                        // Snapshot the CLOSING epoch's stats from the
+                        // lock-free `EpochStatsCollector` (Step 1/3),
+                        // derive the NEW epoch's
+                        // `RoundSchedulerConfig` via the pure
+                        // `adjust_round_config` function (Part C),
+                        // persist the `RoundConfigAuditEntry` under
+                        // the `RoundConfigAudit` CF so any node can
+                        // audit-replay the decision, and swap the
+                        // shared `Arc<RwLock<RoundSchedulerConfig>>`
+                        // (Step 2) in place. The propose loop
+                        // re-reads the shared config on every
+                        // iteration, so the new interval bounds
+                        // take effect on the next proposal without
+                        // any restart. Finally advance the
+                        // collector's epoch label so subsequent
+                        // `record_*` observations are attributed
+                        // to `new_epoch`.
+                        //
+                        // Order: this block runs FIRST inside the
+                        // `new_epoch > prev_epoch` arm so the
+                        // snapshot captures the stats of the epoch
+                        // that just closed, before any of the
+                        // staking / election logic below mutates
+                        // validator state. Determinism: every
+                        // honest node computes the same
+                        // `EpochStats` over the same committed
+                        // history and the same pure
+                        // `adjust_round_config`, so
+                        // `new_config` is identical across the
+                        // committee. See
+                        // `docs/design/phase3a_epoch_integration.md`
+                        // §1 + §7 step 3-5 for the full contract.
+                        {
+                            use misaka_dag::narwhal_dag::round_config_adjust::{
+                                adjust_round_config, RoundConfigAuditEntry,
+                            };
+                            let prev_config = *shared_scheduler_config.read().await;
+                            let stats = epoch_stats_for_commit.snapshot_and_reset();
+                            let new_config = adjust_round_config(&stats, &prev_config);
+                            let timestamp_ms = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_millis() as u64)
+                                .unwrap_or(0);
+                            let entry = RoundConfigAuditEntry {
+                                applied_from_epoch: new_epoch,
+                                previous_config: prev_config,
+                                new_config,
+                                stats,
+                                timestamp_ms,
+                            };
+                            if let Err(e) = rocks_store.put_round_config_audit(&entry) {
+                                // Non-fatal: audit persistence failure
+                                // does NOT block the commit. The swap
+                                // still happens; the audit log is
+                                // best-effort observability.
+                                tracing::warn!(
+                                    "Phase 3a.5 Step 4: failed to persist \
+                                     round_config_audit for epoch {}: {}",
+                                    new_epoch,
+                                    e,
+                                );
+                            }
+                            *shared_scheduler_config.write().await = new_config;
+                            epoch_stats_for_commit.set_epoch(new_epoch);
+                            misaka_dag::narwhal_dag::slo_metrics::EPOCH_ADJUSTMENTS_TOTAL
+                                .inc();
+                            misaka_dag::narwhal_dag::slo_metrics::ROUND_INTERVAL_MIN_MS
+                                .set(new_config.min_interval_ms as i64);
+                            misaka_dag::narwhal_dag::slo_metrics::ROUND_INTERVAL_MAX_MS
+                                .set(new_config.max_interval_ms as i64);
+                            tracing::info!(
+                                "Phase 3a.5 Step 4: epoch {} boundary — \
+                                 adjust_round_config applied. \
+                                 closing_stats={{rounds={}, non_empty={}, rtt_max_ms={}}}. \
+                                 prev={{min={}, max={}}} → new={{min={}, max={}}}",
+                                new_epoch,
+                                stats.total_rounds,
+                                stats.non_empty_rounds,
+                                stats.max_observed_rtt_ms,
+                                prev_config.min_interval_ms,
+                                prev_config.max_interval_ms,
+                                new_config.min_interval_ms,
+                                new_config.max_interval_ms,
+                            );
+                        }
+
                         let settled = registry_guard.settle_unlocks(new_epoch);
                         if !settled.is_empty() {
                             tracing::info!(
@@ -5043,6 +5264,17 @@ async fn start_narwhal_node(
                 // the supply cap and the burn-replay guard reset on every
                 // restart.
                 if exec_result.txs_accepted > 0 {
+                    // Phase 3a.5 Step 3 (2026-04-19): record a
+                    // non-empty round observation into the lock-free
+                    // atomic-counter bundle. The collector is
+                    // snapshot-and-reset at each epoch boundary by
+                    // the future Step 4 handler to drive
+                    // `round_config_adjust`. Pure atomic increment —
+                    // no behaviour change on the commit path. See
+                    // `docs/design/phase3a_epoch_integration.md` §7
+                    // step 3.
+                    epoch_stats_for_commit.record_non_empty_round();
+
                     if let Err(e) = tx_executor.save_snapshot(&utxo_snapshot_path) {
                         tracing::warn!("Failed to save UTXO snapshot: {}", e);
                     } else {
@@ -5076,6 +5308,157 @@ async fn start_narwhal_node(
                             "Failed to persist startup_integrity committed state: {}",
                             e
                         );
+                    }
+                }
+
+                // Phase 3a.5 Step 5 (2026-04-19): Cert V2 archival
+                // emission.
+                //
+                // On every commit (independent of `txs_accepted > 0`
+                // — empty epochs still produce committee
+                // participation records worth archiving),
+                // synthesize a `CertificateV2` from the committed
+                // sub-DAG's author set and persist its
+                // `VoteCommitment` under `NarwhalCf::Votes`, plus a
+                // v1 → v2 digest mapping under
+                // `NarwhalCf::CertMapping`. This surfaces the Cert
+                // V2 store API (A.1-A.5, shipped in Phase 3a) on the
+                // live commit path — Path B of the finalizer
+                // integration plan in
+                // `docs/design/phase3a_finalizer_integration.md` §5.
+                //
+                // `CertificateV2` is ARCHIVAL ONLY. Consensus
+                // acceptance is unchanged. No wire format changes.
+                // Phase 3b's ZK aggregation retrofit consumes this
+                // archival data to build proofs against real epochs.
+                //
+                // Voter list derivation: the commit sub-DAG carries
+                // every block that participated in reaching this
+                // commit (leader + supporters). Their `author`
+                // fields are `AuthorityIndex` values that we map to
+                // their `validator_id` = SHA3-256(pubkey) via the
+                // current committee. Unique authors form the voter
+                // set. This is a reasonable participation proxy for
+                // archival; the strict-supporters-only view
+                // requires DAG-side API extension that's out of
+                // scope for Phase 3a.5.
+                //
+                // Gated by `emit_cert_v2` (default `false`). Writes
+                // are best-effort — a RocksDB put error is logged
+                // but does NOT halt the commit.
+                if emit_cert_v2 {
+                    use misaka_dag::narwhal_finality::cert_v2::{
+                        CertificateV2, VoteCommitment,
+                    };
+                    use sha3::{Digest as _, Sha3_256};
+                    use std::collections::BTreeSet;
+
+                    // Collect unique author indices from the sub-DAG.
+                    let mut author_idxs: BTreeSet<u32> = BTreeSet::new();
+                    for b in &output.blocks {
+                        author_idxs.insert(b.author as u32);
+                    }
+                    // Re-acquire the committee read guard — the
+                    // earlier `committee_guard` for this iteration
+                    // was dropped upstream (see `drop(committee_guard)`
+                    // around the proposed-block handler). Taking a
+                    // fresh read guard here is cheap (read lock,
+                    // contended only against rare committee rotation
+                    // writers) and keeps the guard's scope tight.
+                    let committee_guard_for_cert =
+                        committee_shared.read().await;
+                    let committee_len = committee_guard_for_cert.authorities.len();
+                    let bitmap_bytes = committee_len.div_ceil(8);
+                    let mut voters_bits = vec![0u8; bitmap_bytes];
+                    let mut voter_ids: Vec<[u8; 32]> =
+                        Vec::with_capacity(author_idxs.len());
+                    for idx in author_idxs {
+                        let i = idx as usize;
+                        if i < committee_len {
+                            let pk = &committee_guard_for_cert.authorities[i].public_key;
+                            if !pk.is_empty() {
+                                let vid: [u8; 32] = Sha3_256::digest(pk).into();
+                                voter_ids.push(vid);
+                                // Set bit `i` (little-endian within byte).
+                                voters_bits[i / 8] |= 1u8 << (i % 8);
+                            }
+                        }
+                    }
+                    drop(committee_guard_for_cert);
+
+                    if !voter_ids.is_empty() {
+                        let vote_commitment =
+                            VoteCommitment::with_blake3(&voter_ids, voters_bits);
+                        // v1 digest proxy: a deterministic 32-byte
+                        // identifier for this commit. The Narwhal
+                        // runtime emits `LinearizedOutput` (no
+                        // `digest()` method) rather than
+                        // `CommittedSubDag`, so we reproduce the
+                        // canonical commit digest shape inline:
+                        // blake3 over (domain, commit_index,
+                        // leader.digest, blocks.*.digest,
+                        // timestamp_ms). Every honest node
+                        // linearizes the same sub-DAG identically,
+                        // so this value is committee-wide
+                        // agreement. Used only as the lookup key
+                        // for the v1 → v2 mapping CF — no
+                        // consensus-rule implication.
+                        let cert_v1_digest: [u8; 32] = {
+                            let mut h = blake3::Hasher::new();
+                            h.update(b"MISAKA:commit:v1:");
+                            h.update(&output.commit_index.to_le_bytes());
+                            h.update(&output.leader.digest.0);
+                            for b in &output.blocks {
+                                h.update(&b.digest.0);
+                            }
+                            h.update(&output.timestamp_ms.to_le_bytes());
+                            *h.finalize().as_bytes()
+                        };
+                        let cert_v2 = CertificateV2 {
+                            header: misaka_dag::narwhal_finality::CheckpointDigest(
+                                cert_v1_digest,
+                            ),
+                            vote_refs: vote_commitment,
+                            epoch: current_epoch_for_stake,
+                            aggregation_slot: None,
+                        };
+                        let cert_v2_digest = cert_v2.digest().0;
+                        let voter_count_u64 = voter_ids.len() as u64;
+
+                        if let Err(e) = rocks_store.put_cert_v2_votes(
+                            &cert_v2_digest,
+                            &cert_v2.vote_refs,
+                            &None,
+                        ) {
+                            tracing::warn!(
+                                "Phase 3a.5 Step 5: put_cert_v2_votes failed \
+                                 commit={}: {}",
+                                output.commit_index,
+                                e,
+                            );
+                        } else if let Err(e) = rocks_store
+                            .put_cert_mapping(&cert_v1_digest, &cert_v2_digest)
+                        {
+                            tracing::warn!(
+                                "Phase 3a.5 Step 5: put_cert_mapping failed \
+                                 commit={}: {}",
+                                output.commit_index,
+                                e,
+                            );
+                        } else {
+                            node_metrics
+                                .checkpoint_votes_received
+                                .add(voter_count_u64);
+                            tracing::debug!(
+                                "Phase 3a.5 Step 5: wrote CertificateV2 commit={} \
+                                 voters={} epoch={} v1={} v2={}",
+                                output.commit_index,
+                                voter_count_u64,
+                                current_epoch_for_stake,
+                                hex::encode(&cert_v1_digest[..8]),
+                                hex::encode(&cert_v2_digest[..8]),
+                            );
+                        }
                     }
                 }
 

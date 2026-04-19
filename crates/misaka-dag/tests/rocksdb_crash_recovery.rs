@@ -439,6 +439,10 @@ fn blocker_g_future_schema_version_refuses_to_open() {
     {
         let mut opts = rocksdb::Options::default();
         opts.create_if_missing(false);
+        // Keep in sync with `NarwhalCf::ALL` in
+        // `crates/misaka-dag/src/narwhal_dag/columns.rs`. Post-v0.9.0
+        // merge these tests need votes + cert_mapping + round_config_audit
+        // CFs (PR #14 Phase 3a + 3a.5) in addition to the original 8.
         let cfs = vec![
             "narwhal_blocks",
             "narwhal_commits",
@@ -448,6 +452,9 @@ fn blocker_g_future_schema_version_refuses_to_open() {
             "narwhal_committed_tx_filter",
             "narwhal_tx_index",
             "narwhal_addr_index",
+            "narwhal_votes",
+            "narwhal_cert_mapping",
+            "narwhal_round_config_audit",
         ];
         let db = rocksdb::DB::open_cf(&opts, &store_path, cfs).unwrap();
         let cf_meta = db.cf_handle("narwhal_meta").unwrap();
@@ -484,6 +491,10 @@ fn blocker_g_legacy_db_without_schema_version_is_upgraded() {
     {
         let mut opts = rocksdb::Options::default();
         opts.create_if_missing(false);
+        // Keep in sync with `NarwhalCf::ALL` in
+        // `crates/misaka-dag/src/narwhal_dag/columns.rs`. Post-v0.9.0
+        // merge these tests need votes + cert_mapping + round_config_audit
+        // CFs (PR #14 Phase 3a + 3a.5) in addition to the original 8.
         let cfs = vec![
             "narwhal_blocks",
             "narwhal_commits",
@@ -493,6 +504,9 @@ fn blocker_g_legacy_db_without_schema_version_is_upgraded() {
             "narwhal_committed_tx_filter",
             "narwhal_tx_index",
             "narwhal_addr_index",
+            "narwhal_votes",
+            "narwhal_cert_mapping",
+            "narwhal_round_config_audit",
         ];
         let db = rocksdb::DB::open_cf(&opts, &store_path, cfs).unwrap();
         let cf_meta = db.cf_handle("narwhal_meta").unwrap();

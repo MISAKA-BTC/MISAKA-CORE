@@ -63,10 +63,23 @@ pub const STORAGE_SCHEMA_VERSION_V088: u32 = 1;
 /// * (future Phase-2 R1/R6) legacy-CF removal.
 pub const STORAGE_SCHEMA_VERSION_V090: u32 = 2;
 
+/// On-disk schema introduced by v0.9.1 (Phase 3a). Adds:
+/// * Narwhal `votes` CF — `CertificateV2` vote commitments +
+///   optional aggregation proofs.
+/// * Narwhal `cert_mapping` CF — v1 ↔ v2 digest mapping for the
+///   cross-over epoch.
+///
+/// The v2 → v3 migration path is a **backfill**: existing v2
+/// keyspaces are untouched; the two new CFs are created empty,
+/// and the marker is bumped from 2 to 3. Legacy consumers that
+/// only need v2 state continue to work — only new Cert V2 writes
+/// and their v1↔v2 mapping rely on the new CFs.
+pub const STORAGE_SCHEMA_VERSION_V091: u32 = 3;
+
 /// The schema version this build expects. Runtime refuses any DB whose
 /// marker differs (subject to [`check_compatible`]'s `accept_unmarked`
 /// flag).
-pub const CURRENT_STORAGE_SCHEMA_VERSION: u32 = STORAGE_SCHEMA_VERSION_V090;
+pub const CURRENT_STORAGE_SCHEMA_VERSION: u32 = STORAGE_SCHEMA_VERSION_V091;
 
 /// Sub-bucket suffix under [`StorePrefixes::ChainInfo`] that identifies
 /// this key among other chain-info singletons. The literal is persisted
@@ -298,6 +311,7 @@ mod tests {
     #[test]
     fn constants_are_monotone_and_current_is_latest() {
         assert!(STORAGE_SCHEMA_VERSION_V088 < STORAGE_SCHEMA_VERSION_V090);
-        assert_eq!(CURRENT_STORAGE_SCHEMA_VERSION, STORAGE_SCHEMA_VERSION_V090);
+        assert!(STORAGE_SCHEMA_VERSION_V090 < STORAGE_SCHEMA_VERSION_V091);
+        assert_eq!(CURRENT_STORAGE_SCHEMA_VERSION, STORAGE_SCHEMA_VERSION_V091);
     }
 }

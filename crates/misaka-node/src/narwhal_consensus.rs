@@ -339,11 +339,66 @@ pub struct ProposeLoopConfig {
     /// Maximum transactions per block proposal.
     pub max_block_txs: usize,
     /// Status poll interval for threshold-clock round advancement.
+    ///
+    /// Used as the fallback cadence when the adaptive scheduler
+    /// (see [`scheduler`](Self::scheduler) + [`mempool`](Self::mempool))
+    /// is not configured. With the adaptive scheduler wired, this
+    /// value is ignored.
     pub status_poll_ms: u64,
     /// Shared backpressure flag from the consensus runtime. When set,
     /// the propose loop sleeps instead of producing new proposals so
     /// the commit pipeline can drain.
     pub backpressure: std::sync::Arc<std::sync::atomic::AtomicBool>,
+
+    // ── Phase 3a Part B — adaptive round-rate scheduler ──────────
+    //
+    // The `scheduler` + `mempool` pair enables adaptive interval
+    // selection: the loop computes `utilisation = mempool.len() /
+    // mempool.max_size()` and sleeps for
+    // `next_round_interval(utilisation, scheduler)` between
+    // wake-ups. If either field is `None`, the loop falls back to
+    // the legacy fixed `status_poll_ms` cadence.
+    //
+    // `metrics`, when `Some`, is used to publish
+    // `misaka_round_interval_ms`, `misaka_mempool_utilisation_scaled`,
+    // and the `round_wake_{timer,mempool}_total` counters — the
+    // proposer populates these only when adaptive is enabled.
+    /// Adaptive round-rate scheduler config, shared so a future
+    /// epoch-boundary handler (Phase 3a.5 Step 4) can swap the
+    /// contents in place without restarting the proposer. `None`
+    /// → legacy fixed-cadence behaviour.
+    ///
+    /// Phase 3a.5 Step 2 (2026-04-19) changed this from a
+    /// by-value `Option<RoundSchedulerConfig>` to
+    /// `Option<Arc<RwLock<RoundSchedulerConfig>>>`. The propose
+    /// loop now takes a `.read().await` snapshot each iteration;
+    /// the snapshot is used for that iteration's sleep selection.
+    /// The read is uncontended in steady state (only an epoch
+    /// handler writes, which happens at most once per epoch).
+    pub scheduler: Option<
+        std::sync::Arc<
+            tokio::sync::RwLock<misaka_dag::narwhal_dag::round_scheduler::RoundSchedulerConfig>,
+        >,
+    >,
+    /// Shared mempool reference used to sample utilisation each
+    /// iteration. `None` → legacy behaviour.
+    pub mempool: Option<std::sync::Arc<tokio::sync::Mutex<misaka_mempool::UtxoMempool>>>,
+    /// Shared metrics. `None` → no adaptive metrics published (the
+    /// rest of the metrics struct is still updated by other call
+    /// sites).
+    pub metrics: Option<std::sync::Arc<crate::metrics::NodeMetrics>>,
+    /// Phase 3a.5 Step 3 (2026-04-19) — shared
+    /// [`EpochStatsCollector`] updated by this propose loop on
+    /// every proposal attempt. `None` keeps the collector wire
+    /// dormant (legacy behaviour). A separate commit-loop call
+    /// site in `main.rs` feeds `record_non_empty_round()` when
+    /// a commit accepts transactions. Step 4's epoch handler
+    /// reads the snapshot.
+    ///
+    /// [`EpochStatsCollector`]: misaka_dag::narwhal_dag::epoch_stats_collector::EpochStatsCollector
+    pub stats_collector: Option<
+        std::sync::Arc<misaka_dag::narwhal_dag::epoch_stats_collector::EpochStatsCollector>,
+    >,
 }
 
 #[cfg(feature = "dag")]
@@ -353,6 +408,10 @@ impl Default for ProposeLoopConfig {
             max_block_txs: 1000,
             status_poll_ms: 100,
             backpressure: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            scheduler: None,
+            mempool: None,
+            metrics: None,
+            stats_collector: None,
         }
     }
 }
@@ -386,15 +445,68 @@ pub fn spawn_propose_loop(
             tokio::time::interval(tokio::time::Duration::from_millis(config.status_poll_ms));
         let mut last_proposed_round: Option<Round> = None;
 
+        // Phase 3a Part B — adaptive mode is enabled iff both a
+        // scheduler config and a mempool reference are configured.
+        // Either `None` → legacy fixed-cadence fallback via
+        // `status_tick`.
+        //
+        // Phase 3a.5 Step 2: `adaptive` now holds a clone of the
+        // shared `Arc<RwLock<RoundSchedulerConfig>>` so future
+        // epoch-transition handlers can swap its contents without
+        // restarting the propose loop. The loop takes a
+        // `.read().await` snapshot per iteration.
+        let adaptive = config
+            .scheduler
+            .clone()
+            .and_then(|s| config.mempool.clone().map(|m| (s, m)));
+
         tracing::info!(
-            "Propose loop started: max_block_txs={}, status_poll={}ms",
+            "Propose loop started: max_block_txs={}, status_poll={}ms, adaptive={}",
             config.max_block_txs,
-            config.status_poll_ms
+            config.status_poll_ms,
+            adaptive.is_some(),
         );
 
         loop {
+            // Compute next-sleep duration. In adaptive mode this is
+            // re-derived every iteration from current mempool
+            // utilisation; in legacy mode it's the fixed
+            // `status_poll_ms` that the old `status_tick` used.
+            let next_sleep = if let Some((sched_rw, mempool)) = adaptive.as_ref() {
+                let (depth, max) = {
+                    let m = mempool.lock().await;
+                    (m.len(), m.max_size())
+                };
+                let utilisation = if max == 0 {
+                    0.0
+                } else {
+                    (depth as f64 / max as f64).clamp(0.0, 1.0)
+                };
+                // Step 2: read the latest shared scheduler config.
+                // The lock is held only long enough to copy the
+                // 16-byte struct, so contention with a future epoch
+                // writer is negligible in steady state.
+                let sched_snapshot = *sched_rw.read().await;
+                let interval_ms = misaka_dag::narwhal_dag::round_scheduler::next_round_interval_ms(
+                    utilisation,
+                    &sched_snapshot,
+                );
+                if let Some(metrics) = config.metrics.as_ref() {
+                    metrics.round_interval_ms.set(interval_ms);
+                    metrics
+                        .mempool_utilisation_scaled
+                        .set((utilisation * 1000.0).round() as u64);
+                }
+                tokio::time::Duration::from_millis(interval_ms)
+            } else {
+                tokio::time::Duration::from_millis(config.status_poll_ms)
+            };
+
             tokio::select! {
                 tx = mempool_rx.recv() => {
+                    if let Some(metrics) = config.metrics.as_ref() {
+                        metrics.round_wake_mempool_total.inc();
+                    }
                     match tx {
                         Some(tx_bytes) => {
                             pending_txs.push_back(tx_bytes);
@@ -411,7 +523,12 @@ pub fn spawn_propose_loop(
                         }
                     }
                 }
-                _ = status_tick.tick() => {}
+                _ = tokio::time::sleep(next_sleep), if adaptive.is_some() => {
+                    if let Some(metrics) = config.metrics.as_ref() {
+                        metrics.round_wake_timer_total.inc();
+                    }
+                }
+                _ = status_tick.tick(), if adaptive.is_none() => {}
             }
 
             // v0.5.9: skip proposing when safe-mode is engaged. Keep
@@ -480,6 +597,16 @@ pub fn spawn_propose_loop(
                     },
                 )
                 .collect();
+
+            // Phase 3a.5 Step 3 — record this proposal attempt in the
+            // `EpochStatsCollector` for later epoch-boundary
+            // adjustment (Step 4). Lock-free atomic increment;
+            // no hot-path cost. Placed here (just before sending
+            // the proposal) so "one round" corresponds to "one
+            // proposal that actually reached the runtime".
+            if let Some(stats) = config.stats_collector.as_ref() {
+                stats.record_round();
+            }
 
             // Send proposal to consensus runtime
             let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();

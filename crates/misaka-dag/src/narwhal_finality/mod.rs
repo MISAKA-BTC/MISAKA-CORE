@@ -10,6 +10,10 @@ use serde::{Deserialize, Serialize};
 // Phase 2c-B D9: BFT module is test-only (not used in production consensus path).
 #[cfg(test)]
 pub mod bft;
+// Phase 3a foundation (2026-04-19): ZK-forward-compatible Cert V2
+// types. Storage layer only; wire stays V1. See
+// `docs/design/v091_phase3a_cert_v2.md`.
+pub mod cert_v2;
 pub mod checkpoint_manager;
 
 /// Checkpoint digest (32 bytes).

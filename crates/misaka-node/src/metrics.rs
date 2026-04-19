@@ -118,6 +118,22 @@ pub struct NodeMetrics {
     pub uptime_seconds: Gauge,
     pub snapshot_saves: Counter,
     pub snapshot_save_errors: Counter,
+
+    // ── Phase 3a Part B — adaptive round rate ──
+    /// The most-recent adaptive interval picked by the proposer loop,
+    /// in milliseconds. Set on every loop iteration when the
+    /// adaptive scheduler is enabled.
+    pub round_interval_ms: Gauge,
+    /// Mempool utilisation × 1000 (so the `[0, 1]` ratio fits in
+    /// `u64` as a fixed-point 0..=1000 value). Set on every loop
+    /// iteration when the adaptive scheduler is enabled.
+    pub mempool_utilisation_scaled: Gauge,
+    /// Count of proposer-loop wakes caused by the adaptive sleep
+    /// timer expiring (as opposed to a mempool tx arriving).
+    pub round_wake_timer_total: Counter,
+    /// Count of proposer-loop wakes caused by the mempool channel
+    /// delivering a new transaction.
+    pub round_wake_mempool_total: Counter,
 }
 
 impl NodeMetrics {
@@ -162,6 +178,11 @@ impl NodeMetrics {
             uptime_seconds: Gauge::new(),
             snapshot_saves: Counter::new(),
             snapshot_save_errors: Counter::new(),
+
+            round_interval_ms: Gauge::new(),
+            mempool_utilisation_scaled: Gauge::new(),
+            round_wake_timer_total: Counter::new(),
+            round_wake_mempool_total: Counter::new(),
         })
     }
 
@@ -367,6 +388,28 @@ impl NodeMetrics {
             self.snapshot_save_errors.get()
         );
 
+        // Phase 3a Part B — adaptive round rate
+        gauge!(
+            "misaka_round_interval_ms",
+            "Adaptive round interval picked by the proposer loop (ms)",
+            self.round_interval_ms.get()
+        );
+        gauge!(
+            "misaka_mempool_utilisation_scaled",
+            "Mempool utilisation × 1000 (0..=1000 fixed-point [0.0, 1.0])",
+            self.mempool_utilisation_scaled.get()
+        );
+        counter!(
+            "misaka_round_wake_timer_total",
+            "Proposer-loop wakes caused by the adaptive sleep timer",
+            self.round_wake_timer_total.get()
+        );
+        counter!(
+            "misaka_round_wake_mempool_total",
+            "Proposer-loop wakes caused by mempool tx delivery",
+            self.round_wake_mempool_total.get()
+        );
+
         out
     }
 }
@@ -406,6 +449,10 @@ impl Default for NodeMetrics {
             uptime_seconds: Gauge::new(),
             snapshot_saves: Counter::new(),
             snapshot_save_errors: Counter::new(),
+            round_interval_ms: Gauge::new(),
+            mempool_utilisation_scaled: Gauge::new(),
+            round_wake_timer_total: Counter::new(),
+            round_wake_mempool_total: Counter::new(),
         }
     }
 }
