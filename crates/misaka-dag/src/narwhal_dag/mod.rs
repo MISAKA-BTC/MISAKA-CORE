@@ -41,6 +41,9 @@ pub mod proposed_block_handler;
 #[cfg(feature = "rocksdb")]
 pub mod rocksdb_store;
 pub mod round_prober;
+// Phase 3a Part B (2026-04-19): adaptive round-rate scheduler. See
+// `docs/design/v091_phase3a_cert_v2.md` §5.3.
+pub mod round_scheduler;
 pub mod round_tracker;
 pub mod runtime;
 pub mod slo_metrics;

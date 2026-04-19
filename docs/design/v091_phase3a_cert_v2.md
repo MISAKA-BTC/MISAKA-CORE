@@ -96,7 +96,7 @@ MISAKA:cert_v2:digest:v1 ||
 
 Cert V2 types + design doc (this file). See commit for details.
 
-### 5.2 Part A.1-A.3 — this commit (2026-04-19 later)
+### 5.2 Part A.1-A.3 — e8197bd (2026-04-19 later)
 
 - **A.1 — `votes` CF**: added `NarwhalCf::Votes = "narwhal_votes"`
   variant. CF descriptor in `open_with_sync`: compression off +
@@ -126,6 +126,58 @@ Cert V2 types + design doc (this file). See commit for details.
   and 1 update to `all_is_exhaustive_and_unique::EXPECTED_COUNT`.
 
 Totals: `cargo test -p misaka-dag --lib` 462/462 (455 prior + 7).
+`cargo check --workspace --lib --bins` clean.
+
+### 5.3 Part B — adaptive round-rate scheduler (this commit, 2026-04-19)
+
+New module `crates/misaka-dag/src/narwhal_dag/round_scheduler.rs`:
+
+- Constants: `DEFAULT_MIN_INTERVAL_MS = 100`,
+  `DEFAULT_MAX_INTERVAL_MS = 2_000`, plus hard bounds
+  `HARD_MIN_INTERVAL_MS = 50` and `HARD_MAX_INTERVAL_MS = 10_000`.
+- `RoundSchedulerConfig { min_interval_ms, max_interval_ms }` with
+  `Default` matching the memo and `validate()` that rejects
+  below-floor / above-ceiling / `min >= max`.
+- `next_round_interval_ms(utilisation: f64, &RoundSchedulerConfig)
+  -> u64` — pure linear interp. `u=1.0 → min`, `u=0.0 → max`.
+  Clamps `utilisation` to `[0, 1]`, rounds to nearest, re-clamps to
+  `[min, max]` for FP drift tolerance. NaN survives without panic
+  (caller still gets a valid u64).
+- `next_round_interval(..)` is a `Duration` wrapper.
+- `wait_until_next_round<F>(utilisation, config, mempool_wake: F)
+  -> WakeCause` where `F: Future<Output = ()>`. Uses
+  `tokio::select!` on a sleep vs the caller's future. Returns
+  `TimerExpired` or `MempoolSignalled` so the caller can log /
+  metric the cause. Caller who wants sleep-only semantics passes
+  `std::future::pending()`.
+
+Determinism: two nodes with the same `utilisation` + same config
+compute the same interval. No clock read, no RNG, no I/O in the
+pure function.
+
+Not in this commit:
+- Integration into `start_narwhal_node`'s proposer loop (replaces
+  the fixed-cadence sleep). Requires wiring a mempool utilisation
+  signal.
+- Prometheus metrics (`round_interval_ms`, `mempool_utilization`).
+  Plumbing deferred to the integration commit.
+
+19 new unit tests in `round_scheduler::tests`:
+
+- Default config shape + validate clean.
+- `validate()` rejects below-floor / above-ceiling / `min>=max`.
+- Endpoints: `u=0` → max, `u=1` → min, `u=0.5` → midpoint.
+- Clamping: `u>1` → min, `u<0` → max, NaN no-panic.
+- Monotonicity: higher `u` picks shorter-or-equal interval
+  across 11 sample points.
+- Custom range respected.
+- Degenerate `min==max` yields `min` without panic.
+- `Duration` wrapper matches ms function.
+- Async (`#[tokio::test]`): pre-resolved future wins race;
+  pending future → `TimerExpired`; slow mempool wake →
+  `TimerExpired`.
+
+Regression: `cargo test -p misaka-dag --lib` 481/481 (462 prior + 19).
 `cargo check --workspace --lib --bins` clean.
 
 ## 6. Out of scope for this session
