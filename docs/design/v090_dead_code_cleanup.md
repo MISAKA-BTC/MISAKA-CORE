@@ -1,6 +1,6 @@
 # v0.9.0 Dead-Code Cleanup — Audit & Plan
 
-Status: **AUDIT ONLY — no deletions in this commit**
+Status: **AUDIT + PLAN A + PLAN B SHIPPED 2026-04-19**
 Context: Phase 2 Path X R6-b (commits 5b17319 + 0f58d84) landed the
 Narwhal-native pruning pipeline, making parts of the Kaspa-era
 scaffolding dead. This doc turns that observation into a concrete,
@@ -231,7 +231,7 @@ Rollback is `git revert` on each sub-commit.
 
 ---
 
-## 4. Ordering recommendation
+## 4. Ordering recommendation (historical)
 
 1. **Plan A first** (one session, ~150 LoC) — low risk, quick
    win, shrinks the dead-code footprint right now.
@@ -240,6 +240,21 @@ Rollback is `git revert` on each sub-commit.
 
 Not atomic. The two plans do not share files except `main.rs`
 (Plan B only). No merge-conflict risk.
+
+### 4.1 What actually shipped (2026-04-19)
+
+Both plans landed in one session. Commits on
+`feature/v090-cf-split-pruning`:
+
+| commit | plan | delta |
+|---|---|---|
+| `e179536` | A — legacy pruning pipeline | −149 LoC |
+| `369c366` | B.1 — `start_dag_node` + dispatch | −1,409 LoC |
+| `4c2802f` | B.2 — 8 ghostdag submodules + orphan `bft_event_loop.rs` | −18,590 LoC |
+| `6e039be` | B.3 — 45 remaining gated items in main.rs | −1,670 LoC |
+| *(B.4+B.5 consolidated)* | Cargo.toml + negation cfgs + stale comments | ~−20 LoC net |
+
+**Total: ≈ −21,840 LoC** from the branch in the cleanup arc.
 
 ---
 

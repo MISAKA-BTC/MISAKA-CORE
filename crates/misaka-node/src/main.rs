@@ -1106,16 +1106,16 @@ async fn main() -> anyhow::Result<()> {
     //  分岐: v1 (linear chain) vs v2 (DAG)
     // ════════════════════════════════════════════════════════
 
-    // Dead-code cleanup Plan B.1 (2026-04-19): the `ghostdag-compat`
-    // match arm that dispatched into `start_dag_node` was removed
-    // along with the function itself. Remaining arms were:
-    //   - `feature = "dag"` → `start_narwhal_node` (production).
-    //   - `not(feature = "dag")` → `start_v1_node` (legacy linear).
+    // Dispatch:
+    //   - `feature = "dag"` (default) → `start_narwhal_node`
+    //     (Narwhal/Bullshark production runtime).
+    //   - `not(feature = "dag")` → `start_v1_node` (legacy linear
+    //     chain; retained for back-compat).
     //
-    // The `not(feature = "ghostdag-compat")` guard on the Narwhal arm
-    // is now redundant — kept as-is until B.4 removes the feature
-    // declaration from Cargo.toml and cleans these up.
-    let _ = (node_mode, role); // silence unused when dag feature is on
+    // `node_mode` and `role` are only used by the v1 path; the
+    // `let _ = (...)` silences unused-variable lints under the
+    // default `dag` build.
+    let _ = (node_mode, role);
 
     #[cfg(feature = "dag")]
     {
@@ -1171,7 +1171,7 @@ fn resolve_genesis_committee_path(cli_path: Option<&str>) -> std::path::PathBuf 
 ///
 /// The task owns cheap clones of every handle — no references into the
 /// closure frame — so it outlives the HTTP response.
-#[cfg(all(feature = "dag", not(feature = "ghostdag-compat")))]
+#[cfg(feature = "dag")]
 fn spawn_verify_stake_background(
     validator_id: [u8; 32],
     l1_pubkey_hex: String,
@@ -1289,7 +1289,7 @@ fn spawn_verify_stake_background(
     });
 }
 
-#[cfg(all(feature = "dag", not(feature = "ghostdag-compat")))]
+#[cfg(feature = "dag")]
 async fn start_narwhal_node(
     mut cli: Cli,
     p2p_config: P2pConfig,
@@ -4038,11 +4038,9 @@ async fn start_narwhal_node(
                 // still held here, so the settle and the commit it follows
                 // are atomic relative to REST-side readers.
                 //
-                // Note: the ghostdag-compat epoch hook lives at
-                // `apply_sr21_election_at_epoch_boundary` (L6085-equivalent)
-                // but that code path does not carry a `UtxoExecutor`, so
                 // γ-5 settlement is wired here in `start_narwhal_node`
-                // instead. See γ-5 preflight notes for the routing detail.
+                // because `apply_sr21_election_at_epoch_boundary` does
+                // not carry a `UtxoExecutor`.
                 let new_height = tx_executor.height();
                 if new_height > 0 {
                     let epoch_len = misaka_types::constants::EPOCH_LENGTH;
@@ -4723,12 +4721,7 @@ async fn query_utxos_by_address(
 //  v2: DAG Node Startup (GhostDAG compat — being phased out)
 // ════════════════════════════════════════════════════════════════
 
-
-// 0.9.0 β-2: removed `#[cfg(feature = "ghostdag-compat")]` so
-// `start_narwhal_node` (the default `dag` path without ghostdag-compat) can
-// call this helper to locate the lifecycle snapshot file.
-//
-// γ-2.5: bumped to `pub(crate)` so the extracted
+// γ-2.5: `pub(crate)` so the extracted
 // `validator_lifecycle_bootstrap` module can share the same path convention.
 pub(crate) fn validator_lifecycle_snapshot_path(
     data_dir: &std::path::Path,
@@ -4736,9 +4729,6 @@ pub(crate) fn validator_lifecycle_snapshot_path(
 ) -> std::path::PathBuf {
     data_dir.join(format!("validator_lifecycle_chain_{chain_id}.json"))
 }
-
-
-
 
 /// DEPRECATED: Count-based quorum calculation. Use stake-weighted quorum instead.
 ///
@@ -4754,27 +4744,6 @@ pub(crate) fn validator_lifecycle_snapshot_path(
 ///
 /// Delegates to `Committee::quorum_threshold()` which uses the Sui-aligned
 /// formula: `N - floor((N-1)/3)` where N = total_stake.
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 // Dead-code cleanup Plan B.1 (2026-04-19): the 1,426-line
 // `start_dag_node` function was deleted here. It was a GhostDAG-era
@@ -5174,23 +5143,6 @@ mod tests {
             false,
         ));
     }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
     // ─── Permissionless SR: OBSERVER dynamic-validator expansion ─────
     //
