@@ -54,6 +54,9 @@ const CF_ADDR_INDEX: &str = NarwhalCf::AddrIndex.name();
 /// Phase 3a A.1: Certificate V2 vote commitments + optional
 /// aggregation proofs. See `columns::NarwhalCf::Votes` rustdoc.
 const CF_VOTES: &str = NarwhalCf::Votes.name();
+/// Phase 3a A.5: Certificate v1 ↔ v2 digest mapping. See
+/// `columns::NarwhalCf::CertMapping` rustdoc.
+const CF_CERT_MAPPING: &str = NarwhalCf::CertMapping.name();
 
 // ─── Meta keys ───────────────────────────────────────────────
 #[cfg(feature = "rocksdb")]
@@ -154,6 +157,14 @@ impl RocksDbConsensusStore {
             o.set_min_blob_size(1024);
             o
         };
+        // Phase 3a A.5: `cert_mapping` CF tuning. 32-byte key + 32-byte
+        // value per entry — compression off (poor ratio on hashes), no
+        // BlobDB (values never exceed the LSM threshold).
+        let cert_mapping_opts = {
+            let mut o = rocksdb::Options::default();
+            o.set_compression_type(rocksdb::DBCompressionType::None);
+            o
+        };
 
         let cfs = vec![
             rocksdb::ColumnFamilyDescriptor::new(CF_BLOCKS, block_opts),
@@ -165,6 +176,7 @@ impl RocksDbConsensusStore {
             rocksdb::ColumnFamilyDescriptor::new(CF_TX_INDEX, tx_index_opts),
             rocksdb::ColumnFamilyDescriptor::new(CF_ADDR_INDEX, addr_index_opts),
             rocksdb::ColumnFamilyDescriptor::new(CF_VOTES, votes_opts),
+            rocksdb::ColumnFamilyDescriptor::new(CF_CERT_MAPPING, cert_mapping_opts),
         ];
 
         let db = rocksdb::DB::open_cf_descriptors(&opts, path, cfs)
@@ -259,6 +271,15 @@ impl RocksDbConsensusStore {
         })
     }
 
+    fn cf_cert_mapping(&self) -> Result<&rocksdb::ColumnFamily, StoreError> {
+        self.db.cf_handle(CF_CERT_MAPPING).ok_or_else(|| {
+            StoreError::Corrupted(format!(
+                "column family '{}' missing — DB may be corrupted",
+                CF_CERT_MAPPING
+            ))
+        })
+    }
+
     // ─── TX index persistence ─────────────────────────────────
 
     /// Store a committed transaction detail (JSON bytes).
@@ -349,6 +370,58 @@ impl RocksDbConsensusStore {
             }
             Err(e) => Err(StoreError::Corrupted(format!(
                 "RocksDB get votes failed: {}",
+                e
+            ))),
+        }
+    }
+
+    // ─── Phase 3a A.5: Cert v1 ↔ v2 digest mapping ───────────────
+
+    /// Phase 3a A.5 — record that a v1 cert with digest `v1_digest`
+    /// corresponds to a v2 cert with digest `v2_digest`. Written
+    /// during cross-over epoch processing; consumers can resolve
+    /// v1-referenced certs to their v2 shape via
+    /// [`get_cert_mapping_v1_to_v2`](Self::get_cert_mapping_v1_to_v2).
+    ///
+    /// Idempotent: re-writing with the same digests is a no-op.
+    /// Overwriting with a different `v2_digest` is allowed but
+    /// callers SHOULD NOT do it — the mapping is intended to be
+    /// 1:1 within one cert's lifetime.
+    pub fn put_cert_mapping(
+        &self,
+        v1_digest: &[u8; 32],
+        v2_digest: &[u8; 32],
+    ) -> Result<(), StoreError> {
+        self.db
+            .put_cf(self.cf_cert_mapping()?, v1_digest, v2_digest)
+            .map_err(|e| StoreError::Corrupted(format!("RocksDB put cert_mapping failed: {}", e)))
+    }
+
+    /// Phase 3a A.5 — resolve a v1 cert digest to its v2 counterpart.
+    ///
+    /// Returns `Ok(None)` on miss (either no mapping written or the
+    /// cert pre-dates the cross-over). Returns
+    /// `Err(StoreError::Corrupted)` if a record exists but its
+    /// length is not 32 bytes (DB tampering).
+    pub fn get_cert_mapping_v1_to_v2(
+        &self,
+        v1_digest: &[u8; 32],
+    ) -> Result<Option<[u8; 32]>, StoreError> {
+        match self.db.get_cf(self.cf_cert_mapping()?, v1_digest) {
+            Ok(None) => Ok(None),
+            Ok(Some(bytes)) => {
+                if bytes.len() != 32 {
+                    return Err(StoreError::Corrupted(format!(
+                        "cert_mapping value length {} != 32",
+                        bytes.len()
+                    )));
+                }
+                let mut out = [0u8; 32];
+                out.copy_from_slice(&bytes);
+                Ok(Some(out))
+            }
+            Err(e) => Err(StoreError::Corrupted(format!(
+                "RocksDB get cert_mapping failed: {}",
                 e
             ))),
         }
@@ -802,5 +875,87 @@ mod tests {
             .expect("some");
         assert_eq!(got.0.scheme, CommitmentScheme::Blake3MerkleV1);
         assert_eq!(got.0.scheme.tag(), 0x01);
+    }
+
+    // ── A.5: cert mapping CF ─────────────────────────────────────
+
+    #[test]
+    fn a5_cert_mapping_cf_is_registered_on_open() {
+        let (_d, store) = open_tmp();
+        store.cf_cert_mapping().expect("cert_mapping CF accessible");
+    }
+
+    #[test]
+    fn a5_put_then_get_cert_mapping_roundtrips() {
+        let (_d, store) = open_tmp();
+        let v1 = [0xC0u8; 32];
+        let v2 = [0xC1u8; 32];
+        store.put_cert_mapping(&v1, &v2).expect("put");
+        let got = store
+            .get_cert_mapping_v1_to_v2(&v1)
+            .expect("get")
+            .expect("some");
+        assert_eq!(got, v2);
+    }
+
+    #[test]
+    fn a5_get_on_missing_v1_returns_none() {
+        let (_d, store) = open_tmp();
+        let got = store
+            .get_cert_mapping_v1_to_v2(&[0xFFu8; 32])
+            .expect("get returns Ok(None)");
+        assert!(got.is_none());
+    }
+
+    #[test]
+    fn a5_mapping_idempotent_on_rewrite() {
+        let (_d, store) = open_tmp();
+        let v1 = [0xC2u8; 32];
+        let v2 = [0xC3u8; 32];
+        store.put_cert_mapping(&v1, &v2).expect("put 1");
+        store.put_cert_mapping(&v1, &v2).expect("put 2 identical");
+        let got = store
+            .get_cert_mapping_v1_to_v2(&v1)
+            .expect("get")
+            .expect("some");
+        assert_eq!(got, v2);
+    }
+
+    #[test]
+    fn a5_mapping_overwrite_replaces() {
+        let (_d, store) = open_tmp();
+        let v1 = [0xC4u8; 32];
+        let v2_first = [0xC5u8; 32];
+        let v2_second = [0xC6u8; 32];
+        store.put_cert_mapping(&v1, &v2_first).expect("put 1");
+        store.put_cert_mapping(&v1, &v2_second).expect("put 2");
+        let got = store
+            .get_cert_mapping_v1_to_v2(&v1)
+            .expect("get")
+            .expect("some");
+        assert_eq!(got, v2_second);
+    }
+
+    #[test]
+    fn a5_mapping_independent_of_votes_cf() {
+        // Shared digest bytes across CFs must not collide — each CF
+        // has its own keyspace.
+        let (_d, store) = open_tmp();
+        let key = [0xC7u8; 32];
+        store
+            .put_cert_v2_votes(&key, &sample_vc(), &None)
+            .expect("put votes");
+        store
+            .put_cert_mapping(&key, &[0xC8u8; 32])
+            .expect("put mapping");
+        // Both reads return their respective values.
+        assert!(store.get_cert_v2_votes(&key).expect("get votes").is_some());
+        assert_eq!(
+            store
+                .get_cert_mapping_v1_to_v2(&key)
+                .expect("get mapping")
+                .expect("some"),
+            [0xC8u8; 32]
+        );
     }
 }

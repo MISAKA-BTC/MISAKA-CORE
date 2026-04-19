@@ -66,6 +66,26 @@ pub enum NarwhalCf {
     ///   serialised form exceeds this is written to a `*.blob` file
     ///   instead of the LSM, matching the v0.8.9 BlobDB rationale).
     Votes,
+    /// Phase 3a A.5: Certificate v1 ↔ v2 digest mapping.
+    ///
+    /// Key: v1 cert digest (32 bytes — `CheckpointDigest` of the
+    /// corresponding `FinalizedCheckpoint`'s embedded
+    /// `Checkpoint::digest`).
+    /// Value: v2 cert digest (32 bytes raw — the new
+    /// `CertificateV2::digest()` value).
+    ///
+    /// Purpose: during the cross-over epoch, finalized certs can be
+    /// referenced by either digest shape; this CF resolves v1 → v2.
+    /// After one epoch of live v2 operation the CF can be GC'd (or
+    /// kept for long-term historical lookup — cheap, one 32-byte
+    /// value per cert).
+    ///
+    /// Tuning:
+    /// * compression off (32-byte keys + 32-byte values compress
+    ///   poorly; ZSTD overhead dominates),
+    /// * no BlobDB (every value is exactly 32 bytes; always fits
+    ///   in the LSM).
+    CertMapping,
 }
 
 impl NarwhalCf {
@@ -81,6 +101,7 @@ impl NarwhalCf {
         Self::TxIndex,
         Self::AddrIndex,
         Self::Votes,
+        Self::CertMapping,
     ];
 
     /// The canonical RocksDB column-family name.
@@ -98,6 +119,7 @@ impl NarwhalCf {
             Self::TxIndex => "narwhal_tx_index",
             Self::AddrIndex => "narwhal_addr_index",
             Self::Votes => "narwhal_votes",
+            Self::CertMapping => "narwhal_cert_mapping",
         }
     }
 }
@@ -118,7 +140,7 @@ mod tests {
     fn all_is_exhaustive_and_unique() {
         // Update this when adding a CF; the assertion fails early
         // rather than surfacing as "column family missing" at DB open.
-        const EXPECTED_COUNT: usize = 9;
+        const EXPECTED_COUNT: usize = 10;
         assert_eq!(
             NarwhalCf::ALL.len(),
             EXPECTED_COUNT,
@@ -155,6 +177,7 @@ mod tests {
         assert_eq!(NarwhalCf::TxIndex.name(), "narwhal_tx_index");
         assert_eq!(NarwhalCf::AddrIndex.name(), "narwhal_addr_index");
         assert_eq!(NarwhalCf::Votes.name(), "narwhal_votes");
+        assert_eq!(NarwhalCf::CertMapping.name(), "narwhal_cert_mapping");
     }
 
     /// Every variant's name starts with the `narwhal_` prefix — this
