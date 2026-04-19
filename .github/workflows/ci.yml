@@ -37,13 +37,16 @@ jobs:
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
-    # Override the workflow-level `env.RUSTFLAGS: -D warnings …` for the
-    # Clippy job. `-D warnings` makes sense for Check / Test (compile
-    # errors only) but Clippy under Rust 1.95+ picks up ~30 new
-    # deny-by-default lints (needless_borrows_for_generic_args,
-    # field_reassign_with_default, expect_used, etc.) that are
-    # cosmetic, not correctness. Workspace-level `[workspace.lints.clippy]`
-    # remains the authoritative policy.
+    # Override the workflow-level `RUSTFLAGS: -D warnings …` for the
+    # Clippy job specifically. The workflow-wide `-D warnings` is
+    # appropriate for Check / Test (compile errors only) but overwhelms
+    # Clippy with every new deny-by-default lint Rust 1.95+ ships
+    # (needless_borrows_for_generic_args, field_reassign_with_default,
+    # unnecessary_map_or, needless_range_loop, expect_used, etc.). The
+    # workspace-level `[workspace.lints.clippy]` in Cargo.toml is the
+    # authoritative policy for clippy severity; cargo clippy's
+    # non-`-D warnings` invocation respects it and reports, but does
+    # not block, stylistic nits.
     env:
       RUSTFLAGS: "-A unused_imports -A unused_variables -A dead_code -A unused_must_use -A unused_mut"
     steps:
