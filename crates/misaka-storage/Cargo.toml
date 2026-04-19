@@ -9,9 +9,12 @@ misaka-types = { path = "../misaka-types" }
 misaka-crypto = { path = "../misaka-crypto" }
 misaka-muhash = { path = "../misaka-muhash" }
 # v1.0 hard fork: SMT (Sparse Merkle Tree) parallel-runs alongside
-# MuHash during the migration window. See
-# `docs/design/v100_smt_migration.md`.
-misaka-smt = { path = "../misaka-smt" }
+# MuHash during the migration window. Step 7 (2026-04-19)
+# activates the `v1-hardfork` feature explicitly at this
+# dependency edge so the intent is visible at every workspace
+# consumer, not just via the crate-level `default`. See
+# `docs/design/v100_smt_migration.md` §9.
+misaka-smt = { path = "../misaka-smt", features = ["v1-hardfork"] }
 borsh = { workspace = true }
 sha3 = { workspace = true }
 serde = { workspace = true }

@@ -17,8 +17,20 @@ hex = { workspace = true }
 criterion = "0.5"
 
 [features]
-default = []
-# v1.0 で activate される feature。v0.8 では未使用。
+# v1.0 hard-fork semantic activation: the SparseMerkleTree is now
+# the canonical v1.0 state commitment. Default-enabled because
+# the `feature/v100-smt-migration` branch (Steps 1-6) has shipped
+# the parallel-phase wiring; consumers of `misaka-smt` that want
+# to stay on the v0.x "spec-frozen, library-only" posture should
+# explicitly `default-features = false`.
+#
+# The feature itself gates no internal behaviour inside this
+# crate — its activation is purely an intent signal that the
+# `SparseMerkleTree` is now being consumed by `misaka-storage`,
+# `misaka-node`, and the audit integration crates.
+#
+# See `docs/design/v100_smt_migration.md` — Step 7.
+default = ["v1-hardfork"]
 v1-hardfork = []
 
 [[bench]]
