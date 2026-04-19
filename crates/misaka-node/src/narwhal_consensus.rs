@@ -363,9 +363,23 @@ pub struct ProposeLoopConfig {
     // `misaka_round_interval_ms`, `misaka_mempool_utilisation_scaled`,
     // and the `round_wake_{timer,mempool}_total` counters — the
     // proposer populates these only when adaptive is enabled.
-    /// Adaptive round-rate scheduler config. `None` → legacy
-    /// fixed-cadence behaviour.
-    pub scheduler: Option<misaka_dag::narwhal_dag::round_scheduler::RoundSchedulerConfig>,
+    /// Adaptive round-rate scheduler config, shared so a future
+    /// epoch-boundary handler (Phase 3a.5 Step 4) can swap the
+    /// contents in place without restarting the proposer. `None`
+    /// → legacy fixed-cadence behaviour.
+    ///
+    /// Phase 3a.5 Step 2 (2026-04-19) changed this from a
+    /// by-value `Option<RoundSchedulerConfig>` to
+    /// `Option<Arc<RwLock<RoundSchedulerConfig>>>`. The propose
+    /// loop now takes a `.read().await` snapshot each iteration;
+    /// the snapshot is used for that iteration's sleep selection.
+    /// The read is uncontended in steady state (only an epoch
+    /// handler writes, which happens at most once per epoch).
+    pub scheduler: Option<
+        std::sync::Arc<
+            tokio::sync::RwLock<misaka_dag::narwhal_dag::round_scheduler::RoundSchedulerConfig>,
+        >,
+    >,
     /// Shared mempool reference used to sample utilisation each
     /// iteration. `None` → legacy behaviour.
     pub mempool: Option<std::sync::Arc<tokio::sync::Mutex<misaka_mempool::UtxoMempool>>>,
@@ -422,8 +436,15 @@ pub fn spawn_propose_loop(
         // scheduler config and a mempool reference are configured.
         // Either `None` → legacy fixed-cadence fallback via
         // `status_tick`.
+        //
+        // Phase 3a.5 Step 2: `adaptive` now holds a clone of the
+        // shared `Arc<RwLock<RoundSchedulerConfig>>` so future
+        // epoch-transition handlers can swap its contents without
+        // restarting the propose loop. The loop takes a
+        // `.read().await` snapshot per iteration.
         let adaptive = config
             .scheduler
+            .clone()
             .and_then(|s| config.mempool.clone().map(|m| (s, m)));
 
         tracing::info!(
@@ -438,7 +459,7 @@ pub fn spawn_propose_loop(
             // re-derived every iteration from current mempool
             // utilisation; in legacy mode it's the fixed
             // `status_poll_ms` that the old `status_tick` used.
-            let next_sleep = if let Some((sched, mempool)) = adaptive.as_ref() {
+            let next_sleep = if let Some((sched_rw, mempool)) = adaptive.as_ref() {
                 let (depth, max) = {
                     let m = mempool.lock().await;
                     (m.len(), m.max_size())
@@ -448,9 +469,14 @@ pub fn spawn_propose_loop(
                 } else {
                     (depth as f64 / max as f64).clamp(0.0, 1.0)
                 };
+                // Step 2: read the latest shared scheduler config.
+                // The lock is held only long enough to copy the
+                // 16-byte struct, so contention with a future epoch
+                // writer is negligible in steady state.
+                let sched_snapshot = *sched_rw.read().await;
                 let interval_ms = misaka_dag::narwhal_dag::round_scheduler::next_round_interval_ms(
                     utilisation,
-                    sched,
+                    &sched_snapshot,
                 );
                 if let Some(metrics) = config.metrics.as_ref() {
                     metrics.round_interval_ms.set(interval_ms);

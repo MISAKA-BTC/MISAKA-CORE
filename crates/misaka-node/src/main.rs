@@ -2086,6 +2086,19 @@ async fn start_narwhal_node(
     // Currently published only through the struct (no `/metrics`
     // axum route yet); exposing it is a separate follow-up.
     let node_metrics = crate::metrics::NodeMetrics::new();
+
+    // Phase 3a.5 Step 2 — the scheduler config is now shared so a
+    // future epoch-boundary handler (Step 4) can swap it in place
+    // without restarting the propose loop. Initialised with the
+    // same default as before.
+    let shared_scheduler_config: std::sync::Arc<
+        tokio::sync::RwLock<misaka_dag::narwhal_dag::round_scheduler::RoundSchedulerConfig>,
+    > = std::sync::Arc::new(tokio::sync::RwLock::new(
+        misaka_dag::narwhal_dag::round_scheduler::RoundSchedulerConfig::default(),
+    ));
+    // Retain a clone for the future epoch-transition handler; for
+    // now it only feeds the propose loop.
+    let _shared_scheduler_config_for_epoch = shared_scheduler_config.clone();
     let propose_loop_handle = if is_observer {
         info!("Observer mode: skipping propose loop (read-only node)");
         None
@@ -2096,9 +2109,7 @@ async fn start_narwhal_node(
             crate::narwhal_consensus::ProposeLoopConfig {
                 max_block_txs: cli.dag_max_txs,
                 backpressure: backpressure.clone(),
-                scheduler: Some(
-                    misaka_dag::narwhal_dag::round_scheduler::RoundSchedulerConfig::default(),
-                ),
+                scheduler: Some(shared_scheduler_config.clone()),
                 mempool: Some(narwhal_mempool.mempool.clone()),
                 metrics: Some(node_metrics.clone()),
                 ..crate::narwhal_consensus::ProposeLoopConfig::default()
