@@ -50,6 +50,16 @@ pub enum StorageCf {
     BlockMeta,
     /// Singleton state entries (chain tip height, state root).
     State,
+    /// Phase P1 (v0.9.2): persistent peer store. Key: `peer_id(32)`
+    /// where `peer_id = hash(transport_public_key)`. Value:
+    /// bincode-encoded `PeerStoreRecord` (addrs, trust_score,
+    /// first_seen/last_seen, dial stats, ban state, source).
+    ///
+    /// Bounded growth: `max_peerstore_entries` config cap +
+    /// TTL-based eviction of inactive entries. Writes are off the
+    /// hot path via a background `PeerstoreUpdater` mpsc channel.
+    /// See `docs/design/phase_p1_peerstore.md`.
+    Peerstore,
 }
 
 impl StorageCf {
@@ -61,6 +71,7 @@ impl StorageCf {
         Self::SpendingKeys,
         Self::BlockMeta,
         Self::State,
+        Self::Peerstore,
     ];
 
     /// The canonical RocksDB column-family name.
@@ -74,6 +85,7 @@ impl StorageCf {
             Self::SpendingKeys => "spending_keys",
             Self::BlockMeta => "block_meta",
             Self::State => "state",
+            Self::Peerstore => "peerstore",
         }
     }
 }
@@ -96,7 +108,7 @@ mod tests {
         // Expected count = every variant currently defined. Update the
         // constant when adding a CF; the mismatch panics here instead of
         // surfacing as a silent RocksDB "missing column family" at open.
-        const EXPECTED_COUNT: usize = 5;
+        const EXPECTED_COUNT: usize = 6;
         assert_eq!(
             StorageCf::ALL.len(),
             EXPECTED_COUNT,
@@ -123,6 +135,8 @@ mod tests {
         assert_eq!(StorageCf::SpendingKeys.name(), "spending_keys");
         assert_eq!(StorageCf::BlockMeta.name(), "block_meta");
         assert_eq!(StorageCf::State.name(), "state");
+        // Phase P1 (v0.9.2) addition:
+        assert_eq!(StorageCf::Peerstore.name(), "peerstore");
     }
 
     #[test]

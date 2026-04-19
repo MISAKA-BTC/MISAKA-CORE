@@ -34,6 +34,10 @@ pub mod columns;
 pub mod dag_recovery;
 pub mod flat_merkle;
 pub mod object_store;
+/// Phase P1 (v0.9.2): persistent peer store types + event policy.
+/// RocksDB wiring lives under `StorageCf::Peerstore`; this module
+/// defines the schema + the pure-logic event → record mutations.
+pub mod peerstore;
 pub mod quarantine_store;
 pub mod recovery;
 pub mod utxo_set;
