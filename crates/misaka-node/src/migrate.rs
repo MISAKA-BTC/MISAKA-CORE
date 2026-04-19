@@ -268,9 +268,10 @@ fn stamp_marker(db_path: &Path, to: u32) -> Result<()> {
     // the per-version "schema delta" list — add an arm here when
     // `STORAGE_SCHEMA_VERSION_Vxxx` is introduced.
     if to >= STORAGE_SCHEMA_VERSION_V091 {
-        // Phase 3a A.1 + A.5 — Cert V2 CFs.
+        // Phase 3a A.1 + A.5 + Part C — Cert V2 CFs + audit log.
         all.insert("narwhal_votes".to_string());
         all.insert("narwhal_cert_mapping".to_string());
+        all.insert("narwhal_round_config_audit".to_string());
     }
 
     let descriptors: Vec<rocksdb::ColumnFamilyDescriptor> = all
@@ -519,7 +520,7 @@ mod tests {
         let v = read_marker(&db_path).expect("read marker").expect("some");
         assert_eq!(v, STORAGE_SCHEMA_VERSION_V091);
 
-        // And the two new CFs exist.
+        // And the three new CFs exist.
         let cfs = rocksdb::DB::list_cf(&Options::default(), &db_path).expect("list CFs");
         assert!(
             cfs.iter().any(|n| n == "narwhal_votes"),
@@ -528,6 +529,10 @@ mod tests {
         assert!(
             cfs.iter().any(|n| n == "narwhal_cert_mapping"),
             "narwhal_cert_mapping CF was not created: {cfs:?}"
+        );
+        assert!(
+            cfs.iter().any(|n| n == "narwhal_round_config_audit"),
+            "narwhal_round_config_audit CF was not created: {cfs:?}"
         );
         // And the legacy v2 CFs are preserved.
         assert!(cfs.iter().any(|n| n == "narwhal_blocks"));

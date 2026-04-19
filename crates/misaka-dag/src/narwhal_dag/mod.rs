@@ -44,6 +44,10 @@ pub mod round_prober;
 // Phase 3a Part B (2026-04-19): adaptive round-rate scheduler. See
 // `docs/design/v091_phase3a_cert_v2.md` §5.3.
 pub mod round_scheduler;
+// Phase 3a Part C (2026-04-19): epoch-boundary deterministic
+// adjustment of the round_scheduler config. See
+// `docs/design/v091_phase3a_cert_v2.md` §5.8.
+pub mod round_config_adjust;
 pub mod round_tracker;
 pub mod runtime;
 pub mod slo_metrics;

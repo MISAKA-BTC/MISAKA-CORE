@@ -57,6 +57,9 @@ const CF_VOTES: &str = NarwhalCf::Votes.name();
 /// Phase 3a A.5: Certificate v1 ↔ v2 digest mapping. See
 /// `columns::NarwhalCf::CertMapping` rustdoc.
 const CF_CERT_MAPPING: &str = NarwhalCf::CertMapping.name();
+/// Phase 3a Part C: epoch-boundary round-config audit log. See
+/// `columns::NarwhalCf::RoundConfigAudit` rustdoc.
+const CF_ROUND_CONFIG_AUDIT: &str = NarwhalCf::RoundConfigAudit.name();
 
 // ─── Meta keys ───────────────────────────────────────────────
 #[cfg(feature = "rocksdb")]
@@ -165,6 +168,14 @@ impl RocksDbConsensusStore {
             o.set_compression_type(rocksdb::DBCompressionType::None);
             o
         };
+        // Phase 3a Part C: `round_config_audit` CF tuning. Small
+        // JSON payloads (~200 bytes) with repeated field names —
+        // Snappy compresses well and is cheap.
+        let round_config_audit_opts = {
+            let mut o = rocksdb::Options::default();
+            o.set_compression_type(rocksdb::DBCompressionType::Snappy);
+            o
+        };
 
         let cfs = vec![
             rocksdb::ColumnFamilyDescriptor::new(CF_BLOCKS, block_opts),
@@ -177,6 +188,7 @@ impl RocksDbConsensusStore {
             rocksdb::ColumnFamilyDescriptor::new(CF_ADDR_INDEX, addr_index_opts),
             rocksdb::ColumnFamilyDescriptor::new(CF_VOTES, votes_opts),
             rocksdb::ColumnFamilyDescriptor::new(CF_CERT_MAPPING, cert_mapping_opts),
+            rocksdb::ColumnFamilyDescriptor::new(CF_ROUND_CONFIG_AUDIT, round_config_audit_opts),
         ];
 
         let db = rocksdb::DB::open_cf_descriptors(&opts, path, cfs)
@@ -276,6 +288,15 @@ impl RocksDbConsensusStore {
             StoreError::Corrupted(format!(
                 "column family '{}' missing — DB may be corrupted",
                 CF_CERT_MAPPING
+            ))
+        })
+    }
+
+    fn cf_round_config_audit(&self) -> Result<&rocksdb::ColumnFamily, StoreError> {
+        self.db.cf_handle(CF_ROUND_CONFIG_AUDIT).ok_or_else(|| {
+            StoreError::Corrupted(format!(
+                "column family '{}' missing — DB may be corrupted",
+                CF_ROUND_CONFIG_AUDIT
             ))
         })
     }
@@ -425,6 +446,76 @@ impl RocksDbConsensusStore {
                 e
             ))),
         }
+    }
+
+    // ─── Phase 3a Part C: round-config audit log ─────────────────
+
+    /// Phase 3a Part C — append an audit entry for an
+    /// epoch-boundary `RoundSchedulerConfig` adjustment.
+    ///
+    /// Key: `entry.applied_from_epoch` as u64 big-endian so the
+    /// natural RocksDB iterator order matches chronological order.
+    /// Value: serde-JSON of the entry (~200 bytes, Snappy-compressed
+    /// at the CF level).
+    ///
+    /// Idempotent on identical re-writes. Overwrite-with-different
+    /// is accepted (caller SHOULD NOT do it — the epoch boundary
+    /// is a one-shot adjustment).
+    pub fn put_round_config_audit(
+        &self,
+        entry: &crate::narwhal_dag::round_config_adjust::RoundConfigAuditEntry,
+    ) -> Result<(), StoreError> {
+        let key = entry.applied_from_epoch.to_be_bytes();
+        let bytes = serde_json::to_vec(entry)?;
+        self.db
+            .put_cf(self.cf_round_config_audit()?, key, bytes)
+            .map_err(|e| {
+                StoreError::Corrupted(format!("RocksDB put round_config_audit failed: {}", e))
+            })
+    }
+
+    /// Phase 3a Part C — read back the audit entry for a specific
+    /// epoch. Returns `Ok(None)` when no entry is recorded for
+    /// that epoch; propagates serde errors; wraps RocksDB failures
+    /// as `StoreError::Corrupted`.
+    pub fn get_round_config_audit(
+        &self,
+        applied_from_epoch: u64,
+    ) -> Result<Option<crate::narwhal_dag::round_config_adjust::RoundConfigAuditEntry>, StoreError>
+    {
+        let key = applied_from_epoch.to_be_bytes();
+        match self.db.get_cf(self.cf_round_config_audit()?, key) {
+            Ok(None) => Ok(None),
+            Ok(Some(bytes)) => {
+                let entry = serde_json::from_slice(&bytes)?;
+                Ok(Some(entry))
+            }
+            Err(e) => Err(StoreError::Corrupted(format!(
+                "RocksDB get round_config_audit failed: {}",
+                e
+            ))),
+        }
+    }
+
+    /// Phase 3a Part C — list every audit entry in epoch order.
+    /// Intended for ops / dashboard use; for a running node the
+    /// per-epoch `get_round_config_audit` is enough. Iteration is
+    /// cheap because the CF is append-once-per-epoch.
+    pub fn list_round_config_audit(
+        &self,
+    ) -> Result<Vec<crate::narwhal_dag::round_config_adjust::RoundConfigAuditEntry>, StoreError>
+    {
+        let cf = self.cf_round_config_audit()?;
+        let mut out = Vec::new();
+        for item in self.db.iterator_cf(cf, rocksdb::IteratorMode::Start) {
+            let (_k, v) = item.map_err(|e| {
+                StoreError::Corrupted(format!("round_config_audit iter failed: {}", e))
+            })?;
+            let entry: crate::narwhal_dag::round_config_adjust::RoundConfigAuditEntry =
+                serde_json::from_slice(&v)?;
+            out.push(entry);
+        }
+        Ok(out)
     }
 
     /// Store an address index entry. Key format: `{address_hex}:{height_be8}:{tx_hash_hex}`.
@@ -957,5 +1048,90 @@ mod tests {
                 .expect("some"),
             [0xC8u8; 32]
         );
+    }
+
+    // ── Part C: round-config audit log ───────────────────────────
+
+    fn sample_audit(epoch: u64) -> crate::narwhal_dag::round_config_adjust::RoundConfigAuditEntry {
+        use crate::narwhal_dag::round_config_adjust::{EpochStats, RoundConfigAuditEntry};
+        use crate::narwhal_dag::round_scheduler::RoundSchedulerConfig;
+        RoundConfigAuditEntry {
+            applied_from_epoch: epoch,
+            previous_config: RoundSchedulerConfig {
+                min_interval_ms: 100,
+                max_interval_ms: 2000,
+            },
+            new_config: RoundSchedulerConfig {
+                min_interval_ms: 150,
+                max_interval_ms: 1800,
+            },
+            stats: EpochStats {
+                epoch: epoch.saturating_sub(1),
+                max_observed_rtt_ms: 75,
+                total_rounds: 8640,
+                non_empty_rounds: 4320,
+                leader_timeout_ms: 1000,
+            },
+            timestamp_ms: 1_700_000_000_000 + epoch,
+        }
+    }
+
+    #[test]
+    fn partc_audit_cf_is_registered_on_open() {
+        let (_d, store) = open_tmp();
+        store
+            .cf_round_config_audit()
+            .expect("round_config_audit CF accessible");
+    }
+
+    #[test]
+    fn partc_put_then_get_audit_roundtrips() {
+        let (_d, store) = open_tmp();
+        let entry = sample_audit(7);
+        store.put_round_config_audit(&entry).expect("put");
+        let got = store.get_round_config_audit(7).expect("get").expect("some");
+        assert_eq!(got, entry);
+    }
+
+    #[test]
+    fn partc_get_on_missing_epoch_returns_none() {
+        let (_d, store) = open_tmp();
+        let got = store
+            .get_round_config_audit(999)
+            .expect("get returns Ok(None)");
+        assert!(got.is_none());
+    }
+
+    #[test]
+    fn partc_list_preserves_epoch_order() {
+        // Insert out of order; list() must return ascending epoch.
+        // Big-endian u64 keys guarantee natural byte order matches
+        // chronological order.
+        let (_d, store) = open_tmp();
+        store
+            .put_round_config_audit(&sample_audit(10))
+            .expect("put 10");
+        store
+            .put_round_config_audit(&sample_audit(3))
+            .expect("put 3");
+        store
+            .put_round_config_audit(&sample_audit(7))
+            .expect("put 7");
+        let all = store.list_round_config_audit().expect("list");
+        let epochs: Vec<u64> = all.iter().map(|e| e.applied_from_epoch).collect();
+        assert_eq!(epochs, vec![3, 7, 10]);
+    }
+
+    #[test]
+    fn partc_idempotent_rewrite_of_same_entry() {
+        let (_d, store) = open_tmp();
+        let entry = sample_audit(5);
+        store.put_round_config_audit(&entry).expect("put 1");
+        store
+            .put_round_config_audit(&entry)
+            .expect("put 2 identical");
+        let all = store.list_round_config_audit().expect("list");
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0], entry);
     }
 }

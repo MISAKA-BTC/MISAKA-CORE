@@ -41,6 +41,8 @@
 
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
+
 /// Hard floor for the per-round interval. Callers SHOULD NOT
 /// configure a value below this; [`RoundSchedulerConfig::validate`]
 /// rejects it.
@@ -61,7 +63,7 @@ pub const DEFAULT_MIN_INTERVAL_MS: u64 = 100;
 pub const DEFAULT_MAX_INTERVAL_MS: u64 = 2_000;
 
 /// Runtime config for the adaptive round scheduler.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoundSchedulerConfig {
     /// Lower bound of the adaptive range (utilisation = 1.0 picks this).
     pub min_interval_ms: u64,

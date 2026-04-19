@@ -335,6 +335,116 @@ hard-coded number, so they automatically retarget to v3).
 Regression: misaka-storage 109/109, misaka-node 196/196, misaka-dag
 496/496. `cargo check --workspace --lib --bins` clean.
 
+### 5.8 Part C — epoch-boundary config adjustment + audit log (this commit, 2026-04-19)
+
+Ships the deterministic derivation of the next-epoch
+`RoundSchedulerConfig` from the previous epoch's stats, plus a
+persistent audit log keyed by epoch.
+
+#### `crates/misaka-dag/src/narwhal_dag/round_config_adjust.rs` (new)
+
+Pure logic module. No I/O, integer math only, `serde_json` only
+for the persisted `RoundConfigAuditEntry`.
+
+- Constants: `MAX_EPOCH_SHIFT_MS = 500`, `RTT_SAFETY_FACTOR = 2`.
+- `EpochStats { epoch, max_observed_rtt_ms, total_rounds,
+  non_empty_rounds, leader_timeout_ms }`.
+  * `non_empty_ratio_scaled() -> u64` returns `0..=1000`
+    fixed-point so the derivation stays off floating-point.
+    `total == 0` → 0. Saturating multiplication on the
+    numerator guards against `u64` overflow (not panic; precision
+    degrades at extreme scale but real epochs stay ≪ 10^16
+    rounds).
+- `RoundConfigAuditEntry { applied_from_epoch, previous_config,
+  new_config, stats, timestamp_ms }` with `serde`.
+- `adjust_round_config(&EpochStats, &RoundSchedulerConfig)
+  -> RoundSchedulerConfig`:
+  1. `new_min = max(prev.min, rtt * 2)` — the RTT safety floor.
+  2. `new_max = HARD_MAX - (HARD_MAX - new_min * 2) * ratio /
+     1000` — busy epochs pull `max` toward `min * 2`, idle
+     epochs push toward `HARD_MAX`. u128 intermediate to avoid
+     multiplication overflow.
+  3. Both endpoints drift-bounded by `MAX_EPOCH_SHIFT_MS` from
+     the previous values to damp oscillation.
+  4. Final clamp into `[HARD_MIN, HARD_MAX]` + spread guard if
+     `min >= max` after drift bounding.
+  5. Output always satisfies
+     `RoundSchedulerConfig::validate`.
+
+`RoundSchedulerConfig` gains `Serialize + Deserialize` derives
+for use inside `RoundConfigAuditEntry`.
+
+#### `NarwhalCf::RoundConfigAudit = "narwhal_round_config_audit"` (11th variant)
+
+- Key: `applied_from_epoch: u64` in big-endian so RocksDB
+  natural iteration order == chronological order.
+- Value: serde-JSON of `RoundConfigAuditEntry` (~200 bytes).
+- Tuning: Snappy compression (repeated JSON field names compress
+  well), no BlobDB.
+
+#### `RocksDbConsensusStore` — 3 new methods
+
+- `put_round_config_audit(&entry)` — key = BE u64 epoch.
+- `get_round_config_audit(epoch) -> Result<Option<Entry>>`.
+- `list_round_config_audit() -> Result<Vec<Entry>>` — full scan
+  in epoch order. Intended for ops / dashboards; the per-epoch
+  getter is enough for a running node.
+
+#### `misaka-node::migrate` V091 delta
+
+`stamp_marker`'s V091 CF-delta list extended to include
+`narwhal_round_config_audit`. Also the `e2e_v2_to_v3_creates_new_cfs`
+test now asserts all three new CFs (votes + cert_mapping +
+round_config_audit).
+
+#### Tests
+
+18 new tests in `round_config_adjust::tests` covering:
+
+- `non_empty_ratio_scaled` edge cases (empty epoch, all-non-empty,
+  half-non-empty, large-count no-panic, realistic 10_000-round
+  sanity).
+- `bound_drift` within, exceeding, and saturating cases.
+- `adjust_round_config` determinism, output always validates,
+  RTT flooring, zero-RTT no-op on min, busy tightens max, idle
+  widens max, monotonicity across 6 ratio samples, extreme-RTT
+  handling, collision between drift-bounded min and max.
+- `RoundConfigAuditEntry` serde roundtrip.
+
+5 new rocksdb_store tests:
+
+- `partc_audit_cf_is_registered_on_open`
+- `partc_put_then_get_audit_roundtrips`
+- `partc_get_on_missing_epoch_returns_none`
+- `partc_list_preserves_epoch_order` — inserts out-of-order
+  (10, 3, 7) then asserts list returns ascending [3, 7, 10]
+  (BE key order guarantees this).
+- `partc_idempotent_rewrite_of_same_entry`
+
+Plus 3 assertions added to `columns::tests`:
+`EXPECTED_COUNT = 11`, new `RoundConfigAudit` name assertion.
+
+Plus 1 assertion to the migrate v2→v3 e2e test (third CF check).
+
+Regression: `cargo test -p misaka-dag --lib` 519/519
+(496 prior + 18 + 5). `cargo test -p misaka-storage --lib`
+109/109 unchanged. `cargo test -p misaka-node --bin misaka-node`
+196/196 unchanged.
+
+#### Not in this commit
+
+- Integration into the epoch-boundary event. Needs a callsite
+  that has:
+  1. Previous-epoch's `EpochStats` (collected from the round
+     loop).
+  2. Previous-epoch's `RoundSchedulerConfig`.
+  3. A handle to write `put_round_config_audit` + a way to hand
+     the new config to the next epoch's propose-loop spawn.
+  Deferred until the narwhal epoch transition path grows a hook
+  for this — separate integration commit.
+- Prometheus export of the `new_config` / `stats` — trivial to
+  add once integration lands.
+
 ## 6. Out of scope for this session
 
 Deferred to follow-up commits:

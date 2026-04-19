@@ -86,6 +86,28 @@ pub enum NarwhalCf {
     /// * no BlobDB (every value is exactly 32 bytes; always fits
     ///   in the LSM).
     CertMapping,
+    /// Phase 3a Part C: on-chain audit log for epoch-boundary
+    /// `RoundSchedulerConfig` adjustments.
+    ///
+    /// Key: `applied_from_epoch` (u64 big-endian, 8 bytes) — the
+    /// epoch number the recorded config becomes active at. BE so
+    /// the natural RocksDB byte-order iterator matches
+    /// chronological order.
+    /// Value: serde-JSON of `RoundConfigAuditEntry` containing the
+    /// previous config, the new config, the stats that drove the
+    /// derivation, and a timestamp.
+    ///
+    /// Operators / light clients can iterate this CF to reconstruct
+    /// the full history of cadence adjustments without needing any
+    /// off-chain log. The CF is append-only in practice — writes
+    /// happen once per epoch boundary.
+    ///
+    /// Tuning:
+    /// * Snappy compression (audit entries are ~200 bytes of JSON
+    ///   with repeated field names; Snappy compresses well and is
+    ///   cheap),
+    /// * no BlobDB (values stay well below 1 KiB).
+    RoundConfigAudit,
 }
 
 impl NarwhalCf {
@@ -102,6 +124,7 @@ impl NarwhalCf {
         Self::AddrIndex,
         Self::Votes,
         Self::CertMapping,
+        Self::RoundConfigAudit,
     ];
 
     /// The canonical RocksDB column-family name.
@@ -120,6 +143,7 @@ impl NarwhalCf {
             Self::AddrIndex => "narwhal_addr_index",
             Self::Votes => "narwhal_votes",
             Self::CertMapping => "narwhal_cert_mapping",
+            Self::RoundConfigAudit => "narwhal_round_config_audit",
         }
     }
 }
@@ -140,7 +164,7 @@ mod tests {
     fn all_is_exhaustive_and_unique() {
         // Update this when adding a CF; the assertion fails early
         // rather than surfacing as "column family missing" at DB open.
-        const EXPECTED_COUNT: usize = 10;
+        const EXPECTED_COUNT: usize = 11;
         assert_eq!(
             NarwhalCf::ALL.len(),
             EXPECTED_COUNT,
@@ -178,6 +202,10 @@ mod tests {
         assert_eq!(NarwhalCf::AddrIndex.name(), "narwhal_addr_index");
         assert_eq!(NarwhalCf::Votes.name(), "narwhal_votes");
         assert_eq!(NarwhalCf::CertMapping.name(), "narwhal_cert_mapping");
+        assert_eq!(
+            NarwhalCf::RoundConfigAudit.name(),
+            "narwhal_round_config_audit"
+        );
     }
 
     /// Every variant's name starts with the `narwhal_` prefix — this
