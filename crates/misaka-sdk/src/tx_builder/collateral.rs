@@ -15,9 +15,8 @@ pub fn auto_select_collateral(
     change_address: [u8; 32],
 ) -> Result<(Vec<CollateralInput>, Option<CollateralReturn>), SdkError> {
     let params = budget_v1();
-    let required: u64 = ((fee as u128)
-        .saturating_mul(params.collateral_percentage as u128)
-        / 10_000) as u64;
+    let required: u64 =
+        ((fee as u128).saturating_mul(params.collateral_percentage as u128) / 10_000) as u64;
 
     // Greedy: sort by amount descending
     let mut sorted: Vec<(OutputRef, u64)> = available.to_vec();

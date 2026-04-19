@@ -41,6 +41,36 @@ pub trait ConsensusStore: Send + Sync {
 
     /// Delete blocks below a given round (GC).
     fn gc_below_round(&self, round: Round) -> Result<u64, StoreError>;
+
+    // ─── BLOCKER G: point-get + operator metrics ────────────────────
+    //
+    // Default implementations fall back to `read_all_blocks()` / scan,
+    // so existing impls (JsonFileStore, in-tree tests) keep working
+    // without modification. `RocksDbConsensusStore` overrides them
+    // with efficient CF-direct accessors.
+
+    /// Point-get a single block by digest. Returns `Ok(None)` if the
+    /// digest is not present. Default impl scans; production backends
+    /// should override for O(log n) RocksDB `get_cf`.
+    fn get_block(&self, digest: &BlockDigest) -> Result<Option<Block>, StoreError> {
+        let all = self.read_all_blocks()?;
+        Ok(all
+            .into_iter()
+            .find(|(_, b)| &b.digest() == digest)
+            .map(|(_, b)| b))
+    }
+
+    /// Number of blocks in the store. Exposed for operator metrics
+    /// and the `/api/status` endpoint. Default impl uses `read_all_blocks`;
+    /// production backends may override.
+    fn block_count(&self) -> Result<u64, StoreError> {
+        Ok(self.read_all_blocks()?.len() as u64)
+    }
+
+    /// Number of committed sub-dags. Same rationale as `block_count`.
+    fn commit_count(&self) -> Result<u64, StoreError> {
+        Ok(self.read_all_commits()?.len() as u64)
+    }
 }
 
 /// Store error.
@@ -52,6 +82,11 @@ pub enum StoreError {
     Serde(#[from] serde_json::Error),
     #[error("Store corrupted: {0}")]
     Corrupted(String),
+    /// BLOCKER G: the on-disk schema version is incompatible with the
+    /// binary's expected version. The node MUST refuse to open such a
+    /// DB rather than silently mix formats and corrupt state.
+    #[error("store schema version mismatch: on-disk={got} expected={expected}")]
+    SchemaVersionMismatch { got: u32, expected: u32 },
 }
 
 // ═══════════════════════════════════════════════════════════

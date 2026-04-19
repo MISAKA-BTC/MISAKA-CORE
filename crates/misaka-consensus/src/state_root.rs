@@ -11,9 +11,9 @@
 //! At each finality checkpoint, we compute:
 //!
 //! ```text
-//! state_root = H("MISAKA:state_root:v2:"
+//! state_root = H("MISAKA:state_root:v4:"
 //!     || epoch_number
-//!     || utxo_root        ← Merkle root of all unspent outputs
+//!     || utxo_root        ← MuHash3072 finalize of all unspent outputs
 //!     || spent_root   ← Merkle root of spent tags
 //!     || total_utxos
 //!     || total_spent
@@ -44,11 +44,11 @@ use sha3::{Digest, Sha3_256};
 /// Hash type alias.
 pub type Hash = [u8; 32];
 
-/// SEC-FIX: Unified to v3 domain separator to match utxo_set.rs::compute_state_root().
-/// Previously used v2, which produced different values from the production MuHash path.
-/// Checkpoint attestations using StateRoot::compute() MUST pass the MuHash finalize
-/// output as `utxo_root` to ensure consistency with DAG block state_root headers.
-const STATE_ROOT_DST: &[u8] = b"MISAKA:state_root:v3:";
+/// Domain separator for state root computation (v4: MuHash3072 transition).
+/// Bumped from v3 (insecure XOR accumulation) to v4 (3072-bit multiplicative group).
+/// Checkpoint attestations using StateRoot::compute() MUST pass the MuHash3072
+/// finalize output as `utxo_root` to ensure consistency with DAG block state_root headers.
+const STATE_ROOT_DST: &[u8] = b"MISAKA:state_root:v4:";
 const DIFF_ROOT_DST: &[u8] = b"MISAKA:state_diff_root:v1:";
 
 // ═══════════════════════════════════════════════════════════════

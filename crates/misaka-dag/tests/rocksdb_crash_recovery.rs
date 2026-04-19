@@ -388,3 +388,323 @@ fn test_rocksdb_gc_round_persistence() {
         );
     }
 }
+
+// ═══════════════════════════════════════════════════════════
+//  BLOCKER G: schema versioning + point-get + counts
+// ═══════════════════════════════════════════════════════════
+
+use misaka_dag::narwhal_dag::rocksdb_store::CURRENT_SCHEMA_VERSION;
+
+/// Fresh open on a new directory must stamp `CURRENT_SCHEMA_VERSION`
+/// in `narwhal_meta`. Subsequent opens must see the same value.
+#[test]
+fn blocker_g_fresh_open_stamps_schema_version() {
+    let dir = TempDir::new().unwrap();
+    let store_path = dir.path().join("consensus_db");
+
+    {
+        let store = RocksDbConsensusStore::open(&store_path).unwrap();
+        assert_eq!(
+            store.read_schema_version().unwrap(),
+            Some(CURRENT_SCHEMA_VERSION),
+            "fresh open must stamp CURRENT_SCHEMA_VERSION"
+        );
+    }
+
+    // Reopening must keep the same value and succeed.
+    {
+        let store = RocksDbConsensusStore::open(&store_path).unwrap();
+        assert_eq!(
+            store.read_schema_version().unwrap(),
+            Some(CURRENT_SCHEMA_VERSION),
+        );
+    }
+}
+
+/// An open that sees a FUTURE schema version (e.g. a v0.9.0 node that
+/// was accidentally pointed at a v0.10.0 DB) must fail closed with
+/// `SchemaVersionMismatch`. This is the core safety gate.
+#[test]
+fn blocker_g_future_schema_version_refuses_to_open() {
+    let dir = TempDir::new().unwrap();
+    let store_path = dir.path().join("consensus_db");
+
+    // First open stamps version=1.
+    {
+        let _ = RocksDbConsensusStore::open(&store_path).unwrap();
+    }
+
+    // Manually corrupt narwhal_meta/schema_version to 99 to simulate
+    // a newer-binary-wrote-this-DB scenario.
+    {
+        let mut opts = rocksdb::Options::default();
+        opts.create_if_missing(false);
+        let cfs = vec![
+            "narwhal_blocks",
+            "narwhal_commits",
+            "narwhal_meta",
+            "narwhal_last_committed",
+            "narwhal_equivocation_evidence",
+            "narwhal_committed_tx_filter",
+            "narwhal_tx_index",
+            "narwhal_addr_index",
+        ];
+        let db = rocksdb::DB::open_cf(&opts, &store_path, cfs).unwrap();
+        let cf_meta = db.cf_handle("narwhal_meta").unwrap();
+        db.put_cf(cf_meta, b"schema_version", 99u32.to_le_bytes())
+            .unwrap();
+    }
+
+    match RocksDbConsensusStore::open(&store_path) {
+        Ok(_) => panic!("open must refuse a future schema_version"),
+        Err(StoreError::SchemaVersionMismatch { got, expected }) => {
+            assert_eq!(got, 99);
+            assert_eq!(expected, CURRENT_SCHEMA_VERSION);
+        }
+        Err(other) => panic!("expected SchemaVersionMismatch, got {other:?}"),
+    }
+}
+
+/// A legacy DB (blocks present, but no schema_version key — simulates
+/// a v0.8.8 testnet DB that predates BLOCKER G) must be implicitly
+/// upgraded to CURRENT_SCHEMA_VERSION without data loss.
+#[test]
+fn blocker_g_legacy_db_without_schema_version_is_upgraded() {
+    let dir = TempDir::new().unwrap();
+    let store_path = dir.path().join("consensus_db");
+
+    // Write a block to a freshly opened store, then erase the
+    // schema_version key to simulate a pre-BLOCKER-G DB.
+    {
+        let store = RocksDbConsensusStore::open(&store_path).unwrap();
+        let mut batch = DagWriteBatch::new();
+        batch.add_block(VerifiedBlock::new_for_test(make_block(7, 2)));
+        store.write_batch(&batch).unwrap();
+    }
+    {
+        let mut opts = rocksdb::Options::default();
+        opts.create_if_missing(false);
+        let cfs = vec![
+            "narwhal_blocks",
+            "narwhal_commits",
+            "narwhal_meta",
+            "narwhal_last_committed",
+            "narwhal_equivocation_evidence",
+            "narwhal_committed_tx_filter",
+            "narwhal_tx_index",
+            "narwhal_addr_index",
+        ];
+        let db = rocksdb::DB::open_cf(&opts, &store_path, cfs).unwrap();
+        let cf_meta = db.cf_handle("narwhal_meta").unwrap();
+        db.delete_cf(cf_meta, b"schema_version").unwrap();
+    }
+
+    // Reopen: must succeed (implicit upgrade) AND preserve the block.
+    let store = RocksDbConsensusStore::open(&store_path).unwrap();
+    assert_eq!(
+        store.read_schema_version().unwrap(),
+        Some(CURRENT_SCHEMA_VERSION),
+        "legacy DB must be upgraded to CURRENT_SCHEMA_VERSION"
+    );
+    assert_eq!(
+        store.block_count().unwrap(),
+        1,
+        "legacy upgrade must preserve blocks"
+    );
+}
+
+/// `get_block` returns the same data that `read_all_blocks` would,
+/// but via a single point-get. Unknown digests return `Ok(None)`.
+#[test]
+fn blocker_g_point_get_block_roundtrip() {
+    let dir = TempDir::new().unwrap();
+    let store_path = dir.path().join("consensus_db");
+
+    let block = make_block(5, 1);
+    let digest = block.digest();
+
+    {
+        let store = RocksDbConsensusStore::open(&store_path).unwrap();
+        let mut batch = DagWriteBatch::new();
+        batch.add_block(VerifiedBlock::new_for_test(block.clone()));
+        store.write_batch(&batch).unwrap();
+    }
+
+    let store = RocksDbConsensusStore::open(&store_path).unwrap();
+
+    // Known digest → Some with matching data
+    let got = store.get_block(&digest).unwrap();
+    let got = got.expect("present");
+    assert_eq!(got.round, block.round);
+    assert_eq!(got.author, block.author);
+    assert_eq!(got.transactions, block.transactions);
+
+    // Unknown digest → None
+    let missing = BlockDigest([0xFFu8; 32]);
+    assert!(store.get_block(&missing).unwrap().is_none());
+}
+
+// ═══════════════════════════════════════════════════════════
+//  BLOCKER H: atomic commit-index batch + last_committed_index
+// ═══════════════════════════════════════════════════════════
+
+/// A single `write_commit_indexes` must land tx_details + addr_entries
+/// + `last_committed_index` ATOMICALLY. After the call the DB must
+/// either contain everything we staged or (on failure) nothing. The
+/// happy path asserts everything lands.
+#[test]
+fn blocker_h_write_commit_indexes_lands_all_entries_atomically() {
+    let dir = TempDir::new().unwrap();
+    let store_path = dir.path().join("consensus_db");
+
+    let tx_details: Vec<([u8; 32], Vec<u8>)> = (0..5)
+        .map(|i| ([i as u8; 32], format!("tx-{}-payload", i).into_bytes()))
+        .collect();
+
+    // CF_ADDR_INDEX uses a fixed 64-byte prefix extractor so prefix
+    // scans work against a full hex-encoded 32-byte address. Mirror the
+    // production `{address_hex}:{height_be8}:{tx_hash_hex}` layout so
+    // `get_addr_entries` finds every entry via a single prefix scan.
+    let addr_hex: String = (0..32).map(|b: u8| format!("{:02x}", b)).collect();
+    let addr_entries: Vec<(Vec<u8>, Vec<u8>)> = (0..10u64)
+        .map(|i| {
+            let key = format!("{}:{:016x}:{}", addr_hex, i, hex::encode([i as u8; 32]));
+            (key.into_bytes(), format!("entry-{}", i).into_bytes())
+        })
+        .collect();
+
+    {
+        let store = RocksDbConsensusStore::open(&store_path).unwrap();
+        store
+            .write_commit_indexes(42, &tx_details, &addr_entries)
+            .expect("atomic commit-index batch write");
+    }
+
+    // Reopen and verify every entry survived.
+    let store = RocksDbConsensusStore::open(&store_path).unwrap();
+    assert_eq!(
+        store.get_last_committed_index().unwrap(),
+        Some(42),
+        "last_committed_index must land"
+    );
+    for (hash, expected) in &tx_details {
+        let got = store
+            .get_tx_detail(hash)
+            .unwrap()
+            .expect("tx_detail present");
+        assert_eq!(&got, expected);
+    }
+    // Prefix scan returns all 10 addr entries.
+    let got_addrs = store.get_addr_entries(&addr_hex).unwrap();
+    assert_eq!(
+        got_addrs.len(),
+        10,
+        "all 10 addr_entries must land in one batch"
+    );
+}
+
+/// Empty batch (e.g. an empty committed sub-dag) must still stamp
+/// `last_committed_index` so recovery can see progress was made.
+#[test]
+fn blocker_h_empty_batch_still_stamps_last_committed_index() {
+    let dir = TempDir::new().unwrap();
+    let store_path = dir.path().join("consensus_db");
+
+    {
+        let store = RocksDbConsensusStore::open(&store_path).unwrap();
+        assert_eq!(
+            store.get_last_committed_index().unwrap(),
+            None,
+            "fresh DB has no last_committed_index"
+        );
+
+        store
+            .write_commit_indexes(7, &[], &[])
+            .expect("empty commit batch must succeed");
+        assert_eq!(store.get_last_committed_index().unwrap(), Some(7));
+    }
+
+    // Survive reopen.
+    let store = RocksDbConsensusStore::open(&store_path).unwrap();
+    assert_eq!(store.get_last_committed_index().unwrap(), Some(7));
+}
+
+/// Repeated `write_commit_indexes` at higher indices must overwrite
+/// the marker monotonically. (The method itself does NOT enforce
+/// monotonicity — the commit loop does, because commits are fed in
+/// index order. This test pins the overwrite semantics.)
+#[test]
+fn blocker_h_last_committed_index_overwrites_on_later_commit() {
+    let dir = TempDir::new().unwrap();
+    let store_path = dir.path().join("consensus_db");
+
+    let store = RocksDbConsensusStore::open(&store_path).unwrap();
+    store.write_commit_indexes(1, &[], &[]).unwrap();
+    assert_eq!(store.get_last_committed_index().unwrap(), Some(1));
+    store.write_commit_indexes(2, &[], &[]).unwrap();
+    assert_eq!(store.get_last_committed_index().unwrap(), Some(2));
+    store.write_commit_indexes(100, &[], &[]).unwrap();
+    assert_eq!(store.get_last_committed_index().unwrap(), Some(100));
+}
+
+/// `write_commit_indexes` must not interfere with data written via
+/// `write_batch` (the block/commit path). Both coexist in the same
+/// DB and touch disjoint CFs.
+#[test]
+fn blocker_h_commit_index_batch_coexists_with_dag_write_batch() {
+    let dir = TempDir::new().unwrap();
+    let store_path = dir.path().join("consensus_db");
+
+    {
+        let store = RocksDbConsensusStore::open(&store_path).unwrap();
+
+        // DAG write_batch lands a block.
+        let mut batch = DagWriteBatch::new();
+        batch.add_block(VerifiedBlock::new_for_test(make_block(3, 1)));
+        store.write_batch(&batch).unwrap();
+
+        // Commit-index batch lands a tx_index entry + marker.
+        store
+            .write_commit_indexes(5, &[([0xAB; 32], b"tx-5".to_vec())], &[])
+            .unwrap();
+    }
+
+    // Reopen — both sides survive.
+    let store = RocksDbConsensusStore::open(&store_path).unwrap();
+    assert_eq!(store.block_count().unwrap(), 1);
+    assert_eq!(store.get_last_committed_index().unwrap(), Some(5));
+    assert_eq!(
+        store.get_tx_detail(&[0xAB; 32]).unwrap(),
+        Some(b"tx-5".to_vec())
+    );
+}
+
+/// `block_count` and `commit_count` return exact counts after a
+/// write_batch and survive a reopen.
+#[test]
+fn blocker_g_block_and_commit_counts_are_exact() {
+    let dir = TempDir::new().unwrap();
+    let store_path = dir.path().join("consensus_db");
+
+    {
+        let store = RocksDbConsensusStore::open(&store_path).unwrap();
+        assert_eq!(store.block_count().unwrap(), 0, "fresh DB");
+        assert_eq!(store.commit_count().unwrap(), 0);
+
+        let mut batch = DagWriteBatch::new();
+        for author in 0..4u32 {
+            batch.add_block(VerifiedBlock::new_for_test(make_block(1, author)));
+        }
+        batch.add_commit(make_commit(1, 1, 0));
+        batch.add_commit(make_commit(2, 1, 1));
+        store.write_batch(&batch).unwrap();
+
+        assert_eq!(store.block_count().unwrap(), 4);
+        assert_eq!(store.commit_count().unwrap(), 2);
+    }
+
+    // Reopen: counts survive.
+    let store = RocksDbConsensusStore::open(&store_path).unwrap();
+    assert_eq!(store.block_count().unwrap(), 4);
+    assert_eq!(store.commit_count().unwrap(), 2);
+}

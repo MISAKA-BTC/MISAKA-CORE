@@ -167,6 +167,41 @@ impl DagCheckpointVote {
     }
 }
 
+// ── Epoch transition proof (Phase 4-1: light client trust chain) ──
+
+/// Individual vote attesting to an epoch transition.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct EpochTransitionVote {
+    pub voter: ValidatorId,
+    pub signature: ValidatorSignature,
+}
+
+/// Epoch transition proof: 2f+1 ML-DSA-65 signatures from the outgoing
+/// committee attesting to the new committee for the next epoch.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct EpochTransitionProof {
+    pub old_epoch: u64,
+    pub new_epoch: u64,
+    /// SHA3-256 hash of the new committee.
+    pub new_committee_hash: [u8; 32],
+    /// The new committee validators.
+    pub new_committee: Vec<ValidatorIdentity>,
+    /// Votes from outgoing committee members.
+    pub transition_votes: Vec<EpochTransitionVote>,
+}
+
+impl EpochTransitionProof {
+    /// Deterministic signing bytes for epoch transition attestation.
+    pub fn signing_bytes(old_epoch: u64, new_epoch: u64, committee_hash: &[u8; 32]) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(64);
+        buf.extend_from_slice(b"MISAKA:epoch-transition:v1:");
+        mcs1::write_u64(&mut buf, old_epoch);
+        mcs1::write_u64(&mut buf, new_epoch);
+        mcs1::write_fixed(&mut buf, committee_hash);
+        buf
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{ValidatorPublicKey, ValidatorSignature};

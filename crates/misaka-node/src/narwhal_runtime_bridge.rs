@@ -101,7 +101,8 @@ impl NarwhalBridge {
             timeout_base_ms: 2000,
             timeout_max_ms: 60_000,
             dag_config: misaka_dag::DagStateConfig::default(),
-            checkpoint_interval: 100,
+            // v0.8.9 Phase 0.5a: 100 → 20 to preserve ~200 s cadence at 10 s blocks
+            checkpoint_interval: 20,
             custom_verifier: None, // use default MlDsa65Verifier
             retention_rounds: 10_000,
         };

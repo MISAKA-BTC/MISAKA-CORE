@@ -25,6 +25,9 @@ tracing = { workspace = true }
 argon2 = "0.5"
 rand = "0.8"
 zeroize = { version = "1", features = ["derive"] }
+# BLOCKER C: standards-compliant BIP-39 mnemonic (English wordlist).
+# Replaces the custom "word0042" scheme flagged as MAINNET-BLOCKER.
+bip39 = { workspace = true }
 
 # Native RPC client (not available in WASM builds)
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }

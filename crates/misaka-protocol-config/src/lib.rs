@@ -26,6 +26,15 @@
 
 use serde::{Deserialize, Serialize};
 
+/// eUTXO v2 protocol parameters (cost model, fee formula, budget limits).
+/// Feature-gated: requires `eutxo-v2-params` feature.
+#[cfg(feature = "eutxo-v2-params")]
+pub mod eutxo_v2;
+
+/// eUTXO v2 parameters are also available in dev-dependencies (tests).
+#[cfg(all(test, not(feature = "eutxo-v2-params")))]
+pub mod eutxo_v2;
+
 /// Minimum and maximum supported protocol versions.
 const MIN_PROTOCOL_VERSION: u64 = 1;
 const MAX_PROTOCOL_VERSION: u64 = 1;
@@ -545,11 +554,15 @@ impl ProtocolConfig {
         cfg.max_tx_size = Some(256 * 1024);
         cfg.max_mergeset_size = Some(512);
 
-        // Block timing
-        cfg.target_block_interval_ms = Some(2_000);
-        cfg.epoch_length_blocks = Some(43_200); // 24h at 2s blocks
-        cfg.finality_depth = Some(30); // ~1 min at 2s blocks
-        cfg.coinbase_maturity = Some(300); // ~10 min at 2s blocks
+        // Block timing (v0.8.9 Phase 0.5a: fast lane 2 → 10 s)
+        //
+        // Depth-style fields below stay in BLOCKS; values fall 5× to
+        // preserve wall-clock semantics that constants.rs derives via
+        // `fast_depth(wall_secs) = wall_secs / FAST_LANE_BLOCK_TIME_SECS`.
+        cfg.target_block_interval_ms = Some(10_000);
+        cfg.epoch_length_blocks = Some(8_640); // 24h at 10s blocks
+        cfg.finality_depth = Some(6); // ~1 min at 10s blocks
+        cfg.coinbase_maturity = Some(60); // ~10 min at 10s blocks
         cfg.pruning_depth = Some(1_000);
 
         // GhostDAG / DAG

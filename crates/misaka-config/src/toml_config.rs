@@ -194,7 +194,7 @@ port = 6690
 port = 3001
 
 [consensus]
-fast_block_time_secs = 2
+fast_block_time_secs = 10
 zkp_block_time_secs = 30
 
 [faucet]
@@ -225,7 +225,7 @@ checkpoint = "42:abcdef1234567890abcdef1234567890"
         assert_eq!(config.faucet_cooldown_secs, 300);
         assert_eq!(config.staking_min_stake, 100_000_000_000);
         assert_eq!(config.staking_max_validators, 50);
-        assert_eq!(config.consensus_fast_block_time_secs, 2);
+        assert_eq!(config.consensus_fast_block_time_secs, 10);
         assert!(!config.security_require_encrypted_keystore);
     }
 

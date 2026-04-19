@@ -33,7 +33,7 @@ impl ChainProfile {
             ki_proof_required: true,
             min_ring_size: 4,
             max_anonymity_set: 16,
-            block_time_secs: 2, // Fast lane default (ZKP lane: 30s)
+            block_time_secs: crate::constants::FAST_LANE_BLOCK_TIME_SECS, // Fast lane default (ZKP lane: 30s)
             max_txs_per_block: 1000,
         }
     }
@@ -47,7 +47,7 @@ impl ChainProfile {
             ki_proof_required: true,
             min_ring_size: 4,
             max_anonymity_set: 16,
-            block_time_secs: 2, // Fast lane default (ZKP lane: 30s)
+            block_time_secs: crate::constants::FAST_LANE_BLOCK_TIME_SECS, // Fast lane default (ZKP lane: 30s)
             max_txs_per_block: 1000,
         }
     }
@@ -94,13 +94,19 @@ impl GenesisConfig {
 /// Domain prefix for genesis hash computation.
 pub const GENESIS_HASH_DOMAIN: &[u8] = b"MISAKA-GENESIS:v1:";
 
-/// Compute the canonical genesis hash from chain_id and committee public keys.
+/// Compute the v1 genesis hash from chain_id and committee public keys.
 ///
-/// This function MUST produce identical output for the same inputs across
-/// all components (node, CLI, wallet, relayer). Any callsite that constructs
-/// an AppId for cross-component verification must use this function.
+/// # Deprecation
+///
+/// This function only hashes `chain_id + committee_pks` and ignores the
+/// UTXO set, ProtocolVersion, and genesis timestamp. Use
+/// `misaka_genesis_builder::Genesis::hash()` for the complete v2 hash.
 ///
 /// `committee_pks` MUST be in canonical order (same as `committee.authorities`).
+#[deprecated(
+    since = "0.8.0",
+    note = "Use misaka_genesis_builder::Genesis::hash() — this function ignores UTXOs and ProtocolVersion"
+)]
 pub fn compute_genesis_hash(chain_id: u32, committee_pks: &[Vec<u8>]) -> [u8; 32] {
     use sha3::{Digest, Sha3_256};
     let mut h = Sha3_256::new();
@@ -116,6 +122,12 @@ pub fn compute_genesis_hash(chain_id: u32, committee_pks: &[Vec<u8>]) -> [u8; 32
 mod tests {
     use super::*;
 
+    // These tests exercise the deprecated `compute_genesis_hash`
+    // intentionally — they pin its byte-for-byte semantics so the
+    // deprecated function stays stable for any historical caller
+    // still linking against it during the v1.0 migration window.
+    // New callers MUST use `misaka_genesis_builder::Genesis::hash()`.
+    #[allow(deprecated)]
     #[test]
     fn genesis_hash_deterministic() {
         let pks = vec![vec![0xAA; 1952], vec![0xBB; 1952]];
@@ -124,12 +136,14 @@ mod tests {
         assert_eq!(h1, h2);
     }
 
+    #[allow(deprecated)]
     #[test]
     fn genesis_hash_chain_id_separation() {
         let pks = vec![vec![0xAA; 1952]];
         assert_ne!(compute_genesis_hash(1, &pks), compute_genesis_hash(2, &pks));
     }
 
+    #[allow(deprecated)]
     #[test]
     fn genesis_hash_pk_order_matters() {
         let pks_a = vec![vec![0xAA; 1952], vec![0xBB; 1952]];

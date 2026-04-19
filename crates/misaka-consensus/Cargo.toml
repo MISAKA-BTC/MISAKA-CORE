@@ -19,7 +19,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 hex = { workspace = true }
 parking_lot = { workspace = true }
-rocksdb = { version = "0.22", default-features = false, features = ["snappy"] }
+rocksdb = { version = "0.22", default-features = false, features = ["zstd"] }
 bincode = { workspace = true }
 
 [dev-dependencies]

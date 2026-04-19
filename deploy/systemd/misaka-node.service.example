@@ -1,0 +1,68 @@
+# Example systemd unit for a MISAKA validator (v0.8.9 BLOCKER M / Phase 1).
+#
+# Copy to /etc/systemd/system/misaka-node.service, edit the paths and the
+# 3 environment variables at the bottom, then:
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable misaka-node
+#   sudo systemctl restart misaka-node
+#
+# RUST_LOG tuning: the default full-debug stream produced ~91 MB/day of
+# `node.log` per validator. The setting below trims per-module verbosity
+# to "info for consensus-critical code, warn for noisy transport layers",
+# which reduces the raw log to <10 MB/day without dropping information
+# needed for incident diagnosis.
+
+[Unit]
+Description=MISAKA Network validator
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/v0.9.0-dev
+
+# --- Bind the node to a predictable file descriptor so logrotate's
+# --- copytruncate can clean it up without an inode swap.
+StandardOutput=append:/home/ubuntu/node.log
+StandardError=append:/home/ubuntu/node.log
+
+# --- Tuned RUST_LOG (v0.8.9 BLOCKER M) -----------------------------
+#
+# misaka=info          — keep validator-lifecycle, staking, and
+#                         execution logs visible (these are the
+#                         signal channels operators care about).
+# narwhal=warn         — drop "peer_sig_verify_failed" + "block_received"
+#                         noise that used to dominate the log.
+# mysticeti=info       — keep commit-cycle / propose_block at info.
+# tower=warn           — tower middleware is very chatty otherwise.
+# h2=warn, hyper=warn  — HTTP/2 layer noise from the RPC server.
+# rocksdb=warn         — BlobDB GC + compaction logs are useful on warn.
+Environment="RUST_LOG=misaka=info,narwhal=warn,mysticeti=info,tower=warn,h2=warn,hyper=warn,rocksdb=warn"
+
+# --- Per-validator secrets / config. EDIT THESE. -------------------
+Environment="MISAKA_VALIDATOR_PASSPHRASE=cluster"
+Environment="MISAKA_FEATURE_ON_CHAIN_STAKING_HEIGHT=0"
+Environment="MISAKA_RPC_AUTH_MODE=open"
+
+ExecStart=/home/ubuntu/v0.9.0-dev/misaka-node \
+  --chain-id 2 \
+  --data-dir /home/ubuntu/v0.9.0-dev/data \
+  --genesis-path /home/ubuntu/v0.9.0-dev/config/genesis_committee.toml \
+  --rpc-port 3101 \
+  --p2p-port 16190 \
+  --name cluster-NN \
+  --validator-index N \
+  --validators 4 \
+  --mode public \
+  --advertise-addr X.X.X.X:16190 \
+  --validator \
+  --seeds 163.43.225.27:16190
+
+Restart=on-failure
+RestartSec=10s
+LimitNOFILE=131072
+
+[Install]
+WantedBy=multi-user.target

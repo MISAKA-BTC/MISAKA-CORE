@@ -36,9 +36,7 @@ pub trait CommitStreamProvider {
     fn next_commit(&mut self) -> Result<Option<UnverifiedCommit>, LightClientError>;
 
     /// Get the next epoch transition proof, or None.
-    fn next_epoch_transition(
-        &mut self,
-    ) -> Result<Option<EpochTransitionProof>, LightClientError>;
+    fn next_epoch_transition(&mut self) -> Result<Option<EpochTransitionProof>, LightClientError>;
 }
 
 /// Vec-based fixture provider for testing.
@@ -50,10 +48,7 @@ pub struct FixtureStreamProvider {
 }
 
 impl FixtureStreamProvider {
-    pub fn new(
-        commits: Vec<UnverifiedCommit>,
-        transitions: Vec<EpochTransitionProof>,
-    ) -> Self {
+    pub fn new(commits: Vec<UnverifiedCommit>, transitions: Vec<EpochTransitionProof>) -> Self {
         Self {
             commits,
             transitions,
@@ -74,9 +69,7 @@ impl CommitStreamProvider for FixtureStreamProvider {
         }
     }
 
-    fn next_epoch_transition(
-        &mut self,
-    ) -> Result<Option<EpochTransitionProof>, LightClientError> {
+    fn next_epoch_transition(&mut self) -> Result<Option<EpochTransitionProof>, LightClientError> {
         if self.transition_idx < self.transitions.len() {
             let t = self.transitions[self.transition_idx].clone();
             self.transition_idx += 1;
