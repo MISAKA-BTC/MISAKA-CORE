@@ -624,14 +624,58 @@ impl UtxoSet {
     /// Pre-activation: callers use this for comparison / telemetry
     /// only. `compute_state_root` (MuHash) remains canonical.
     ///
-    /// Post-activation: `compute_state_root` at the v1.0 domain
-    /// tag (see Step 3 of the migration plan) will fold this root
+    /// Post-activation: [`compute_state_root_v4`] folds this root
     /// instead of the MuHash finalize output. See
     /// `docs/design/v100_smt_migration.md` §activation for the
     /// exact cutover contract.
     #[must_use]
     pub fn smt_root(&self) -> [u8; 32] {
         self.smt.root()
+    }
+
+    /// v1.0 candidate state root. Additive to
+    /// [`compute_state_root`] (the MuHash-folded v3 form);
+    /// consensus does NOT consume this value until the v1.0
+    /// activation epoch.
+    ///
+    /// Domain tag `"MISAKA:state_root:v4:"` separates the SMT
+    /// commitment from the v3 MuHash commitment so no replay or
+    /// cross-validation path can confuse them.
+    ///
+    /// Shape:
+    ///
+    /// ```text
+    /// SHA3_256(
+    ///     b"MISAKA:state_root:v4:" ||
+    ///     self.height.to_le_bytes() ||
+    ///     self.smt.root()
+    /// )
+    /// ```
+    ///
+    /// The height is still folded (same reason as v3):
+    /// two UTXO sets that happen to coincide at different chain
+    /// tips MUST produce distinct roots so replay-against-wrong-tip
+    /// is detectable. The SMT root itself is height-independent
+    /// by construction (see `smt_root` rustdoc); the height fold
+    /// happens only in the wrapping SHA3.
+    ///
+    /// Determinism: both inputs are pure functions of the UTXO
+    /// set + height. Every honest node computes the same value.
+    ///
+    /// See `docs/design/v100_smt_migration.md` for the full v3 ↔
+    /// v4 cutover contract and the `state_root` block-header
+    /// semantics after activation.
+    #[must_use]
+    pub fn compute_state_root_v4(&self) -> [u8; 32] {
+        use sha3::{Digest, Sha3_256};
+
+        let smt_digest = self.smt.root();
+
+        let mut h = Sha3_256::new();
+        h.update(b"MISAKA:state_root:v4:");
+        h.update(self.height.to_le_bytes());
+        h.update(smt_digest);
+        h.finalize().into()
     }
 
     /// Export the current in-memory state into a serializable snapshot.
@@ -1283,6 +1327,81 @@ mod tests {
         b.add_output(make_outref(1, 0), make_output(2000), 0, false)
             .unwrap(); // different amount → different SMT value
         assert_ne!(a.smt_root(), b.smt_root());
+    }
+
+    // ─── v1.0 Step 3: compute_state_root_v4 tests ────────────
+    //
+    // `compute_state_root_v4` is additive alongside the canonical
+    // v3 MuHash-based `compute_state_root`. These tests pin its
+    // determinism contract and the domain-separation invariant
+    // (v3 output ≠ v4 output on the same UTXO set).
+
+    #[test]
+    fn compute_state_root_v4_deterministic() {
+        let mut a = UtxoSet::new(100);
+        let mut b = UtxoSet::new(100);
+        a.add_output(make_outref(1, 0), make_output(1000), 0, false)
+            .unwrap();
+        b.add_output(make_outref(1, 0), make_output(1000), 0, false)
+            .unwrap();
+        assert_eq!(a.compute_state_root_v4(), b.compute_state_root_v4());
+    }
+
+    #[test]
+    fn compute_state_root_v4_folds_height() {
+        let mut a = UtxoSet::new(100);
+        let mut b = UtxoSet::new(100);
+        a.add_output(make_outref(1, 0), make_output(1000), 0, false)
+            .unwrap();
+        b.add_output(make_outref(1, 0), make_output(1000), 0, false)
+            .unwrap();
+        a.height = 1;
+        b.height = 2;
+        assert_ne!(a.compute_state_root_v4(), b.compute_state_root_v4());
+    }
+
+    #[test]
+    fn compute_state_root_v4_differs_from_v3() {
+        // Domain separation: the v3 (MuHash) and v4 (SMT) roots
+        // MUST be distinct on any non-empty UTXO set. Otherwise a
+        // mid-migration node could accept v3-labelled roots as
+        // v4 or vice versa.
+        let mut set = UtxoSet::new(100);
+        set.add_output(make_outref(1, 0), make_output(1000), 0, false)
+            .unwrap();
+        assert_ne!(set.compute_state_root(), set.compute_state_root_v4());
+    }
+
+    #[test]
+    fn compute_state_root_v4_differs_from_v3_even_when_empty() {
+        // Empty-set case: v3 folds `MuHash::new().finalize()` and
+        // v4 folds `SparseMerkleTree::new().root()`. Different
+        // accumulators, different domain tags, so the outputs
+        // MUST differ even with no UTXOs.
+        let set = UtxoSet::new(100);
+        assert_ne!(set.compute_state_root(), set.compute_state_root_v4());
+    }
+
+    #[test]
+    fn compute_state_root_v4_matches_inline_recipe() {
+        // Pins the exact byte recipe of the v4 state root:
+        //   SHA3_256(b"MISAKA:state_root:v4:" || height_le || smt_root)
+        // Against a regression where the domain tag or the fold
+        // order gets mutated without updating this spec.
+        use sha3::{Digest, Sha3_256};
+        let mut set = UtxoSet::new(100);
+        set.add_output(make_outref(1, 0), make_output(1000), 0, false)
+            .unwrap();
+        set.height = 42;
+
+        let expected: [u8; 32] = {
+            let mut h = Sha3_256::new();
+            h.update(b"MISAKA:state_root:v4:");
+            h.update(42u64.to_le_bytes());
+            h.update(set.smt_root());
+            h.finalize().into()
+        };
+        assert_eq!(set.compute_state_root_v4(), expected);
     }
 }
 
