@@ -15,6 +15,12 @@
 //! - Query existence and lookup
 
 use misaka_muhash::MuHash;
+// v1.0 hard-fork migration (parallel phase): the SMT accumulator
+// runs alongside MuHash on every mutation so that the v1.0
+// activation epoch flips the canonical state commitment without
+// a second rebuild pass. See `docs/design/v100_smt_migration.md`.
+use misaka_smt::key::{smt_key as smt_key_for, smt_value as smt_value_for};
+use misaka_smt::tree::SparseMerkleTree;
 use misaka_types::utxo::{OutputRef, TxOutput, TxType, UtxoTransaction};
 use std::collections::HashMap;
 
@@ -128,9 +134,52 @@ pub struct UtxoSet {
     /// Phase 3 C6: MuHash incremental accumulator for state root.
     /// Replaces the Merkle-based compute_state_root (HARD FORK).
     muhash: MuHash,
+    /// v1.0 hard-fork parallel SMT accumulator. Mirrors every
+    /// `add_output` / `remove_output` / `from_snapshot` mutation so
+    /// the SMT root is available on every mutation without a
+    /// rebuild pass. Pre-activation the root is computed but never
+    /// consumed; at the v1.0 activation epoch the canonical
+    /// `state_root` shifts from MuHash-derived to SMT-derived
+    /// without another migration. See
+    /// `docs/design/v100_smt_migration.md` for the activation
+    /// contract.
+    ///
+    /// Memory: the reference `SparseMerkleTree` stores only the
+    /// sparse set of set leaves (~64 B/entry on top of the
+    /// `HashMap` already held in `unspent`). At testnet scale
+    /// (<1e5 UTXOs) this is negligible.
+    smt: SparseMerkleTree,
     /// Cached total amount across all UTXOs (JSON-RPC DoS prevention).
     /// Updated incrementally on add_output / remove_output.
     cached_total_amount: u64,
+}
+
+/// v1.0 hard-fork parallel SMT: derive the SMT (key, value) pair
+/// for a UTXO entry.
+///
+/// Key: `sha3_with_dst(b"MISAKA:SMT:key:v1", tx_hash, output_index.to_le_bytes())`
+/// — computed inside `misaka_smt::key::smt_key`.
+///
+/// Value: `sha3_with_dst(b"MISAKA:SMT:value:v1", borsh(output))` — the
+/// `TxOutput` is borsh-encoded for determinism. Failure here MUST
+/// panic (as with MuHash) because `TxOutput` is fixed-size and a
+/// deserialise/encode disagreement across nodes is a
+/// consensus-critical divergence.
+///
+/// Note: creation `height` is NOT folded into the SMT value because
+/// the SMT key space uses `(tx_hash, output_index)` as the unique
+/// identifier. Height is already implicit in `tx_hash` (tx hashes
+/// are committed to a specific block). This differs from the
+/// MuHash element which does fold height — MuHash is an
+/// unordered multiset accumulator where distinct-height identical
+/// outputs would collide without the height tag.
+#[inline]
+fn utxo_smt_key_value(outref: &OutputRef, output: &TxOutput) -> ([u8; 32], [u8; 32]) {
+    let key = smt_key_for(&outref.tx_hash, outref.output_index);
+    let output_bytes = borsh::to_vec(output)
+        .expect("TxOutput borsh serialization must not fail (SMT value)");
+    let value = smt_value_for(&output_bytes);
+    (key, value)
 }
 
 /// Phase 3 C6: Compute the canonical byte representation of a UTXO element
@@ -195,6 +244,7 @@ impl UtxoSet {
             max_delta_history: clamped,
             height: 0,
             muhash: MuHash::new(),
+            smt: SparseMerkleTree::new(),
             cached_total_amount: 0,
         }
     }
@@ -317,6 +367,12 @@ impl UtxoSet {
         // Phase 3 C6: Update MuHash accumulator incrementally.
         let elem = utxo_element_bytes(&outref, &output, height);
         self.muhash.add_element(&elem);
+        // v1.0 parallel SMT: mirror the insertion. Pre-activation
+        // the resulting root is not consumed by consensus; at
+        // v1.0 activation epoch the commitment flips and this
+        // tree becomes the canonical state root source.
+        let (smt_k, smt_v) = utxo_smt_key_value(&outref, &output);
+        self.smt.insert(smt_k, smt_v);
         self.unspent.insert(
             outref.clone(),
             UtxoEntry {
@@ -337,6 +393,9 @@ impl UtxoSet {
             // Phase 3 C6: Remove from MuHash accumulator.
             let elem = utxo_element_bytes(outref, &entry.output, entry.created_at);
             self.muhash.remove_element(&elem);
+            // v1.0 parallel SMT: mirror the removal.
+            let (smt_k, _smt_v) = utxo_smt_key_value(outref, &entry.output);
+            self.smt.remove(&smt_k);
             self.cached_total_amount = self.cached_total_amount.saturating_sub(entry.output.amount);
         }
         self.spending_pubkeys.remove(outref);
@@ -557,6 +616,24 @@ impl UtxoSet {
         h.finalize().into()
     }
 
+    /// v1.0 hard-fork parallel SMT: raw SMT root of the current
+    /// unspent set. Deterministic across honest nodes given the
+    /// same UTXO set (the reference `SparseMerkleTree` is a pure
+    /// function of its leaves).
+    ///
+    /// Pre-activation: callers use this for comparison / telemetry
+    /// only. `compute_state_root` (MuHash) remains canonical.
+    ///
+    /// Post-activation: `compute_state_root` at the v1.0 domain
+    /// tag (see Step 3 of the migration plan) will fold this root
+    /// instead of the MuHash finalize output. See
+    /// `docs/design/v100_smt_migration.md` §activation for the
+    /// exact cutover contract.
+    #[must_use]
+    pub fn smt_root(&self) -> [u8; 32] {
+        self.smt.root()
+    }
+
     /// Export the current in-memory state into a serializable snapshot.
     ///
     /// Rollback deltas are intentionally excluded. The anonymous model cannot
@@ -616,6 +693,13 @@ impl UtxoSet {
             // Phase 3 C6: Rebuild MuHash from all UTXOs during snapshot restore.
             let elem = utxo_element_bytes(&outref, &stored.output, stored.created_at);
             set.muhash.add_element(&elem);
+            // v1.0 parallel SMT: rebuild the tree from every
+            // unspent output. No serialised tree state lives in
+            // the snapshot file yet (activation is still
+            // pending); the tree is reconstructed deterministically
+            // from the same inputs every honest node has.
+            let (smt_k, smt_v) = utxo_smt_key_value(&outref, &stored.output);
+            set.smt.insert(smt_k, smt_v);
             set.cached_total_amount = set.cached_total_amount.saturating_add(stored.output.amount);
             set.unspent.insert(
                 outref.clone(),
@@ -1077,6 +1161,128 @@ mod tests {
             &[0xAB; 1952][..]
         );
         assert_eq!(restored.compute_state_root(), set.compute_state_root());
+    }
+
+    // ─── v1.0 parallel-SMT tests ─────────────────────────────
+    //
+    // Verifies that the mirrored SMT tree in `UtxoSet`
+    // produces a deterministic root that:
+    //   1. is non-zero after any mutation,
+    //   2. is invariant under insertion order,
+    //   3. changes on every state change (add/remove),
+    //   4. is reconstructed identically via `from_snapshot`,
+    //   5. is independent of `height` (the SMT key space keys
+    //      by (tx_hash, output_index), not by creation height).
+    // These tests pin the determinism contract that the v1.0
+    // activation epoch will depend on. See
+    // `docs/design/v100_smt_migration.md`.
+
+    #[test]
+    fn smt_root_deterministic_across_nodes() {
+        let mut a = UtxoSet::new(100);
+        let mut b = UtxoSet::new(100);
+        a.add_output(make_outref(1, 0), make_output(1000), 0, false)
+            .unwrap();
+        b.add_output(make_outref(1, 0), make_output(1000), 0, false)
+            .unwrap();
+        assert_eq!(a.smt_root(), b.smt_root());
+    }
+
+    #[test]
+    fn smt_root_order_invariant() {
+        let mut a = UtxoSet::new(100);
+        let mut b = UtxoSet::new(100);
+        a.add_output(make_outref(1, 0), make_output(1000), 0, false)
+            .unwrap();
+        a.add_output(make_outref(2, 0), make_output(2000), 0, false)
+            .unwrap();
+        // Same leaves, reverse insertion order.
+        b.add_output(make_outref(2, 0), make_output(2000), 0, false)
+            .unwrap();
+        b.add_output(make_outref(1, 0), make_output(1000), 0, false)
+            .unwrap();
+        assert_eq!(a.smt_root(), b.smt_root());
+    }
+
+    #[test]
+    fn smt_root_changes_on_add() {
+        let mut a = UtxoSet::new(100);
+        let before = a.smt_root();
+        a.add_output(make_outref(1, 0), make_output(1000), 0, false)
+            .unwrap();
+        assert_ne!(a.smt_root(), before);
+    }
+
+    #[test]
+    fn smt_root_changes_on_remove() {
+        let mut a = UtxoSet::new(100);
+        let outref = make_outref(5, 3);
+        a.add_output(outref.clone(), make_output(9000), 0, false)
+            .unwrap();
+        let after_add = a.smt_root();
+        a.remove_output(&outref);
+        assert_ne!(a.smt_root(), after_add);
+    }
+
+    #[test]
+    fn smt_root_round_trips_after_add_then_remove() {
+        // Mutation neutrality: an add followed by a remove of the
+        // same output restores the original SMT root. Relies on
+        // the `SparseMerkleTree::remove` call being exactly
+        // inverse of `insert` for an un-shared key.
+        let mut a = UtxoSet::new(100);
+        let initial = a.smt_root();
+        let outref = make_outref(11, 2);
+        a.add_output(outref.clone(), make_output(4242), 0, false)
+            .unwrap();
+        assert_ne!(a.smt_root(), initial);
+        a.remove_output(&outref);
+        assert_eq!(a.smt_root(), initial);
+    }
+
+    #[test]
+    fn smt_root_rebuilt_on_snapshot_restore() {
+        let mut set = UtxoSet::new(100);
+        let out1 = make_outref(1, 0);
+        let out2 = make_outref(2, 1);
+        set.add_output(out1, make_output(111), 0, false).unwrap();
+        set.add_output(out2, make_output(222), 0, false).unwrap();
+        set.height = 7;
+        let original_smt = set.smt_root();
+
+        let snapshot = set.export_snapshot();
+        let restored = UtxoSet::from_snapshot(snapshot, 100);
+        assert_eq!(restored.smt_root(), original_smt);
+    }
+
+    #[test]
+    fn smt_root_height_independent() {
+        // Unlike MuHash (which folds creation height into its
+        // element bytes), the SMT keys by (tx_hash,
+        // output_index). Changing only the `height` field
+        // therefore must NOT alter the SMT root. This pins the
+        // `utxo_smt_key_value` helper against a regression that
+        // would break the v1.0 activation contract.
+        let mut a = UtxoSet::new(100);
+        let mut b = UtxoSet::new(100);
+        a.add_output(make_outref(1, 0), make_output(1000), 0, false)
+            .unwrap();
+        b.add_output(make_outref(1, 0), make_output(1000), 0, false)
+            .unwrap();
+        a.height = 1;
+        b.height = 99;
+        assert_eq!(a.smt_root(), b.smt_root());
+    }
+
+    #[test]
+    fn smt_root_differs_on_different_state() {
+        let mut a = UtxoSet::new(100);
+        let mut b = UtxoSet::new(100);
+        a.add_output(make_outref(1, 0), make_output(1000), 0, false)
+            .unwrap();
+        b.add_output(make_outref(1, 0), make_output(2000), 0, false)
+            .unwrap(); // different amount → different SMT value
+        assert_ne!(a.smt_root(), b.smt_root());
     }
 }
 

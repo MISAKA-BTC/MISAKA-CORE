@@ -1962,6 +1962,7 @@ dependencies = [
  "indexmap 2.13.1",
  "misaka-crypto",
  "misaka-muhash",
+ "misaka-smt",
  "misaka-types",
  "parking_lot",
  "rand 0.8.5",
