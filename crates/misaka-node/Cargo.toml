@@ -80,6 +80,9 @@ base64 = "0.22"
 sha2 = "0.10"
 blake3 = { workspace = true }
 bs58 = "0.5"
+# Phase 2 Path X R6-a: direct rocksdb access for the offline `--migrate-to`
+# subcommand. Kept in sync with misaka-storage's own rocksdb entry.
+rocksdb = { version = "0.22", default-features = false, features = ["snappy"] }
 
 [lints]
 workspace = true

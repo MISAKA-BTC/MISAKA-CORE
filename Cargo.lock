@@ -1790,6 +1790,7 @@ dependencies = [
  "parking_lot",
  "rand 0.8.5",
  "reqwest",
+ "rocksdb",
  "secrecy",
  "serde",
  "serde_json",

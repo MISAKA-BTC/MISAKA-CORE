@@ -293,7 +293,7 @@ After user sign-off on §10, Phase 2 本体 is redefined as a set of six
 work items (R1–R6) that fit the current Kaspa-aligned infrastructure
 without introducing a fourth storage schema.
 
-### 11.1 R1 — Retire the legacy `RocksBlockStore`
+### 11.1 R1 — Retire the legacy `RocksBlockStore` (BLOCKED)
 
 `block_store.rs` + the 5 legacy CFs (`utxos`, `spent_tags`,
 `spending_keys`, `block_meta`, `state`) are referenced in only three
@@ -312,6 +312,39 @@ Open question: do any persisted testnet DBs still contain legacy-CF
 data that must be drained into the Kaspa-aligned prefix keyspace? If
 yes, R6 must ship before R1. Verified by inspecting the live testnet
 DBs on `163.43.225.27`.
+
+#### 11.1.1 R1 audit outcome (2026-04-19)
+
+Line-by-line audit of `crates/misaka-storage/src/recovery.rs`:
+
+- 3 call sites onto `RocksBlockStore`: `open()` (75),
+  `verify_integrity()` (92), `get_state_root()` (94).
+- `verify_integrity()` has **no Kaspa-aligned equivalent**. It is the
+  only thing that catches height/state_root inconsistency at startup.
+- `get_state_root()` reads the *persisted* state root from the
+  `state` CF. The Kaspa-aligned `UtxoSet::compute_state_root()` is
+  **in-memory only** and is not a drop-in replacement — the new
+  stack doesn't persist height or state_root at all.
+- External callers: only `misaka-node/src/main.rs:1004` calls
+  `run_startup_check`. No tests cover the chain.
+- Legacy-CF test coverage: `block_store.rs:646` `test_integrity_
+  check_passes` is the single test; deleting `block_store.rs`
+  removes it with no replacement.
+
+**Conclusion**: R1 cannot ship safely under Phase 2 Path X. The
+prerequisite work is:
+
+1. Port `verify_integrity()` logic to a new Kaspa-aligned module
+   (decide: SHA3-hash the persisted UTXO set, or persist a rollup in
+   `StorePrefixes::VirtualState`).
+2. Persist height + state_root via `CachedDbAccess` so restart
+   recovery can use them.
+3. Add integration tests for the rebuilt startup recovery path.
+
+(1)–(3) is a separate multi-commit PR with its own design doc.
+`RocksBlockStore` therefore stays in place at the end of Phase 2
+Path X. The new `CheckpointTrigger` and `PruneMode` APIs land on
+top of — not as replacements for — the legacy block store.
 
 ### 11.2 R2 — Narwhal CFs (leave alone; revisit later)
 
@@ -436,7 +469,7 @@ Done in this PR:
 Wiring into the node boot path is a follow-up commit — the module is
 standalone and additive.
 
-### 11.6 R6 — Migration tool
+### 11.6 R6 — Migration tool (R6-a SHIPPED; R6-b BLOCKED)
 
 `misaka-node migrate --from <u32> --to <u32> [--dry-run] [--db <path>]`
 subcommand:
@@ -451,6 +484,64 @@ subcommand:
 
 Shipping R6 is prerequisite for R1 if legacy-CF data is present on any
 live DB.
+
+#### 11.6.1 R6-a — marker-stamp tool (SHIPPED 2026-04-19)
+
+`crates/misaka-node/src/migrate.rs` + four CLI flags on the existing
+flat `Cli` struct:
+
+```
+misaka-node --migrate-to 2 \
+            [--migrate-from 1] \
+            [--migrate-dry-run] \
+            [--migrate-db /path/to/storage]
+```
+
+Triggers an early-exit migration path *before* any node-startup
+wiring. Semantics:
+
+- Validates `--migrate-to` equals `CURRENT_STORAGE_SCHEMA_VERSION`.
+- Reads the marker via R5 `misaka-storage::read_schema_version`.
+- Enforces `--migrate-from` if supplied (guards against running a v2
+  stamp against a DB another build already stamped v3).
+- Refuses downgrades.
+- Idempotent: running a second time on an already-stamped DB is a
+  `no-op`.
+- Dry-run prints the plan without mutating.
+- Post-stamp it reopens the DB and runs `check_compatible` to verify
+  the stamp took.
+
+Legacy-CF drain is **not** part of R6-a. No live DB transform beyond
+the 4-byte marker.
+
+#### 11.6.2 R6-b — PruneMode storage wiring (BLOCKED)
+
+Intended to spawn `PruningProcessor::maybe_advance_pruning_point()`
+from `start_narwhal_node` with the `PruneMode` selected via R3.
+
+Blocker discovered 2026-04-19 while scoping the wiring:
+`PruningProcessor::new` requires `DbGhostdagStore`, `DbHeadersStore`,
+and `Arc<RwLock<DbPruningStore>>`. These three stores exist only on
+the legacy `start_dag_node` path; `start_narwhal_node` never
+constructs them. Retrofitting them into the Narwhal pipeline is a
+structural change that:
+
+1. Touches the Narwhal boot sequence, which is consensus-critical.
+2. Requires deciding what `DbGhostdagStore` means in a Narwhal-only
+   world (GhostDAG was removed as of v6 per `crates/misaka-dag/src/
+   lib.rs:14` — "GhostDAG has been fully removed as of v6").
+
+R6-b therefore cannot ship under "Phase 2 Path X, additive-only,
+no consensus changes". It is deferred to a dedicated session that
+either (a) revives a GhostDAG-style pruning pipeline under the
+Narwhal path, or (b) rewrites `PruningProcessor` to drop the
+GhostDAG-specific dependencies and operate directly on
+Narwhal-committed rounds.
+
+The R3 `PruneMode` runtime config therefore lives in `NodeConfig`
+without a consumer in the running node. That is intentional — it
+unblocks operator-side config files without forcing the wiring
+decision now.
 
 ### 11.7 Suggested ordering
 

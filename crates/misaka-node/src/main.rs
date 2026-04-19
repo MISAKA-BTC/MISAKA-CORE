@@ -76,6 +76,7 @@ pub mod genesis_committee;
 pub mod identity;
 pub mod indexer;
 pub mod metrics;
+pub mod migrate;
 pub mod rpc_auth;
 pub mod rpc_rate_limit;
 pub mod safe_mode;
@@ -421,6 +422,32 @@ struct Cli {
     /// Values from the file serve as defaults; explicit CLI args override them.
     #[arg(long, env = "MISAKA_CONFIG_PATH")]
     config: Option<String>,
+
+    // ─── Phase 2 Path X R6 — storage schema migration ──────
+    /// Run offline migration of the storage DB's schema-version marker
+    /// and exit. Required to trigger migration mode. Must equal the
+    /// current build's `CURRENT_STORAGE_SCHEMA_VERSION` (v0.9.0 = 2).
+    ///
+    /// See `crates/misaka-node/src/migrate.rs` for the full flow.
+    #[arg(long, value_name = "VERSION")]
+    migrate_to: Option<u32>,
+
+    /// Optional expected source schema version. When set, migration
+    /// refuses to proceed unless the DB's observed marker matches.
+    /// Use to guard against running against a DB already stamped by a
+    /// different build.
+    #[arg(long, value_name = "VERSION", requires = "migrate_to")]
+    migrate_from: Option<u32>,
+
+    /// Print the migration plan but do not mutate the DB. Useful to
+    /// verify what will happen before stamping a production DB.
+    #[arg(long, requires = "migrate_to")]
+    migrate_dry_run: bool,
+
+    /// Explicit path to the storage RocksDB directory. Defaults to
+    /// `<data-dir>/storage` — the layout the running node uses.
+    #[arg(long, value_name = "PATH", requires = "migrate_to")]
+    migrate_db: Option<String>,
 }
 
 #[tokio::main]
@@ -592,6 +619,27 @@ async fn main() -> anyhow::Result<()> {
     //   7. VPS$ misaka-node --validator --stake-signature <SIG> --data-dir ./data
     //
     // Solana private keys are NEVER needed on the VPS.
+    // ── Phase 2 Path X R6-a: offline schema migration ─────────────
+    //
+    // Early exit path — runs after config is loaded (so --data-dir and
+    // --migrate-db reflect the effective data directory) and before the
+    // rest of node startup. On success the process returns Ok(()); on
+    // any inconsistency it propagates the anyhow::Error to produce a
+    // non-zero exit code.
+    if let Some(to) = cli.migrate_to {
+        let db_path = match cli.migrate_db.as_deref() {
+            Some(p) => std::path::PathBuf::from(p),
+            None => crate::migrate::default_db_path(std::path::Path::new(&cli.data_dir)),
+        };
+        let args = crate::migrate::MigrateArgs {
+            to,
+            from: cli.migrate_from,
+            dry_run: cli.migrate_dry_run,
+            db_path,
+        };
+        return crate::migrate::run(&args);
+    }
+
     #[cfg(feature = "dag")]
     if cli.keygen_only {
         use misaka_crypto::validator_sig::generate_validator_keypair;
