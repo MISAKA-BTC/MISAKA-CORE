@@ -265,6 +265,53 @@ pub static ROUND_INTERVAL_MAX_MS: Lazy<IntGauge> = Lazy::new(|| {
 });
 
 // ═══════════════════════════════════════════════════════════════
+//  Phase P0 — Bootstrap / multi-seed observability
+// ═══════════════════════════════════════════════════════════════
+//
+// The seed list (`--seeds` / `[[seeds]]` in config) is the entry
+// point for any new node into the network. P0 surfaces three
+// metrics so operators can detect seed failures, PK mismatches,
+// and dial timeouts without grepping logs. See
+// `docs/design/phase_p0_multi_seed.md` + `docs/ops/seed-configuration.md`.
+
+/// P0: number of seeds configured at startup (CLI `--seeds` or
+/// `[[seeds]]` TOML entries). Set once at node boot; a drop to 0
+/// is operator error, not a runtime event.
+pub static BOOTSTRAP_SEEDS_CONFIGURED: Lazy<IntGauge> = Lazy::new(|| {
+    IntGauge::with_opts(Opts::new(
+        "misaka_bootstrap_seeds_configured",
+        "Number of seeds configured at node startup [Phase P0]",
+    ))
+    .unwrap()
+});
+
+/// P0: number of seeds with a currently-live handshake. Normal
+/// steady-state is `configured - 1` (self excluded on a seed node)
+/// or `configured` for a non-seed participant. Drops to 0 →
+/// network partition or all seeds down.
+pub static BOOTSTRAP_SEEDS_CONNECTED: Lazy<IntGauge> = Lazy::new(|| {
+    IntGauge::with_opts(Opts::new(
+        "misaka_bootstrap_seeds_connected",
+        "Number of seeds currently in live handshake state [Phase P0]",
+    ))
+    .unwrap()
+});
+
+/// P0: cumulative seed dial failures, unlabeled. For per-reason
+/// breakdown use structured FATAL log targets
+/// (`misaka::bootstrap`). Reasons: `timeout` / `refused` /
+/// `pk_mismatch` / `handshake` / `other`. A rising counter with
+/// `BOOTSTRAP_SEEDS_CONNECTED` unchanged = intermittent network
+/// flap; with connected dropping = real seed outage.
+pub static BOOTSTRAP_SEED_DIAL_FAILURES_TOTAL: Lazy<IntCounter> = Lazy::new(|| {
+    IntCounter::with_opts(Opts::new(
+        "misaka_bootstrap_seed_dial_failures_total",
+        "Total seed dial failures since node start [Phase P0]",
+    ))
+    .unwrap()
+});
+
+// ═══════════════════════════════════════════════════════════════
 //  Registration
 // ═══════════════════════════════════════════════════════════════
 
@@ -297,6 +344,10 @@ pub fn register_slo_metrics() {
     Lazy::force(&EPOCH_ADJUSTMENTS_TOTAL);
     Lazy::force(&ROUND_INTERVAL_MIN_MS);
     Lazy::force(&ROUND_INTERVAL_MAX_MS);
+    // Phase P0 — bootstrap observability.
+    Lazy::force(&BOOTSTRAP_SEEDS_CONFIGURED);
+    Lazy::force(&BOOTSTRAP_SEEDS_CONNECTED);
+    Lazy::force(&BOOTSTRAP_SEED_DIAL_FAILURES_TOTAL);
     Lazy::force(&BLOCKS_SUSPENDED);
     Lazy::force(&BLOCKS_UNSUSPENDED);
     Lazy::force(&COMMIT_LATENCY_HISTOGRAM);

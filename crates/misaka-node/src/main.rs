@@ -931,6 +931,13 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    // Phase P0 (2026-04-19): surface the seed configuration count
+    // via Prometheus so operators can detect seed list degradation
+    // (e.g. a restart with a shorter list than intended) without
+    // grepping logs. See docs/design/phase_p0_multi_seed.md §4.1.
+    misaka_dag::narwhal_dag::slo_metrics::BOOTSTRAP_SEEDS_CONFIGURED
+        .set(parsed_seeds.len() as i64);
+
     // ── MANDATORY: Config Validation ──
     {
         use config_validation::TestnetConfig;
