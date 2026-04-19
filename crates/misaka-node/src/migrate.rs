@@ -7,17 +7,19 @@
 //! # What this module does today
 //!
 //! It stamps (or verifies) the storage schema version marker introduced
-//! by Phase 2 Path X R5 (see `misaka-storage::schema_version`). It does
-//! **not** rewrite user data. The marker is the only piece of state
-//! that distinguishes v0.8.x DBs from v0.9.0 DBs in the
-//! current Path X scope:
+//! by Phase 2 Path X R5 (see `misaka-storage::schema_version`). It
+//! does **not** rewrite user data. The marker is the only piece of
+//! state that distinguishes schema versions:
 //!
 //! * v1 (`STORAGE_SCHEMA_VERSION_V088`) — pre-marker DBs written by
 //!   v0.8.x builds.
-//! * v2 (`STORAGE_SCHEMA_VERSION_V090`) — current build.
+//! * v2 (`STORAGE_SCHEMA_VERSION_V090`) — Phase 2 Path X layout.
+//! * v3 (`STORAGE_SCHEMA_VERSION_V091`) — Phase 3a layout, adds the
+//!   `narwhal_votes` + `narwhal_cert_mapping` CFs for Cert V2.
 //!
-//! A v0.8.x → v0.9.0 upgrade therefore amounts to "open the DB, stamp
-//! v2, close". That is exactly what this tool does.
+//! For v2 → v3 the tool opens the DB with every existing CF listed
+//! and `create_missing_column_families = true`, so the two new CFs
+//! are created atomically alongside the marker stamp.
 //!
 //! # What this module does *not* do (yet)
 //!
@@ -46,9 +48,9 @@
 //!
 //! * `--migrate-to` (required to trigger migration) — target schema
 //!   version. Must equal [`misaka_storage::CURRENT_STORAGE_SCHEMA_VERSION`];
-//!   the flag exists so that future builds with `_V091 = 3` still
-//!   accept `--migrate-to 2` for stamping through an intermediate
-//!   release.
+//!   each build only writes the marker for its own schema. To hop
+//!   from v1 → v3 the operator runs a v0.9.0 build for v1 → v2 first,
+//!   then a v0.9.1 build for v2 → v3.
 //! * `--migrate-from` (optional) — expected current DB version. If
 //!   set and the DB's actual marker is different, the tool refuses
 //!   to proceed (guards operators against running a v2 migration
@@ -67,6 +69,7 @@ use rocksdb::{Options, DB};
 use misaka_storage::{
     check_storage_schema_compatible, read_storage_schema_version, write_storage_schema_version,
     CURRENT_STORAGE_SCHEMA_VERSION, STORAGE_SCHEMA_VERSION_V088, STORAGE_SCHEMA_VERSION_V090,
+    STORAGE_SCHEMA_VERSION_V091,
 };
 
 /// Arguments consumed by [`run`]. Constructed from CLI flags in
@@ -237,10 +240,45 @@ fn read_marker(db_path: &Path) -> Result<Option<u32>> {
 }
 
 /// Open the DB read-write, write the marker, sync, close.
+///
+/// Handles any `to` version currently supported by `validate_target`.
+/// RocksDB requires every existing CF to be listed at open time; this
+/// function reads the on-disk CF list, unions with the target schema's
+/// expected CFs (so v2 → v3 can add `narwhal_votes` +
+/// `narwhal_cert_mapping` atomically with the marker stamp), then
+/// opens with `create_missing_column_families = true`.
 fn stamp_marker(db_path: &Path, to: u32) -> Result<()> {
     let mut opts = Options::default();
     opts.create_if_missing(false);
-    let db = DB::open(&opts, db_path)
+    opts.create_missing_column_families(true);
+
+    // Enumerate existing CFs on disk. On a fresh DB `list_cf` returns
+    // `["default"]` by RocksDB convention — so always include the
+    // default CF explicitly as a fallback.
+    let mut all: std::collections::BTreeSet<String> =
+        rocksdb::DB::list_cf(&Options::default(), db_path)
+            .unwrap_or_else(|_| vec!["default".to_string()])
+            .into_iter()
+            .collect();
+    if !all.contains("default") {
+        all.insert("default".to_string());
+    }
+
+    // Add the CFs introduced by each target schema version. This is
+    // the per-version "schema delta" list — add an arm here when
+    // `STORAGE_SCHEMA_VERSION_Vxxx` is introduced.
+    if to >= STORAGE_SCHEMA_VERSION_V091 {
+        // Phase 3a A.1 + A.5 — Cert V2 CFs.
+        all.insert("narwhal_votes".to_string());
+        all.insert("narwhal_cert_mapping".to_string());
+    }
+
+    let descriptors: Vec<rocksdb::ColumnFamilyDescriptor> = all
+        .into_iter()
+        .map(|name| rocksdb::ColumnFamilyDescriptor::new(name, Options::default()))
+        .collect();
+
+    let db = rocksdb::DB::open_cf_descriptors(&opts, db_path, descriptors)
         .with_context(|| format!("open DB read-write at {}", db_path.display()))?;
     write_storage_schema_version(&db, to)
         .with_context(|| format!("write schema_version = {to}"))?;
@@ -434,5 +472,84 @@ mod tests {
             msg.to_ascii_lowercase().contains("does not exist"),
             "error should mention nonexistent path: {msg}"
         );
+    }
+
+    // ── A.6: v2 → v3 transition ──────────────────────────────────
+
+    /// Simulate a v2-era DB with existing narwhal CFs (minus the
+    /// Phase 3a additions), then migrate --to 3 and verify the two
+    /// new CFs are created and the marker is bumped.
+    #[test]
+    fn e2e_v2_to_v3_creates_new_cfs_and_stamps_marker() {
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("storage");
+
+        // Stage a "v2-ish" DB: create with some existing narwhal CFs
+        // but NOT the Phase 3a additions.
+        {
+            let mut opts = Options::default();
+            opts.create_if_missing(true);
+            opts.create_missing_column_families(true);
+            let v2_cfs: Vec<rocksdb::ColumnFamilyDescriptor> = [
+                "default",
+                "narwhal_blocks",
+                "narwhal_commits",
+                "narwhal_meta",
+            ]
+            .iter()
+            .map(|n| rocksdb::ColumnFamilyDescriptor::new(*n, Options::default()))
+            .collect();
+            let db = rocksdb::DB::open_cf_descriptors(&opts, &db_path, v2_cfs)
+                .expect("open staged v2 DB");
+            // Stamp v2 so the migrate tool sees it as the observed
+            // source.
+            write_storage_schema_version(&db, STORAGE_SCHEMA_VERSION_V090).unwrap();
+        }
+
+        // Now run migrate --to 3 (CURRENT).
+        let args = MigrateArgs {
+            to: CURRENT_STORAGE_SCHEMA_VERSION,
+            from: Some(STORAGE_SCHEMA_VERSION_V090),
+            dry_run: false,
+            db_path: db_path.clone(),
+        };
+        run(&args).expect("v2 → v3 migration should succeed");
+
+        // Post-migration, the marker is v3.
+        let v = read_marker(&db_path).expect("read marker").expect("some");
+        assert_eq!(v, STORAGE_SCHEMA_VERSION_V091);
+
+        // And the two new CFs exist.
+        let cfs = rocksdb::DB::list_cf(&Options::default(), &db_path).expect("list CFs");
+        assert!(
+            cfs.iter().any(|n| n == "narwhal_votes"),
+            "narwhal_votes CF was not created: {cfs:?}"
+        );
+        assert!(
+            cfs.iter().any(|n| n == "narwhal_cert_mapping"),
+            "narwhal_cert_mapping CF was not created: {cfs:?}"
+        );
+        // And the legacy v2 CFs are preserved.
+        assert!(cfs.iter().any(|n| n == "narwhal_blocks"));
+        assert!(cfs.iter().any(|n| n == "narwhal_commits"));
+    }
+
+    #[test]
+    fn e2e_v2_to_v3_is_idempotent() {
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("storage");
+        open_fresh_db(&db_path);
+
+        let args = MigrateArgs {
+            to: CURRENT_STORAGE_SCHEMA_VERSION,
+            from: None,
+            dry_run: false,
+            db_path: db_path.clone(),
+        };
+        run(&args).expect("first run");
+        run(&args).expect("second run is no-op");
+        // Marker is still v3 and CFs still present.
+        let v = read_marker(&db_path).expect("read").expect("some");
+        assert_eq!(v, CURRENT_STORAGE_SCHEMA_VERSION);
     }
 }

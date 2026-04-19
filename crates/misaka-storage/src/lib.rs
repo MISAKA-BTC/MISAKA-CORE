@@ -93,6 +93,7 @@ pub use schema_version::{
     read_schema_version as read_storage_schema_version,
     write_schema_version as write_storage_schema_version, SchemaVersionError,
     CURRENT_STORAGE_SCHEMA_VERSION, STORAGE_SCHEMA_VERSION_V088, STORAGE_SCHEMA_VERSION_V090,
+    STORAGE_SCHEMA_VERSION_V091,
 };
 pub use startup_integrity::{
     read_committed_state, verify_integrity as verify_startup_integrity_kaspa,

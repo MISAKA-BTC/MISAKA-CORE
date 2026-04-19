@@ -180,7 +180,7 @@ Not in this commit:
 Regression: `cargo test -p misaka-dag --lib` 481/481 (462 prior + 19).
 `cargo check --workspace --lib --bins` clean.
 
-### 5.4 Part B integration — proposer loop + metrics (this commit, 2026-04-19)
+### 5.4 Part B integration — proposer loop + metrics (64589df, 2026-04-19)
 
 Wires the Part B scheduler into `start_narwhal_node`'s proposer
 loop. Additive and opt-in: if either the scheduler config or the
@@ -263,6 +263,77 @@ is emergent from the pure logic (already tested in §5.3) plus the
 select! shape (covered by the `wait_until_next_round` async tests
 in §5.3). A 24 h smoke is still required to verify the adaptive
 cadence holds across real mempool fluctuations.
+
+### 5.5 Part A.4 — verify path (bc84de0, 2026-04-19)
+
+Pure `verify_cert_v2(&CertificateV2, voter_ids: &[[u8; 32]]) ->
+Result<(), VerifyError>` in `cert_v2.rs`.
+
+Checks, in order:
+1. `aggregation_slot` MUST be `None` (Phase 3a invariant).
+2. Scheme tag MUST be `CommitmentScheme::Blake3MerkleV1`
+   (exhaustive match; future tags force a compile-time update).
+3. `cert.vote_refs.voter_count` MUST equal `voter_ids.len()`.
+4. Recomputed merkle root from `voter_ids` MUST equal
+   `cert.vote_refs.root`.
+
+`VerifyError::{AggregationSlotNotYetAccepted, UnknownCommitmentScheme,
+VoterCountMismatch, RootMismatch}`. Pure function — no I/O.
+
+9 unit tests cover all four rejection paths + happy path +
+order-independence + empty-set edge case.
+
+### 5.6 Part A.5 — cert v1 ↔ v2 mapping CF (5d8e332, 2026-04-19)
+
+`NarwhalCf::CertMapping = "narwhal_cert_mapping"` (10th variant).
+Tuning: compression off, no BlobDB (32-byte value always fits LSM).
+
+`RocksDbConsensusStore`:
+- `put_cert_mapping(v1_digest, v2_digest)` — idempotent.
+- `get_cert_mapping_v1_to_v2(v1_digest) -> Result<Option<[u8; 32]>>`.
+  Ok(None) on miss; Err(Corrupted) on wrong length.
+
+v2 → v1 reverse lookup not shipped (future need — small CF, full
+scan acceptable as fallback). GC policy deferred; 32-byte values
+are cheap.
+
+6 unit tests cover CF registration, roundtrip, miss → None,
+idempotent rewrite, overwrite-with-different-v2 accepted, and CF
+isolation vs the `votes` CF.
+
+### 5.7 Part A.6 — migrate CLI v2 → v3 extension (this commit, 2026-04-19)
+
+- `misaka-storage::schema_version` — new const
+  `STORAGE_SCHEMA_VERSION_V091 = 3`;
+  `CURRENT_STORAGE_SCHEMA_VERSION` bumped to V091.
+  `constants_are_monotone_and_current_is_latest` test updated
+  to assert V090 < V091 and CURRENT == V091.
+- `misaka-storage::lib` — re-exports `STORAGE_SCHEMA_VERSION_V091`.
+- `misaka-node::migrate` — `stamp_marker` now:
+  1. Enumerates existing CFs via `DB::list_cf`.
+  2. Unions with the target schema's required CFs — for v3 that
+     adds `narwhal_votes` + `narwhal_cert_mapping`.
+  3. Opens with the full CF descriptor list and
+     `create_missing_column_families = true` so the new CFs are
+     created atomically alongside the marker write.
+- Module rustdoc updated: v3 row in the version table + "each
+  build writes only its own schema" note.
+
+CLI surface unchanged: `misaka-node --migrate-to 3` now stamps v3
+and creates the two new CFs on any DB that's at v2 or earlier.
+
+2 new e2e tests:
+- `e2e_v2_to_v3_creates_new_cfs_and_stamps_marker` — stages a
+  v2-era DB with some narwhal CFs, runs migrate, asserts the two
+  new CFs appear on disk and the marker bumps to 3.
+- `e2e_v2_to_v3_is_idempotent` — second `run()` is a no-op.
+
+All existing migrate tests continue to pass unchanged (they use
+`CURRENT_STORAGE_SCHEMA_VERSION` as `--to` rather than a
+hard-coded number, so they automatically retarget to v3).
+
+Regression: misaka-storage 109/109, misaka-node 196/196, misaka-dag
+496/496. `cargo check --workspace --lib --bins` clean.
 
 ## 6. Out of scope for this session
 
