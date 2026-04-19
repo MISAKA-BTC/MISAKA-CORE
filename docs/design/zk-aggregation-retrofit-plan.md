@@ -290,15 +290,31 @@ All steps assume the codebase's Phase 3a store layer is live
 and the Part B+C runtime integrations have landed (separate
 work from this doc). Each step is a standalone commit.
 
-### Step 1 — `ProofSystem::Plonky2V1 = 0x02`
+### Step 1 — `ProofSystem::Plonky2V1 = 0x02` — SHIPPED
 
-- Extend `crates/misaka-dag/src/narwhal_finality/cert_v2.rs`
-  `ProofSystem` enum. Persisted byte 0x02.
-- Add a constructor helper `AggregationProof::new_plonky2_v1(
-  proof, public_inputs)`.
-- `VerifyError::UnknownProofSystem` fires on unrecognised tag
-  (new arm).
-- Unit tests: roundtrip, tag stability.
+Shipped in this branch's Phase 3b first commit. Changes:
+
+- `crates/misaka-dag/src/narwhal_finality/cert_v2.rs` —
+  `ProofSystem::Plonky2V1 = 0x02` variant added. Rustdoc
+  specifies the phase gating: Phase 3a + Phase 3b Step 1 still
+  reject any cert with `aggregation_slot = Some(_)` regardless
+  of tag; Step 6+ activates real verification.
+- `AggregationProof::new_plonky2_v1(proof, public_inputs,
+  generated_at)` constructor. Does not validate contents —
+  that's the verifier's job in Step 6+.
+- `VerifyError::UnknownProofSystem { tag: u8 }` variant added
+  as *foreshadowing*. Won't fire in Step 1 because the
+  `AggregationSlotNotYetAccepted` arm still catches all
+  `Some(_)` cases before the tag is ever checked. Exists so the
+  error shape is stable across the Step 2-6 rollout.
+- 5 new unit tests: `proof_system_plonky2_v1_tag_is_two`,
+  `proof_system_variants_are_distinct_and_serde_stable`,
+  `aggregation_proof_new_plonky2_v1_constructor`,
+  `aggregation_proof_plonky2_v1_still_rejected_in_phase_3b_step1`
+  (pins the "still rejected" invariant explicitly so Step 6
+  has to delete this test by hand — catches accidental
+  invariant loss), `verify_error_unknown_proof_system_variant_exists`.
+- `cargo test -p misaka-dag --lib`: 524/524 pass (519 prior + 5).
 
 No consensus change, no circuit — just the type extension.
 

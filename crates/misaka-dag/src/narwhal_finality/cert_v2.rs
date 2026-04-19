@@ -220,15 +220,32 @@ impl VoteCommitment {
 
 /// Identifier of the proof system used in an [`AggregationProof`].
 ///
-/// Only `ReservedV1` is accepted in Phase 3a; any cert carrying a
-/// non-`None` `aggregation_slot` is rejected regardless of its
-/// contents. The variant exists so Phase 3b can drop in a real
-/// proof without shape change.
+/// Persisted on disk as a 1-byte tag. Variants are on-disk stable;
+/// add new ones, never renumber existing ones.
+///
+/// Phase-gating:
+///
+/// * [`ReservedV1`](Self::ReservedV1) — exists so Phase 3a can
+///   carry the `aggregation_slot: Option<AggregationProof>` field
+///   without yet accepting any proof. The verify path rejects any
+///   cert with `aggregation_slot = Some(_)` in Phase 3a,
+///   independent of system tag.
+/// * [`Plonky2V1`](Self::Plonky2V1) — Phase 3b Step 1 reserves the
+///   tag `0x02` for the Plonky2-based aggregation system described
+///   in `docs/design/zk-aggregation-retrofit-plan.md` §2.3. The
+///   verify path still rejects these in Phase 3b Step 1 because
+///   the circuits (Steps 3-5) haven't landed; the tag is reserved
+///   so that once the circuits land, the on-disk format is stable.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum ProofSystem {
     /// Reserved placeholder — no proof actually accepted in Phase 3a.
     ReservedV1 = 0x01,
+    /// Plonky2-based aggregation (Phase 3b primary recommendation
+    /// per `docs/design/zk-aggregation-retrofit-plan.md` §2.3).
+    /// Circuit implementation lands in Steps 3-5; this variant is
+    /// the tag reservation for the on-disk format.
+    Plonky2V1 = 0x02,
 }
 
 impl ProofSystem {
@@ -250,6 +267,28 @@ pub struct AggregationProof {
     /// Unix millis at which the proof was generated. Advisory only
     /// in Phase 3a (not consensus-binding).
     pub generated_at: u64,
+}
+
+impl AggregationProof {
+    /// Construct a Plonky2V1 [`AggregationProof`] (Phase 3b Step 1).
+    ///
+    /// Helper for callers that have already computed the Plonky2
+    /// proof bytes + public inputs. This constructor does not
+    /// validate the contents — that's the verifier's responsibility,
+    /// which in Phase 3b Step 1 still rejects the proof outright.
+    ///
+    /// `generated_at` is taken from the caller; use
+    /// `std::time::SystemTime::now()` or a deterministic clock
+    /// depending on the deployment context.
+    #[must_use]
+    pub fn new_plonky2_v1(proof: Vec<u8>, public_inputs: Vec<u8>, generated_at: u64) -> Self {
+        Self {
+            system: ProofSystem::Plonky2V1,
+            proof,
+            public_inputs,
+            generated_at,
+        }
+    }
 }
 
 // ─── CertificateV2 ────────────────────────────────────────────────
@@ -327,6 +366,16 @@ pub enum VerifyError {
     /// future build with a newer scheme.
     #[error("cert rejected: vote_refs.scheme tag {tag:#04x} not recognised by this build")]
     UnknownCommitmentScheme { tag: u8 },
+
+    /// The proof-system byte tag carried by
+    /// `aggregation_slot.system` is not one this build recognises.
+    /// Reserved for Phase 3b Step 6 onward — Phase 3a + Phase 3b
+    /// Step 1 reject any `aggregation_slot = Some(_)` at the
+    /// `AggregationSlotNotYetAccepted` arm *before* checking the
+    /// tag, so this variant does not fire today. It exists so the
+    /// `VerifyError` shape is stable across the Phase 3b rollout.
+    #[error("cert rejected: aggregation_slot.system tag {tag:#04x} not recognised by this build")]
+    UnknownProofSystem { tag: u8 },
 
     /// `voter_count` disagrees with `voter_ids.len()` supplied by
     /// the caller. Surfaces mis-framed input before it affects the
@@ -538,6 +587,83 @@ mod tests {
     #[test]
     fn proof_system_reserved_v1_tag() {
         assert_eq!(ProofSystem::ReservedV1.tag(), 0x01);
+    }
+
+    // ── Phase 3b Step 1: Plonky2V1 tag reservation ────────────────
+
+    #[test]
+    fn proof_system_plonky2_v1_tag_is_two() {
+        // On-disk stable: this must be 0x02 for the lifetime of the
+        // chain. Changing it orphans every persisted Phase 3b+
+        // aggregation proof.
+        assert_eq!(ProofSystem::Plonky2V1.tag(), 0x02);
+    }
+
+    #[test]
+    fn proof_system_variants_are_distinct_and_serde_stable() {
+        let r = ProofSystem::ReservedV1;
+        let p = ProofSystem::Plonky2V1;
+        assert_ne!(r.tag(), p.tag());
+        // Serde roundtrip for both variants.
+        for s in [r, p] {
+            let j = serde_json::to_string(&s).unwrap();
+            let back: ProofSystem = serde_json::from_str(&j).unwrap();
+            assert_eq!(back, s);
+        }
+    }
+
+    #[test]
+    fn aggregation_proof_new_plonky2_v1_constructor() {
+        let p = AggregationProof::new_plonky2_v1(
+            vec![0xDE, 0xAD, 0xBE, 0xEF],
+            vec![0xCA, 0xFE],
+            1_700_000_000_000,
+        );
+        assert_eq!(p.system, ProofSystem::Plonky2V1);
+        assert_eq!(p.proof, vec![0xDE, 0xAD, 0xBE, 0xEF]);
+        assert_eq!(p.public_inputs, vec![0xCA, 0xFE]);
+        assert_eq!(p.generated_at, 1_700_000_000_000);
+    }
+
+    #[test]
+    fn aggregation_proof_plonky2_v1_still_rejected_in_phase_3b_step1() {
+        // Phase 3a invariant: any aggregation_slot = Some(_) is
+        // rejected regardless of system tag. Step 1 reserves the
+        // Plonky2V1 tag but does NOT yet accept the proof; the
+        // verifier still fires AggregationSlotNotYetAccepted.
+        // This test pins that behaviour so future circuit work
+        // that flips the invariant has to delete this test
+        // deliberately rather than by accident.
+        let voters = [voter(0x01), voter(0x02)];
+        let cert = CertificateV2 {
+            header: CheckpointDigest([0xAB; 32]),
+            vote_refs: VoteCommitment::with_blake3(&voters, vec![0b11]),
+            epoch: 1,
+            aggregation_slot: Some(AggregationProof::new_plonky2_v1(
+                vec![0x01, 0x02, 0x03],
+                vec![0x04, 0x05],
+                1_700_000_000_000,
+            )),
+        };
+        let err = verify_cert_v2(&cert, &voters).expect_err("must reject in Step 1");
+        match err {
+            VerifyError::AggregationSlotNotYetAccepted { system_tag } => {
+                // The error carries the tag so operators can
+                // distinguish ReservedV1 from Plonky2V1 rejections.
+                assert_eq!(system_tag, ProofSystem::Plonky2V1.tag());
+            }
+            other => panic!("expected AggregationSlotNotYetAccepted, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn verify_error_unknown_proof_system_variant_exists() {
+        // `VerifyError::UnknownProofSystem { tag }` is reserved for
+        // Step 6+; constructing it confirms the variant shape is
+        // stable and the Display message renders.
+        let e = VerifyError::UnknownProofSystem { tag: 0xFE };
+        let msg = format!("{e}");
+        assert!(msg.contains("0xfe"), "error should embed the tag: {msg}");
     }
 
     // ── CertificateV2 digest ──────────────────────────────────────
