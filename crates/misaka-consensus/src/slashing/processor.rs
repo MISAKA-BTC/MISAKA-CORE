@@ -315,6 +315,7 @@ mod tests {
         Arc<ReputationTracker>,
         SlashingProcessor,
     ) {
+        #[allow(deprecated)]
         let staking = Arc::new(RwLock::new(StakingRegistry::new(zero_cooldown_config())));
         let vsys = Arc::new(RwLock::new(ValidatorSystemV2::new(
             ValidatorSystemConfig::default(),
@@ -332,6 +333,7 @@ mod tests {
     ) {
         // Default testnet cooldown = 1000 epochs — used by the cooldown
         // skip test.
+        #[allow(deprecated)]
         let staking = Arc::new(RwLock::new(StakingRegistry::new(StakingConfig::testnet())));
         let vsys = Arc::new(RwLock::new(ValidatorSystemV2::new(
             ValidatorSystemConfig::default(),

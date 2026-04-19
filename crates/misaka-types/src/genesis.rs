@@ -122,6 +122,12 @@ pub fn compute_genesis_hash(chain_id: u32, committee_pks: &[Vec<u8>]) -> [u8; 32
 mod tests {
     use super::*;
 
+    // These tests exercise the deprecated `compute_genesis_hash`
+    // intentionally — they pin its byte-for-byte semantics so the
+    // deprecated function stays stable for any historical caller
+    // still linking against it during the v1.0 migration window.
+    // New callers MUST use `misaka_genesis_builder::Genesis::hash()`.
+    #[allow(deprecated)]
     #[test]
     fn genesis_hash_deterministic() {
         let pks = vec![vec![0xAA; 1952], vec![0xBB; 1952]];
@@ -130,12 +136,14 @@ mod tests {
         assert_eq!(h1, h2);
     }
 
+    #[allow(deprecated)]
     #[test]
     fn genesis_hash_chain_id_separation() {
         let pks = vec![vec![0xAA; 1952]];
         assert_ne!(compute_genesis_hash(1, &pks), compute_genesis_hash(2, &pks));
     }
 
+    #[allow(deprecated)]
     #[test]
     fn genesis_hash_pk_order_matters() {
         let pks_a = vec![vec![0xAA; 1952], vec![0xBB; 1952]];

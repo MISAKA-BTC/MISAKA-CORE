@@ -15,6 +15,13 @@ dag = ["misaka-dag", "misaka-dag/rocksdb", "misaka-mempool/dag"]
 # GhostDAG compatibility layer (legacy — being phased out)
 # Legacy feature alias retained for older builds that still reference it.
 experimental_dag = ["dag"]
+# Placeholder for the historical `ghostdag-compat` cfg guarded by
+# `#[cfg(feature = "ghostdag-compat")]` in main.rs. The feature
+# was removed in Phase 2 but the cfg checks remain (dead code
+# paths). Declaring it here suppresses `unexpected_cfgs` under
+# `-D warnings`. Safe to delete when all `cfg(feature =
+# "ghostdag-compat")` blocks in main.rs are pruned.
+ghostdag-compat = []
 # REMOVED: Q-DAG-CT — deprecated in v1.0.
 # ═══ Dev-only features (NEVER enable in production) ═══
 swagger-cdn = []
