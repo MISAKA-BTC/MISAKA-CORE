@@ -90,27 +90,74 @@ MISAKA:cert_v2:digest:v1 ||
 
 **Explicitly NOT included**: `aggregation_slot`. Rationale per Prompt B: a later hardfork may retrofit a proof into existing certificates without breaking every DAG reference that cites them by digest. If the proof contents were inside the digest, retrofit would require re-signing every historical cert's downstream references.
 
-## 5. Out of scope for this session
+## 5. Progress log
+
+### 5.1 Foundation — 9a88656 (2026-04-19 early)
+
+Cert V2 types + design doc (this file). See commit for details.
+
+### 5.2 Part A.1-A.3 — this commit (2026-04-19 later)
+
+- **A.1 — `votes` CF**: added `NarwhalCf::Votes = "narwhal_votes"`
+  variant. CF descriptor in `open_with_sync`: compression off +
+  BlobDB with `min_blob_size = 1024`. `cf_votes()` accessor +
+  `CF_VOTES` const. `NarwhalCf::ALL` updated to 9 variants; the
+  exhaustiveness test's `EXPECTED_COUNT` bumped accordingly.
+- **A.2 — write path**: `RocksDbConsensusStore::put_cert_v2_votes(
+  cert_digest, &VoteCommitment, &Option<AggregationProof>)`.
+  Serde-JSON encoding for day-1 consistency with the other narwhal
+  value encodings (borsh migration deferred — needs manual impls to
+  preserve `#[repr(u8)]` tags on `CommitmentScheme` / `ProofSystem`).
+  Intentionally accepts `aggregation_slot = Some(_)` at the store
+  layer — the verify path (not yet wired) owns the Phase 3a "reject
+  Some" invariant.
+- **A.3 — read path**: `get_cert_v2_votes(cert_digest) ->
+  Result<Option<(VoteCommitment, Option<AggregationProof>)>, _>`.
+  Returns `Ok(None)` on missing key; propagates serde errors.
+- 7 new unit tests in `rocksdb_store::tests`:
+  `a1_votes_cf_is_registered_on_open`,
+  `a2_a3_put_then_get_roundtrips_without_agg`,
+  `a2_a3_put_then_get_roundtrips_with_agg`,
+  `a3_get_on_missing_key_returns_none`,
+  `a2_put_overwrites_previous_value`,
+  `a1_write_to_votes_does_not_affect_tx_index`,
+  `a3_roundtrip_preserves_scheme_tag`.
+- 1 new assertion in `columns::tests::names_match_pre_refactor_literals`
+  and 1 update to `all_is_exhaustive_and_unique::EXPECTED_COUNT`.
+
+Totals: `cargo test -p misaka-dag --lib` 462/462 (455 prior + 7).
+`cargo check --workspace --lib --bins` clean.
+
+## 6. Out of scope for this session
 
 Deferred to follow-up commits:
 
-- **Prompt A write/read path**: new `CF "votes"` in the narwhal consensus RocksDB, with ZSTD disabled + BlobDB min=1024. Requires extending `narwhal_dag::columns::NarwhalCf` and the descriptor slice in `rocksdb_store::open_with_sync`.
-- **Cert v1 ↔ v2 mapping CF** for one-epoch compatibility.
-- **Offline migration `misaka-node migrate --from 2 --to 3`**: extends the existing R6-a migrate CLI.
-- **Adaptive round rate** (Prompt A Part B): new `RoundScheduler`, `next_round_interval` linear interp, `tokio::select!` on sleep vs mempool.
-- **Epoch-boundary config adjustment** (Prompt A Part C): `adjust_round_config` deterministic from previous-epoch stats.
-- **ZK-aggregation retrofit plan**: `docs/design/zk-aggregation-retrofit-plan.md` (Prompt B final item).
-- **7-day smoke**: deploy after the above lands. Prereq is also Phase 2's pending 24h smoke.
+- **A.4 — verify path**: reject any `CertificateV2` with
+  `aggregation_slot = Some(_)` and (later) verify merkle root against
+  the persisted voters list.
+- **A.5 — cert v1 ↔ v2 mapping CF** for one-epoch compatibility.
+- **A.6 — migrate `--from 2 --to 3`**: extends the R6-a CLI to stage
+  v2 stubs for every existing finalized cert.
+- **Adaptive round rate** (Prompt A Part B): new `RoundScheduler`,
+  `next_round_interval` linear interp, `tokio::select!` on sleep vs
+  mempool.
+- **Epoch-boundary config adjustment** (Prompt A Part C):
+  `adjust_round_config` deterministic from previous-epoch stats.
+- **ZK-aggregation retrofit plan**:
+  `docs/design/zk-aggregation-retrofit-plan.md` (Prompt B final item).
+- **7-day smoke**: deploy after the above lands. Prereq is also
+  Phase 2's pending 24h smoke.
 
-All of the above reference this design doc so the reconciliation is stable across sessions.
+All of the above reference this design doc so the reconciliation is
+stable across sessions.
 
-## 6. Hard boundaries (unchanged from memory memo)
+## 7. Hard boundaries (unchanged from memory memo)
 
 - Phase 3a = **storage layer only**. Wire stays V1 compatible. No hardfork.
 - Phase 3b (hardfork, wire V2) = separate work, NOT in Phase 3a scope.
 - No actual ZK proof verification in Phase 3a; `ProofSystem::ReservedV1` only.
 
-## 7. Verification plan (when full Phase 3a lands)
+## 8. Verification plan (when full Phase 3a lands)
 
 - `cargo test -p misaka-dag` passes all of the new cert_v2 tests.
 - Every round-trip: encode(cert) → decode → re-encode yields byte-identical output.

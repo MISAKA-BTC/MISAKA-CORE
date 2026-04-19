@@ -44,6 +44,28 @@ pub enum NarwhalCf {
     TxIndex,
     /// Address → tx-hash prefix index (uses a fixed-64 prefix extractor).
     AddrIndex,
+    /// Phase 3a A.1: Certificate V2 vote commitments.
+    ///
+    /// Key: cert digest (32 bytes — `CheckpointDigest` of the
+    /// `CertificateV2` per its `digest()` method).
+    /// Value: serde-JSON-serialised `(VoteCommitment,
+    /// Option<AggregationProof>)` tuple. JSON is used for day-1
+    /// consistency with the other narwhal value encodings
+    /// (`Block`, `CommittedSubDag` both already use serde_json);
+    /// a borsh migration is straightforward but needs manual
+    /// `BorshSerialize` impls that preserve `#[repr(u8)]` tags,
+    /// deferred to a follow-up session. The cert header/epoch are
+    /// not stored here — they live in `Commits` alongside the rest
+    /// of the subdag. This CF externalises signatures + commitment
+    /// data so that the hot `Commits` CF stays compact.
+    ///
+    /// Tuning:
+    /// * compression off (the payload is small, already hash-compressed,
+    ///   and ZSTD overhead outweighs gains),
+    /// * BlobDB threshold = 1024 bytes (any vote commitment whose
+    ///   serialised form exceeds this is written to a `*.blob` file
+    ///   instead of the LSM, matching the v0.8.9 BlobDB rationale).
+    Votes,
 }
 
 impl NarwhalCf {
@@ -58,6 +80,7 @@ impl NarwhalCf {
         Self::CommittedTxFilter,
         Self::TxIndex,
         Self::AddrIndex,
+        Self::Votes,
     ];
 
     /// The canonical RocksDB column-family name.
@@ -74,6 +97,7 @@ impl NarwhalCf {
             Self::CommittedTxFilter => "narwhal_committed_tx_filter",
             Self::TxIndex => "narwhal_tx_index",
             Self::AddrIndex => "narwhal_addr_index",
+            Self::Votes => "narwhal_votes",
         }
     }
 }
@@ -94,7 +118,7 @@ mod tests {
     fn all_is_exhaustive_and_unique() {
         // Update this when adding a CF; the assertion fails early
         // rather than surfacing as "column family missing" at DB open.
-        const EXPECTED_COUNT: usize = 8;
+        const EXPECTED_COUNT: usize = 9;
         assert_eq!(
             NarwhalCf::ALL.len(),
             EXPECTED_COUNT,
@@ -130,6 +154,7 @@ mod tests {
         );
         assert_eq!(NarwhalCf::TxIndex.name(), "narwhal_tx_index");
         assert_eq!(NarwhalCf::AddrIndex.name(), "narwhal_addr_index");
+        assert_eq!(NarwhalCf::Votes.name(), "narwhal_votes");
     }
 
     /// Every variant's name starts with the `narwhal_` prefix — this

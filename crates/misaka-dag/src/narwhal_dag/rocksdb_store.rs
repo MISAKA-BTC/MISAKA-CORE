@@ -51,6 +51,9 @@ const CF_COMMITTED_TX_FILTER: &str = NarwhalCf::CommittedTxFilter.name();
 const CF_TX_INDEX: &str = NarwhalCf::TxIndex.name();
 #[cfg(feature = "rocksdb")]
 const CF_ADDR_INDEX: &str = NarwhalCf::AddrIndex.name();
+/// Phase 3a A.1: Certificate V2 vote commitments + optional
+/// aggregation proofs. See `columns::NarwhalCf::Votes` rustdoc.
+const CF_VOTES: &str = NarwhalCf::Votes.name();
 
 // ─── Meta keys ───────────────────────────────────────────────
 #[cfg(feature = "rocksdb")]
@@ -135,6 +138,22 @@ impl RocksDbConsensusStore {
             o.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(64));
             o
         };
+        // Phase 3a A.1: `votes` CF tuning.
+        // - compression = None: payload is small (≤ a few hundred bytes
+        //   per cert), already high-entropy (hash + bitvec), ZSTD cost
+        //   dominates gain.
+        // - BlobDB with min_blob_size = 1024: any cert whose serialised
+        //   (VoteCommitment, Option<AggregationProof>) exceeds 1 KiB is
+        //   redirected to a `*.blob` file. Future AggregationProof
+        //   payloads (real ZK proofs) will easily exceed this. Below
+        //   1 KiB stays in the LSM for point-read speed.
+        let votes_opts = {
+            let mut o = rocksdb::Options::default();
+            o.set_compression_type(rocksdb::DBCompressionType::None);
+            o.set_enable_blob_files(true);
+            o.set_min_blob_size(1024);
+            o
+        };
 
         let cfs = vec![
             rocksdb::ColumnFamilyDescriptor::new(CF_BLOCKS, block_opts),
@@ -145,6 +164,7 @@ impl RocksDbConsensusStore {
             rocksdb::ColumnFamilyDescriptor::new(CF_COMMITTED_TX_FILTER, tx_filter_opts),
             rocksdb::ColumnFamilyDescriptor::new(CF_TX_INDEX, tx_index_opts),
             rocksdb::ColumnFamilyDescriptor::new(CF_ADDR_INDEX, addr_index_opts),
+            rocksdb::ColumnFamilyDescriptor::new(CF_VOTES, votes_opts),
         ];
 
         let db = rocksdb::DB::open_cf_descriptors(&opts, path, cfs)
@@ -230,6 +250,15 @@ impl RocksDbConsensusStore {
         })
     }
 
+    fn cf_votes(&self) -> Result<&rocksdb::ColumnFamily, StoreError> {
+        self.db.cf_handle(CF_VOTES).ok_or_else(|| {
+            StoreError::Corrupted(format!(
+                "column family '{}' missing — DB may be corrupted",
+                CF_VOTES
+            ))
+        })
+    }
+
     // ─── TX index persistence ─────────────────────────────────
 
     /// Store a committed transaction detail (JSON bytes).
@@ -261,6 +290,68 @@ impl RocksDbConsensusStore {
         self.db
             .get_cf(self.cf_tx_index()?, tx_hash)
             .map_err(|e| StoreError::Corrupted(format!("RocksDB get tx_index failed: {}", e)))
+    }
+
+    // ─── Phase 3a A.2 / A.3: Certificate V2 vote persistence ─────
+
+    /// Phase 3a A.2 — persist a [`CertificateV2`]'s vote commitment +
+    /// optional aggregation proof under the certificate's digest.
+    ///
+    /// Key: `cert_digest.0` (32 bytes — the return value of
+    /// `CertificateV2::digest()`).
+    /// Value: serde-JSON of `(VoteCommitment, Option<AggregationProof>)`.
+    ///
+    /// Stored in the `votes` CF tuned with compression off + BlobDB
+    /// (min_blob_size = 1024) so large aggregation proofs end up in
+    /// `*.blob` files rather than the LSM. See
+    /// `columns::NarwhalCf::Votes` rustdoc.
+    ///
+    /// **Note**: this method does NOT enforce the Phase 3a invariant
+    /// that `aggregation_slot` must be `None`. The verify path owns
+    /// that check. The store intentionally accepts any shape so that
+    /// a future Phase 3b verify-off migration tool can stage proofs
+    /// before enabling them in consensus.
+    pub fn put_cert_v2_votes(
+        &self,
+        cert_digest: &[u8; 32],
+        vote_commitment: &crate::narwhal_finality::cert_v2::VoteCommitment,
+        aggregation_slot: &Option<crate::narwhal_finality::cert_v2::AggregationProof>,
+    ) -> Result<(), StoreError> {
+        let payload = (vote_commitment, aggregation_slot);
+        let bytes = serde_json::to_vec(&payload)?;
+        self.db
+            .put_cf(self.cf_votes()?, cert_digest, bytes)
+            .map_err(|e| StoreError::Corrupted(format!("RocksDB put votes failed: {}", e)))
+    }
+
+    /// Phase 3a A.3 — read back a persisted vote commitment + optional
+    /// aggregation proof for a cert.
+    ///
+    /// Returns `Ok(None)` when no record exists (fresh cert or
+    /// pre-A.2-write-path DB). Returns `Err(StoreError::Corrupted)` on
+    /// underlying RocksDB failure, and propagates serde errors through
+    /// the pre-existing `From<serde_json::Error> for StoreError` path.
+    pub fn get_cert_v2_votes(
+        &self,
+        cert_digest: &[u8; 32],
+    ) -> Result<
+        Option<(
+            crate::narwhal_finality::cert_v2::VoteCommitment,
+            Option<crate::narwhal_finality::cert_v2::AggregationProof>,
+        )>,
+        StoreError,
+    > {
+        match self.db.get_cf(self.cf_votes()?, cert_digest) {
+            Ok(None) => Ok(None),
+            Ok(Some(bytes)) => {
+                let (vc, agg) = serde_json::from_slice(&bytes)?;
+                Ok(Some((vc, agg)))
+            }
+            Err(e) => Err(StoreError::Corrupted(format!(
+                "RocksDB get votes failed: {}",
+                e
+            ))),
+        }
     }
 
     /// Store an address index entry. Key format: `{address_hex}:{height_be8}:{tx_hash_hex}`.
@@ -568,5 +659,148 @@ impl ConsensusStore for RocksDbConsensusStore {
         self.set_gc_round(round)?;
 
         Ok(deleted)
+    }
+}
+
+// ─── Tests ────────────────────────────────────────────────────────
+
+#[cfg(all(test, feature = "rocksdb"))]
+mod tests {
+    use super::*;
+    use crate::narwhal_finality::cert_v2::{
+        AggregationProof, CommitmentScheme, ProofSystem, VoteCommitment,
+    };
+    use tempfile::TempDir;
+
+    fn open_tmp() -> (TempDir, RocksDbConsensusStore) {
+        let dir = TempDir::new().expect("tmpdir");
+        // sync_writes=false: test-only, OOM/IO-cheap.
+        let store =
+            RocksDbConsensusStore::open_with_sync(dir.path(), false).expect("open consensus store");
+        (dir, store)
+    }
+
+    fn sample_vc() -> VoteCommitment {
+        let ids = [[0x01u8; 32], [0x02u8; 32], [0x03u8; 32]];
+        VoteCommitment::with_blake3(&ids, vec![0b0000_0111])
+    }
+
+    fn sample_agg() -> AggregationProof {
+        AggregationProof {
+            system: ProofSystem::ReservedV1,
+            proof: vec![0xAA, 0xBB, 0xCC],
+            public_inputs: vec![0xDE, 0xAD],
+            generated_at: 1_700_000_000_000,
+        }
+    }
+
+    // ── A.1: CF registration ──────────────────────────────────────
+
+    #[test]
+    fn a1_votes_cf_is_registered_on_open() {
+        // Opening the store with the new Votes CF listed in the
+        // descriptor slice must succeed. If the ALL list and the cf
+        // descriptors drift, this test panics.
+        let (_d, store) = open_tmp();
+        // Can get a handle.
+        store.cf_votes().expect("votes CF accessible");
+    }
+
+    // ── A.2/A.3: write / read roundtrip ──────────────────────────
+
+    #[test]
+    fn a2_a3_put_then_get_roundtrips_without_agg() {
+        let (_d, store) = open_tmp();
+        let digest = [0xA0u8; 32];
+        let vc = sample_vc();
+        store.put_cert_v2_votes(&digest, &vc, &None).expect("put");
+        let got = store
+            .get_cert_v2_votes(&digest)
+            .expect("get")
+            .expect("some");
+        assert_eq!(got.0, vc);
+        assert!(got.1.is_none());
+    }
+
+    #[test]
+    fn a2_a3_put_then_get_roundtrips_with_agg() {
+        let (_d, store) = open_tmp();
+        let digest = [0xA1u8; 32];
+        let vc = sample_vc();
+        let agg = sample_agg();
+        store
+            .put_cert_v2_votes(&digest, &vc, &Some(agg.clone()))
+            .expect("put");
+        let got = store
+            .get_cert_v2_votes(&digest)
+            .expect("get")
+            .expect("some");
+        assert_eq!(got.0, vc);
+        assert_eq!(got.1, Some(agg));
+    }
+
+    // ── A.3: fresh read returns None ─────────────────────────────
+
+    #[test]
+    fn a3_get_on_missing_key_returns_none() {
+        let (_d, store) = open_tmp();
+        let got = store
+            .get_cert_v2_votes(&[0xFFu8; 32])
+            .expect("get returns Ok(None) on missing key");
+        assert!(got.is_none());
+    }
+
+    // ── A.2: overwrite replaces previous value ───────────────────
+
+    #[test]
+    fn a2_put_overwrites_previous_value() {
+        let (_d, store) = open_tmp();
+        let digest = [0xA2u8; 32];
+        let vc1 = sample_vc();
+        let vc2 = VoteCommitment::with_blake3(&[[0x09u8; 32]], vec![0b1]);
+        store
+            .put_cert_v2_votes(&digest, &vc1, &None)
+            .expect("put 1");
+        store
+            .put_cert_v2_votes(&digest, &vc2, &None)
+            .expect("put 2");
+        let got = store
+            .get_cert_v2_votes(&digest)
+            .expect("get")
+            .expect("some");
+        assert_eq!(got.0, vc2);
+    }
+
+    // ── A.1: independence from other CFs ─────────────────────────
+
+    #[test]
+    fn a1_write_to_votes_does_not_affect_tx_index() {
+        let (_d, store) = open_tmp();
+        let hash = [0xB0u8; 32];
+        // Write to tx_index (existing CF).
+        store.put_tx_detail(&hash, b"original").expect("put tx");
+        // Write to votes under the same key bytes.
+        store
+            .put_cert_v2_votes(&hash, &sample_vc(), &None)
+            .expect("put votes");
+        // Original tx_index value is preserved.
+        let got = store.get_tx_detail(&hash).expect("get tx").expect("some");
+        assert_eq!(got, b"original");
+    }
+
+    // ── Scheme tag preserved through roundtrip ───────────────────
+
+    #[test]
+    fn a3_roundtrip_preserves_scheme_tag() {
+        let (_d, store) = open_tmp();
+        let digest = [0xA3u8; 32];
+        let vc = sample_vc();
+        store.put_cert_v2_votes(&digest, &vc, &None).expect("put");
+        let got = store
+            .get_cert_v2_votes(&digest)
+            .expect("get")
+            .expect("some");
+        assert_eq!(got.0.scheme, CommitmentScheme::Blake3MerkleV1);
+        assert_eq!(got.0.scheme.tag(), 0x01);
     }
 }
