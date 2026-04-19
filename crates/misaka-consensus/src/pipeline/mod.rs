@@ -11,10 +11,11 @@
 // Phase 2c-B D2: body_processor deleted (replaced by utxo_executor)
 pub mod header_processor;
 // Phase 2 Path X R6-b Option W (2026-04-19): Narwhal-native replacement
-// for `pruning_processor`. See
-// `docs/design/v090_phase2_tail_work.md` §3 for the reasoning.
+// for the GhostDAG-bound pruning_processor, which was deleted in the
+// dead-code cleanup commit. See
+// `docs/design/v090_phase2_tail_work.md` §3 +
+// `docs/design/v090_dead_code_cleanup.md` Plan A.
 pub mod narwhal_pruning_processor;
-pub mod pruning_processor;
 pub mod virtual_processor;
 
 use std::sync::atomic::AtomicU64;
