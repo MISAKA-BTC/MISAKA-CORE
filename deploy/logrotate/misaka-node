@@ -1,0 +1,35 @@
+# MISAKA node logrotate config (v0.8.9 BLOCKER M / Phase 1).
+#
+# Install: sudo cp deploy/logrotate/misaka-node /etc/logrotate.d/misaka
+#          sudo chmod 644 /etc/logrotate.d/misaka
+#
+# Dry run: sudo logrotate -d /etc/logrotate.d/misaka
+# Force  : sudo logrotate -f /etc/logrotate.d/misaka
+#
+# Baseline (pre-RUST_LOG tuning): ~91 MB/day/node of raw node.log output.
+# Target after RUST_LOG tuning:   < 10 MB/day/node raw, < 1 MB/day compressed.
+#
+# `copytruncate` avoids restart:  RocksDB holds the log fd; we truncate
+# after copy so the running process keeps writing to the same inode.
+# `delaycompress` keeps "yesterday's" log uncompressed so support staff
+# grep without unzstd. Older rotations (> 2 days) compress with zstd -19.
+
+/var/log/misaka/*.log
+/home/ubuntu/node.log
+/tmp/cluster-4/node27.log
+{
+    daily
+    rotate 7
+    compress
+    compresscmd /usr/bin/zstd
+    compressext .zst
+    compressoptions "-19 -T0"
+    uncompresscmd /usr/bin/unzstd
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+    maxsize 500M
+    dateext
+    dateformat -%Y%m%d-%H%M%S
+}

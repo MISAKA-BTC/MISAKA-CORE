@@ -68,6 +68,17 @@ pub enum ConsensusMessage {
     /// Hot-reload the committee without restarting the node.
     /// Triggered by `/api/register_validator` or `/api/deregister_validator`.
     ReloadCommittee(Committee),
+    /// BLOCKER D: drain the in-process `SlotEquivocationLedger`'s
+    /// append-only evidence list.
+    ///
+    /// The node's epoch-boundary hook uses this to turn detected
+    /// equivocations into `StakingRegistry::slash(Severe)` calls.
+    /// The ledger itself is append-only, so duplicate draining is
+    /// safe: the staking registry's `last_slash_epoch` idempotency
+    /// guard filters out already-applied slashes.
+    DrainEvidence {
+        reply: oneshot::Sender<Vec<super::slot_equivocation_ledger::SlotEquivocationEvidence>>,
+    },
 }
 
 /// Consensus status snapshot.
@@ -452,6 +463,17 @@ impl ConsensusRuntime {
                         Some(ConsensusMessage::ReloadCommittee(new_committee)) => {
                             self.reload_committee(new_committee);
                         }
+                        Some(ConsensusMessage::DrainEvidence { reply }) => {
+                            // BLOCKER D: hand the caller a snapshot of every
+                            // piece of equivocation evidence currently known
+                            // to the in-process ledger. The ledger is
+                            // append-only, so draining is read-only here; the
+                            // node-side slashing code uses
+                            // `StakingRegistry::last_slash_epoch` for
+                            // idempotency across draws.
+                            let evidence = self.core.ledger_mut().evidence().to_vec();
+                            let _ = reply.send(evidence);
+                        }
                         Some(ConsensusMessage::Shutdown) | None => {
                             info!("Consensus runtime shutting down");
                             self.flush_to_store();
@@ -808,6 +830,48 @@ mod tests {
 
         // Verify metrics were updated
         assert!(ConsensusMetrics::get(&metrics.blocks_proposed) >= 1);
+
+        msg_tx.try_send(ConsensusMessage::Shutdown).unwrap();
+        handle.await.unwrap();
+    }
+
+    // ─── BLOCKER D: DrainEvidence round-trip ────────────────────────────
+    //
+    // Pins the contract of the `DrainEvidence` variant added in BLOCKER D:
+    // * On an empty ledger the reply is an empty Vec (never Err, never
+    //   blocks the sender).
+    // * The reply type is `Vec<SlotEquivocationEvidence>` — the runtime
+    //   hands the caller owned copies, it does NOT drain / clear the
+    //   ledger (evidence is append-only).
+
+    #[tokio::test]
+    async fn blocker_d_drain_evidence_on_empty_ledger_returns_empty_vec() {
+        let config = test_config(4);
+        let signer: Arc<dyn BlockSigner> = Arc::new(MlDsa65TestSigner::generate());
+        let (msg_tx, _commit_rx, _block_rx, _metrics, _bp, handle) =
+            spawn_consensus_runtime(config, signer, None, TestValidatorSet::chain_ctx());
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        msg_tx
+            .try_send(ConsensusMessage::DrainEvidence { reply: reply_tx })
+            .unwrap();
+
+        let evidence = reply_rx.await.expect("runtime replied");
+        assert!(
+            evidence.is_empty(),
+            "fresh runtime must have no equivocation evidence, got {}",
+            evidence.len()
+        );
+
+        // A second drain is a no-op and must still return the same
+        // (empty) list — evidence is append-only, not drained by the
+        // message.
+        let (reply_tx2, reply_rx2) = oneshot::channel();
+        msg_tx
+            .try_send(ConsensusMessage::DrainEvidence { reply: reply_tx2 })
+            .unwrap();
+        let evidence2 = reply_rx2.await.expect("runtime replied");
+        assert!(evidence2.is_empty(), "append-only drain must be idempotent");
 
         msg_tx.try_send(ConsensusMessage::Shutdown).unwrap();
         handle.await.unwrap();

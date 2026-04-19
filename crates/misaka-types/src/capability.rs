@@ -448,7 +448,10 @@ mod tests {
     }
 
     #[test]
-    #[allow(deprecated)] // exercises legacy Reserved0x0010 bit in flag packing
+    #[allow(deprecated)] // `Reserved0x0010` is deprecated but exercised here
+                         // to pin the bit-flag semantics of reserved variants
+                         // until they get replaced (v1.0 tracking). Drop the
+                         // allow once the variant is deleted.
     fn test_capability_flags() {
         let flags = capabilities_to_flags(&[Capability::SpendLimited, Capability::Reserved0x0010]);
         assert!(Capability::SpendLimited.is_in(flags));

@@ -45,6 +45,12 @@ misaka-types = { path = "../misaka-types" }
 misaka-config = { path = "../misaka-config" }
 misaka-crypto = { path = "../misaka-crypto" }
 misaka-pqc = { path = "../misaka-pqc" }
+# BLOCKER J: canonical Genesis construction via GenesisBuilder.
+# Replaces the deprecated `misaka_types::genesis::compute_genesis_hash`
+# (chain_id + concatenated pubkeys only) with a canonical v2 hash
+# over chain_id + protocol_version + timestamp + validators + treasury.
+misaka-genesis-builder = { path = "../misaka-genesis-builder" }
+misaka-protocol-config = { path = "../misaka-protocol-config" }
 borsh = { workspace = true }
 misaka-execution = { path = "../misaka-execution" }
 misaka-storage = { path = "../misaka-storage" }

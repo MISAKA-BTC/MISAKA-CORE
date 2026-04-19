@@ -259,6 +259,10 @@ impl Transaction {
         }
 
         // ── Signature size check ──
+        // `SignatureScheme` currently has a single variant `MlDsa65`, so a
+        // `match` with a wildcard arm triggers `unreachable_patterns` under
+        // `-D warnings`. Use the dedicated `max_sig_size()` accessor so new
+        // variants pick up their size without revisiting this call site.
         let expected_sig_size = self.signature.scheme.max_sig_size();
         if self.signature.bytes.len() != expected_sig_size {
             return Err(MisakaError::SignatureSizeMismatch {
@@ -356,14 +360,12 @@ mod tests {
     #[test]
     fn test_different_sender_tx_hash_differs() {
         let ed_tx = make_test_tx();
+        // R-1 FIX: Original test used [0xAA; 1952] — identical to make_test_tx.
+        // After ML-DSA-65 migration, sender bytes must actually differ.
         let other_tx = Transaction {
             sender: MisakaPublicKey {
                 scheme: SignatureScheme::MlDsa65,
-                bytes: vec![0xAA; 1952],
-            },
-            signature: MisakaSignature {
-                scheme: SignatureScheme::MlDsa65,
-                bytes: vec![0xCC; 3309],
+                bytes: vec![0xBB; 1952], // different from make_test_tx's [0xAA; 1952]
             },
             ..make_test_tx()
         };

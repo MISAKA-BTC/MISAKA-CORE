@@ -15,8 +15,11 @@
 //! - Query existence and lookup
 
 use misaka_muhash::MuHash;
+// PR E: SMT state root migration.
+use misaka_smt::key::{smt_key, smt_value};
+use misaka_smt::tree::SparseMerkleTree;
 use misaka_types::utxo::{OutputRef, TxOutput, TxType, UtxoTransaction};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// A stored UTXO entry.
 #[derive(Debug, Clone)]
@@ -125,8 +128,22 @@ pub struct UtxoSet {
     max_delta_history: usize,
     /// Current chain height.
     pub height: u64,
-    /// Phase 3 C6: MuHash incremental accumulator for state root.
-    /// Replaces the Merkle-based compute_state_root (HARD FORK).
+    /// PR E (Phase 4): SMT (Sparse Merkle Tree) for state root.
+    /// Activated pre-mainnet. Provides O(log N) inclusion/exclusion proofs
+    /// and deterministic roots independent of insertion order.
+    ///
+    /// Key:   `smt_key(tx_hash, output_index)`  — 32 bytes
+    /// Value: `smt_value(borsh(TxOutput))`      — 32 bytes
+    ///
+    /// Superseded the MuHash3072 accumulator (v4 state root) which was
+    /// itself a drop-in replacement for the insecure XOR-based MuHash
+    /// (v3). Domain is bumped to `v5` on finalize.
+    smt: SparseMerkleTree,
+    /// DEPRECATED: kept as a no-op shim so `apply_block`/`undo_last_delta`
+    /// paths that still call `muhash.add_element/remove_element` continue
+    /// to compile during the incremental migration. The field is not
+    /// used by `compute_state_root()` — the SMT root is authoritative.
+    #[allow(dead_code)]
     muhash: MuHash,
     /// Cached total amount across all UTXOs (JSON-RPC DoS prevention).
     /// Updated incrementally on add_output / remove_output.
@@ -136,6 +153,7 @@ pub struct UtxoSet {
 /// Phase 3 C6: Compute the canonical byte representation of a UTXO element
 /// for MuHash accumulation. Uses borsh encoding for determinism.
 fn utxo_element_bytes(outref: &OutputRef, output: &TxOutput, height: u64) -> Vec<u8> {
+    use borsh::BorshSerialize;
     let mut buf = Vec::with_capacity(128);
     buf.extend_from_slice(b"MISAKA:muhash:utxo:v1:");
     // SEC-FIX CRITICAL: borsh failures MUST panic, not silently skip.
@@ -149,6 +167,11 @@ fn utxo_element_bytes(outref: &OutputRef, output: &TxOutput, height: u64) -> Vec
     buf.extend_from_slice(&output_bytes);
     buf.extend_from_slice(&height.to_le_bytes());
     buf
+}
+
+/// Public v4 element bytes accessor for test/comparison purposes.
+pub fn utxo_element_bytes_v4_pub(outref: &OutputRef, output: &TxOutput, height: u64) -> Vec<u8> {
+    utxo_element_bytes(outref, output, height)
 }
 
 /// UTXO set errors.
@@ -194,7 +217,8 @@ impl UtxoSet {
             deltas: Vec::new(),
             max_delta_history: clamped,
             height: 0,
-            muhash: MuHash::new(),
+            smt: SparseMerkleTree::new(),
+            muhash: MuHash::new(), // shim — see field docstring
             cached_total_amount: 0,
         }
     }
@@ -314,7 +338,20 @@ impl UtxoSet {
             return Err(UtxoError::OutputAlreadyExists(format!("{:?}", outref)));
         }
         let amount = output.amount;
-        // Phase 3 C6: Update MuHash accumulator incrementally.
+        // PR E (Phase 4): incremental SMT update.
+        //   key   = smt_key(tx_hash, output_index)
+        //   value = smt_value(borsh(TxOutput))
+        // The `height` is intentionally NOT mixed into the value so that
+        // the same UTXO at the same (outref, output) always hashes to
+        // the same SMT value — keeps the tree fully content-addressed.
+        let k = smt_key(&outref.tx_hash, outref.output_index);
+        let v = smt_value(
+            &borsh::to_vec(&output).expect("TxOutput is borsh-serializable by construction"),
+        );
+        self.smt.insert(k, v);
+        // Legacy MuHash accumulator kept updated during migration for
+        // snapshot round-trip parity; safe to drop when all callers
+        // stop reading muhash.
         let elem = utxo_element_bytes(&outref, &output, height);
         self.muhash.add_element(&elem);
         self.unspent.insert(
@@ -334,7 +371,11 @@ impl UtxoSet {
     /// Called by block producer after a TX consumes this output.
     pub fn remove_output(&mut self, outref: &OutputRef) {
         if let Some(entry) = self.unspent.remove(outref) {
-            // Phase 3 C6: Remove from MuHash accumulator.
+            // PR E (Phase 4): SMT tombstone the key so the tree no longer
+            // contains it (exclusion proofs become valid).
+            let k = smt_key(&outref.tx_hash, outref.output_index);
+            self.smt.remove(&k);
+            // Legacy MuHash mirror — see add_output comment.
             let elem = utxo_element_bytes(outref, &entry.output, entry.created_at);
             self.muhash.remove_element(&elem);
             self.cached_total_amount = self.cached_total_amount.saturating_sub(entry.output.amount);
@@ -534,27 +575,39 @@ impl UtxoSet {
         Ok(())
     }
 
-    /// Phase 3 C6: Compute the state root using MuHash (HARD FORK).
+    /// Compute the state root using a Sparse Merkle Tree (HARD FORK v5).
     ///
-    /// Replaces the O(n log n) Merkle-based computation with O(1) MuHash finalize.
-    /// The MuHash accumulator is maintained incrementally on add_output/remove_output.
+    /// PR E (Phase 4) activates SMT pre-mainnet, replacing the MuHash3072
+    /// accumulator that PR B introduced as the `v4` drop-in for the
+    /// insecure XOR-based MuHash (`v3`). SMT gives:
+    ///   - content-addressed, order-independent roots (O(log N) update)
+    ///   - inclusion / exclusion proofs for RPC clients
+    ///   - a stable tree that matches the frozen v1.0 consensus spec
     ///
-    /// Domain: "MISAKA:state_root:v3:" -- bumped from v2 for hard fork.
+    /// Domain: `MISAKA:state_root:v5:` — bumped from `v4` for SMT transition.
     ///
     /// # Determinism Guarantee
     ///
-    /// MuHash is order-independent: same UTXO set always produces the same root
-    /// regardless of insertion order.
+    /// `SparseMerkleTree` is a keyed structure: the root is the hash of
+    /// the tree with all (smt_key, smt_value) pairs for currently-unspent
+    /// outputs. The same UTXO set always produces the same root.
     pub fn compute_state_root(&self) -> [u8; 32] {
         use sha3::{Digest, Sha3_256};
 
-        let muhash_digest = self.muhash.finalize();
+        let smt_root = self.smt.root();
 
         let mut h = Sha3_256::new();
-        h.update(b"MISAKA:state_root:v3:");
+        h.update(b"MISAKA:state_root:v5:");
         h.update(self.height.to_le_bytes());
-        h.update(muhash_digest);
+        h.update(smt_root);
         h.finalize().into()
+    }
+
+    /// Alias for `compute_state_root()` — O(1) thanks to MuHash3072.
+    /// Exposed as a named getter for RPC callers.
+    #[inline]
+    pub fn cached_state_root(&self) -> [u8; 32] {
+        self.compute_state_root()
     }
 
     /// Export the current in-memory state into a serializable snapshot.
@@ -613,7 +666,14 @@ impl UtxoSet {
 
         for stored in snapshot.unspent {
             let outref = stored.outref;
-            // Phase 3 C6: Rebuild MuHash from all UTXOs during snapshot restore.
+            // PR E: rebuild SMT from all unspent UTXOs during snapshot restore.
+            let k = smt_key(&outref.tx_hash, outref.output_index);
+            let v = smt_value(
+                &borsh::to_vec(&stored.output)
+                    .expect("TxOutput is borsh-serializable by construction"),
+            );
+            set.smt.insert(k, v);
+            // Legacy MuHash mirror kept consistent during migration.
             let elem = utxo_element_bytes(&outref, &stored.output, stored.created_at);
             set.muhash.add_element(&elem);
             set.cached_total_amount = set.cached_total_amount.saturating_add(stored.output.amount);
@@ -825,6 +885,83 @@ impl UtxoSet {
                 ))),
             }
         }
+    }
+
+    /// BLOCKER A: Save the UTXO set together with the full UtxoExecutor
+    /// metadata (`processed_burns` + `total_emitted`) atomically.
+    ///
+    /// The MuHash3072 → SMT migration (PR E) kept `UtxoSet` as the single
+    /// durable state object, but `total_emitted` and `processed_burns`
+    /// live on `UtxoExecutor`. Without this helper the save path had two
+    /// silent bugs:
+    ///
+    /// 1. `save_to_file` called `export_snapshot()` → wrote
+    ///    `total_emitted = 0`, so `MAX_TOTAL_SUPPLY` enforcement reset to
+    ///    zero after every restart (unlimited SystemEmission possible).
+    /// 2. `save_to_file` also wrote `processed_burns = []`, so the bridge
+    ///    replay check (`UtxoExecutor::check_burn_replay`) lost its state.
+    ///
+    /// This function writes the envelope format used by `load_from_file`
+    /// / `load_from_file_with_burns` (32-byte SHA3-256 integrity prefix +
+    /// JSON payload), using the same atomic write path as `save_to_file`
+    /// (tmp → fsync → rename → dir fsync).
+    pub fn save_to_file_full(
+        &self,
+        path: &std::path::Path,
+        burn_ids: Vec<[u8; 32]>,
+        total_emitted: u64,
+    ) -> Result<(), UtxoError> {
+        use sha3::{Digest, Sha3_256};
+        use std::io::Write;
+
+        let mut snapshot = self.export_snapshot();
+        snapshot.processed_burns = burn_ids;
+        snapshot.total_emitted = total_emitted;
+
+        let payload = serde_json::to_vec(&snapshot)
+            .map_err(|e| UtxoError::SnapshotIo(format!("serialize failed: {}", e)))?;
+
+        let content_hash: [u8; 32] = Sha3_256::digest(&payload).into();
+
+        let mut envelope = Vec::with_capacity(32 + payload.len());
+        envelope.extend_from_slice(&content_hash);
+        envelope.extend_from_slice(&payload);
+
+        let tmp_path = path.with_extension("tmp");
+        {
+            let file = std::fs::File::create(&tmp_path).map_err(|e| {
+                UtxoError::SnapshotIo(format!("failed to create {}: {}", tmp_path.display(), e))
+            })?;
+            let mut writer = std::io::BufWriter::new(file);
+            writer
+                .write_all(&envelope)
+                .map_err(|e| UtxoError::SnapshotIo(format!("write failed: {}", e)))?;
+            writer
+                .flush()
+                .map_err(|e| UtxoError::SnapshotIo(format!("flush failed: {}", e)))?;
+            writer
+                .get_ref()
+                .sync_all()
+                .map_err(|e| UtxoError::SnapshotIo(format!("fsync failed: {}", e)))?;
+        }
+
+        std::fs::rename(&tmp_path, path).map_err(|e| {
+            UtxoError::SnapshotIo(format!(
+                "rename {} → {}: {}",
+                tmp_path.display(),
+                path.display(),
+                e
+            ))
+        })?;
+
+        if let Some(parent) = path.parent() {
+            let dir = std::fs::File::open(parent)
+                .map_err(|e| UtxoError::SnapshotIo(format!("open parent dir: {}", e)))?;
+            dir.sync_all()
+                .map_err(|e| UtxoError::SnapshotIo(format!("dir fsync: {}", e)))?;
+        }
+
+        Ok(())
     }
 
     /// SEC-FIX: Load UTXO set AND processed burn IDs from snapshot.

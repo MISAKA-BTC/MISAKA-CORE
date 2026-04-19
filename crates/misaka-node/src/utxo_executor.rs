@@ -47,13 +47,24 @@ const EMISSION_MATURITY: u64 = 300;
 const MAX_TOTAL_SUPPLY: u64 = 10_000_000_000_000_000_000; // 10B × 10^9 base units
 
 /// §5.5 Fee distribution — proposer receives 50%.
-/// NOTE: Not yet enforced in execution; fees are summed in CommitExecutionResult
-/// and distribution is deferred to the staking/treasury module (Phase 3+).
+///
+/// BLOCKER I: enforced at commit time by `UtxoExecutor::distribute_fees`.
+/// The three BPS constants below always sum to `10_000`; the invariant
+/// is asserted at compile time.
 pub const PROPOSER_FEE_SHARE_BPS: u64 = 5000;
 /// §5.5 Fee distribution — treasury receives 10%.
 pub const TREASURY_FEE_SHARE_BPS: u64 = 1000;
 /// §5.5 Fee distribution — 40% burned.
 pub const BURN_FEE_SHARE_BPS: u64 = 4000;
+
+// Compile-time guard: the 3 shares must sum to 100.00%. If someone
+// edits any one constant without the other two, this fails to build.
+const _: () = {
+    assert!(
+        PROPOSER_FEE_SHARE_BPS + TREASURY_FEE_SHARE_BPS + BURN_FEE_SHARE_BPS == 10_000,
+        "BLOCKER I: proposer + treasury + burn fee shares must sum to 10000 BPS (100%)"
+    );
+};
 
 // Phase 2b': TX_SIGN_DOMAIN removed — IntentMessage provides domain separation.
 
@@ -135,6 +146,51 @@ pub struct CommitExecutionResult {
     /// The caller MUST skip `generate_block_reward` when this is set to
     /// prevent double emission.
     pub had_system_emission: bool,
+}
+
+/// BLOCKER I: per-commit fee-distribution split (proposer / treasury / burn).
+///
+/// `proposer_share + treasury_share + burned_share` always equals the
+/// `total_fees` argument passed to `UtxoExecutor::distribute_fees` —
+/// the BPS-integer-division remainder is folded into `burned_share`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FeeDistribution {
+    /// Amount minted as a new UTXO at `proposer_address`.
+    pub proposer_share: u64,
+    /// Amount minted as a new UTXO at `treasury_address`, or 0 when
+    /// no treasury address was configured (see `treasury_active`).
+    pub treasury_share: u64,
+    /// Amount permanently removed from circulation (no UTXO created).
+    /// Includes the BPS rounding remainder and the treasury share when
+    /// `treasury_active == false`.
+    pub burned_share: u64,
+    /// True when a treasury address was present. When false, the
+    /// treasury portion of the BPS split was folded into burn, so
+    /// `treasury_share == 0`.
+    pub treasury_active: bool,
+}
+
+/// BLOCKER I: derive a deterministic `OutputRef` for a fee-distribution
+/// UTXO so that all nodes agree on its hash regardless of per-node
+/// wall-clock state. Domain-separates the proposer and treasury legs
+/// via the `label` byte-string so a single commit cannot collide on
+/// the same address.
+fn fee_outref(
+    commit_index: u64,
+    label: &[u8],
+    address: &[u8; 32],
+) -> misaka_types::utxo::OutputRef {
+    use sha3::{Digest, Sha3_256};
+    let mut h = Sha3_256::new();
+    h.update(b"MISAKA:fee_distribution:v1:");
+    h.update(label);
+    h.update(commit_index.to_le_bytes());
+    h.update(address);
+    let tx_hash: [u8; 32] = h.finalize().into();
+    misaka_types::utxo::OutputRef {
+        tx_hash,
+        output_index: 0,
+    }
 }
 
 /// New UTXO execution layer (Phase 2b).
@@ -1238,6 +1294,154 @@ impl UtxoExecutor {
         reward
     }
 
+    // ── BLOCKER I: Fee distribution at commit time ───────────────────
+    //
+    // Every TX the executor accepted this commit contributed its `fee`
+    // to `CommitExecutionResult.total_fees`. Up until this point the
+    // fee bytes live nowhere — the TX's input UTXOs were consumed, the
+    // output UTXOs were produced for the user, and the difference just
+    // vanished from the UTXO set. `distribute_fees` realises the §5.5
+    // split:
+    //
+    //   PROPOSER_FEE_SHARE_BPS (5000) → new UTXO at `proposer_address`
+    //   TREASURY_FEE_SHARE_BPS (1000) → new UTXO at `treasury_address`
+    //   BURN_FEE_SHARE_BPS     (4000) → permanently removed
+    //
+    // `total_emitted` is NOT changed (these are not new emissions —
+    // they're user-paid fees being redistributed / burned). The
+    // `total_emitted` cap is already enforced by `execute_committed`
+    // on the emission side.
+    //
+    // When `treasury_address` is `None` (no treasury configured — the
+    // testnet default), the treasury share rolls into the burn share
+    // so the overall supply accounting still balances.
+    //
+    // Rounding: the BPS math runs in u128 to avoid overflow on 64-bit
+    // total_fees, then the two UTXO-creating shares are computed with
+    // integer division. The rounding remainder goes to burn, so the
+    // created UTXOs never exceed the BPS-exact share and the sum of
+    // `proposer + treasury + burned` always equals `total_fees`.
+
+    /// Distribute the `total_fees` collected this commit per §5.5.
+    ///
+    /// The proposer and (optional) treasury receive freshly-minted
+    /// UTXOs; the burn share is accounted for but produces no UTXO
+    /// so the supply decreases by exactly `burned_share`.
+    ///
+    /// `commit_index` is used to derive deterministic `tx_hash`es for
+    /// the generated UTXOs so the same (proposer, treasury, commit)
+    /// tuple always produces the same outrefs — essential for replay
+    /// and cross-node agreement.
+    ///
+    /// Returns the actual split applied (may differ from a naive BPS
+    /// computation when `total_fees == 0` or when rounding pushes the
+    /// remainder into burn).
+    pub fn distribute_fees(
+        &mut self,
+        commit_index: u64,
+        total_fees: u64,
+        proposer_address: [u8; 32],
+        proposer_pubkey: Option<Vec<u8>>,
+        treasury_address: Option<[u8; 32]>,
+    ) -> FeeDistribution {
+        if total_fees == 0 {
+            return FeeDistribution::default();
+        }
+
+        // Compute BPS shares using u128 to protect against u64 overflow
+        // on fee * 10_000; `total_fees` is bounded by `u64::MAX` per-commit
+        // which is already astronomical, but the multiply would wrap.
+        let total = total_fees as u128;
+        let proposer_share = ((total * PROPOSER_FEE_SHARE_BPS as u128) / 10_000) as u64;
+        let mut treasury_share = ((total * TREASURY_FEE_SHARE_BPS as u128) / 10_000) as u64;
+
+        // When there is no treasury address the treasury share cannot
+        // be materialised, so fold it into the burn share. This matches
+        // the operational posture of testnet / devnet nodes that run
+        // without a treasury multisig configured.
+        let treasury_active = treasury_address.is_some();
+        if !treasury_active {
+            treasury_share = 0;
+        }
+
+        // The burn share absorbs the BPS remainder so the sum is exact.
+        let burned_share = total_fees
+            .saturating_sub(proposer_share)
+            .saturating_sub(treasury_share);
+
+        // --- Materialise the proposer UTXO -------------------------------
+        if proposer_share > 0 {
+            let outref = fee_outref(commit_index, b"proposer", &proposer_address);
+            let output = misaka_types::utxo::TxOutput {
+                amount: proposer_share,
+                address: proposer_address,
+                spending_pubkey: proposer_pubkey.clone(),
+            };
+            // `true` for is_emission so maturity rules apply (same as
+            // block-reward UTXOs). This is intentional: the fee share
+            // has not yet been confirmed in the post-commit world and
+            // should go through the same 300-block maturity window as
+            // any other commit-time-created UTXO.
+            if let Err(e) = self
+                .utxo_set
+                .add_output(outref.clone(), output, self.height, true)
+            {
+                tracing::error!(
+                    "BLOCKER I: failed to create proposer-fee UTXO at commit {}: {}",
+                    commit_index,
+                    e
+                );
+            } else if let Some(spk) = proposer_pubkey {
+                let _ = self.utxo_set.register_spending_key(outref, spk);
+            }
+        }
+
+        // --- Materialise the treasury UTXO (optional) --------------------
+        if let Some(treasury) = treasury_address {
+            if treasury_share > 0 {
+                let outref = fee_outref(commit_index, b"treasury", &treasury);
+                let output = misaka_types::utxo::TxOutput {
+                    amount: treasury_share,
+                    address: treasury,
+                    // Treasury is expected to be a multisig / DAO account
+                    // that publishes its own spending policy; don't inline
+                    // a spending_pubkey.
+                    spending_pubkey: None,
+                };
+                if let Err(e) = self
+                    .utxo_set
+                    .add_output(outref.clone(), output, self.height, true)
+                {
+                    tracing::error!(
+                        "BLOCKER I: failed to create treasury-fee UTXO at commit {}: {}",
+                        commit_index,
+                        e
+                    );
+                }
+            }
+        }
+
+        // --- Burn is bookkeeping only ------------------------------------
+        // No UTXO is created; the tokens are simply removed from
+        // circulation. This is a real supply decrease, distinct from
+        // `total_emitted` which only tracks gross emissions.
+        tracing::info!(
+            "Fee distribution (commit {}): total={} proposer={} treasury={} burned={}",
+            commit_index,
+            total_fees,
+            proposer_share,
+            treasury_share,
+            burned_share,
+        );
+
+        FeeDistribution {
+            proposer_share,
+            treasury_share,
+            burned_share,
+            treasury_active,
+        }
+    }
+
     /// γ-5: Apply the UTXO-side effects of `StakingRegistry::settle_unlocks`.
     ///
     /// For each `(validator_id, amount, reward_address)` tuple produced by
@@ -1399,6 +1603,48 @@ impl UtxoExecutor {
     /// (RocksDB/SQLite) after each commit that processes burn transactions.
     pub fn processed_burns_snapshot(&self) -> Vec<[u8; 32]> {
         self.processed_burns.iter().copied().collect()
+    }
+
+    /// BLOCKER A: Save the full UTXO state (UTXO set + `processed_burns`
+    /// + `total_emitted`) to a snapshot file, atomically.
+    ///
+    /// Wraps `UtxoSet::save_to_file_full` so the caller does not need to
+    /// thread executor-private fields through the storage API. Prefer
+    /// this over `utxo_set().save_to_file(&path)`, which silently writes
+    /// `processed_burns = []` and `total_emitted = 0` — leaving the node
+    /// vulnerable to bridge burn replay and to `MAX_TOTAL_SUPPLY` reset
+    /// after restart.
+    pub fn save_snapshot(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<(), misaka_storage::utxo_set::UtxoError> {
+        self.utxo_set
+            .save_to_file_full(path, self.processed_burns_snapshot(), self.total_emitted)
+    }
+
+    /// BLOCKER A: Load the full UTXO state (UTXO set + `processed_burns`
+    /// + `total_emitted`) from a snapshot file, wiring all three back
+    /// into a fresh `UtxoExecutor`.
+    ///
+    /// Returns `Ok(None)` when the file does not exist (fresh start).
+    /// Returns `Ok(Some(exec))` on a successful restore. On corruption
+    /// or integrity mismatch, propagates the underlying error so the
+    /// caller can refuse to start — restarting with `total_emitted = 0`
+    /// would reset the global supply cap.
+    pub fn load_snapshot(
+        path: &std::path::Path,
+        app_id: misaka_types::intent::AppId,
+    ) -> Result<Option<Self>, misaka_storage::utxo_set::UtxoError> {
+        use misaka_storage::utxo_set::UtxoSet;
+        match UtxoSet::load_from_file_with_burns(path, 1000)? {
+            None => Ok(None),
+            Some((set, burn_ids, total_emitted)) => {
+                let mut exec = Self::with_utxo_set(set, app_id);
+                exec.load_processed_burns(burn_ids);
+                exec.set_total_emitted(total_emitted);
+                Ok(Some(exec))
+            }
+        }
     }
 }
 
@@ -2541,5 +2787,246 @@ mod tests {
             misaka_consensus::staking::ValidatorState::Locked,
             "exit rejection must leave state untouched"
         );
+    }
+
+    // ─── BLOCKER A: Supply-counter persistence round-trip ─────────────────
+    //
+    // Guards against the regression fixed by the save/load wiring added in
+    // BLOCKER A: without persistence, `total_emitted` reset to 0 on every
+    // restart, defeating the MAX_TOTAL_SUPPLY cap check and — combined
+    // with the `processed_burns` reset — re-opening the bridge replay
+    // window.
+    //
+    // The test persists a non-zero `total_emitted` and a non-empty
+    // `processed_burns` set, reloads from disk into a fresh
+    // `UtxoExecutor`, and asserts that both values survive the round trip
+    // and that the structural MAX_TOTAL_SUPPLY check still fires
+    // post-restart.
+
+    fn make_app_id() -> misaka_types::intent::AppId {
+        misaka_types::intent::AppId::new(2, [0xABu8; 32])
+    }
+
+    #[test]
+    fn blocker_a_snapshot_round_trip_preserves_total_emitted_and_burns() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("narwhal_utxo_snapshot.json");
+
+        // First executor: populate some state.
+        let mut exec = UtxoExecutor::new(make_app_id());
+        exec.set_total_emitted(7_500_000_000_000);
+        exec.load_processed_burns(vec![[0x01u8; 32], [0x02u8; 32], [0x03u8; 32]]);
+
+        exec.save_snapshot(&path).expect("save_snapshot");
+
+        // Drop the first executor (simulated process exit) and reload
+        // from the on-disk snapshot.
+        drop(exec);
+        let restored = UtxoExecutor::load_snapshot(&path, make_app_id())
+            .expect("load_snapshot")
+            .expect("snapshot file present");
+
+        assert_eq!(
+            restored.total_emitted(),
+            7_500_000_000_000,
+            "total_emitted must survive restart"
+        );
+        assert_eq!(
+            restored.processed_burns().len(),
+            3,
+            "processed_burns must survive restart"
+        );
+        assert!(restored.processed_burns().contains(&[0x01u8; 32]));
+        assert!(restored.processed_burns().contains(&[0x02u8; 32]));
+        assert!(restored.processed_burns().contains(&[0x03u8; 32]));
+    }
+
+    #[test]
+    fn blocker_a_supply_cap_still_enforced_after_restart() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("narwhal_utxo_snapshot.json");
+
+        // MAX_TOTAL_SUPPLY = 10B × 10^9 base units. Persist a value that
+        // sits one block-reward-sized chunk below the cap, so the next
+        // block reward would overflow the cap.
+        //
+        // The pre-BLOCKER-A bug would reset `total_emitted` to 0 on
+        // restart, happily allowing another 10B tokens of emission — the
+        // test below proves that the restored executor rejects the
+        // would-be-overflow reward because the counter was preserved.
+        let almost_max = MAX_TOTAL_SUPPLY - 1;
+
+        let mut exec = UtxoExecutor::new(make_app_id());
+        exec.set_total_emitted(almost_max);
+        exec.save_snapshot(&path).expect("save_snapshot");
+        drop(exec);
+
+        let mut restored = UtxoExecutor::load_snapshot(&path, make_app_id())
+            .expect("load_snapshot")
+            .expect("snapshot file present");
+
+        assert_eq!(restored.total_emitted(), almost_max);
+
+        // `generate_block_reward` returns 0 when a reward would push
+        // `total_emitted` past `MAX_TOTAL_SUPPLY`. Ask it to produce a
+        // reward at height 1 on behalf of a dummy leader — with
+        // `total_emitted = MAX_TOTAL_SUPPLY - 1`, the reward is bigger
+        // than the 1-unit headroom so it must be skipped.
+        let leader_address = [0xAAu8; 32];
+        let awarded = restored.generate_block_reward(leader_address, None);
+
+        assert_eq!(
+            awarded, 0,
+            "BLOCKER A: post-restart block reward must honour the preserved \
+             MAX_TOTAL_SUPPLY cap and return 0 instead of emitting over the cap"
+        );
+        // And the counter must not have moved.
+        assert_eq!(restored.total_emitted(), almost_max);
+    }
+
+    #[test]
+    fn blocker_a_fresh_start_returns_none_not_zeroed_state() {
+        // Absent file: load_snapshot returns Ok(None), NOT an
+        // Ok(Some(default_zero)). The caller is expected to fall back to
+        // a fresh-genesis path in that case — see main.rs:3648 loader.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("does-not-exist.json");
+
+        let result = UtxoExecutor::load_snapshot(&path, make_app_id()).expect("ok");
+        assert!(result.is_none(), "missing snapshot must map to None");
+    }
+
+    // ─── BLOCKER I: Fee distribution tests ────────────────────────────
+
+    #[test]
+    fn blocker_i_bps_constants_sum_to_10000() {
+        // Also verified at compile time by the `const _: ()` guard in
+        // the module body, but a runtime assertion makes the intent
+        // obvious to reviewers reading test output.
+        assert_eq!(
+            PROPOSER_FEE_SHARE_BPS + TREASURY_FEE_SHARE_BPS + BURN_FEE_SHARE_BPS,
+            10_000
+        );
+    }
+
+    #[test]
+    fn blocker_i_zero_fees_is_zero_split() {
+        let mut exec = UtxoExecutor::new(make_app_id());
+        let split = exec.distribute_fees(1, 0, [0x01u8; 32], None, Some([0x02u8; 32]));
+        assert_eq!(split, FeeDistribution::default());
+        // No UTXO was created.
+        assert_eq!(exec.utxo_set().len(), 0);
+    }
+
+    #[test]
+    fn blocker_i_standard_split_with_treasury() {
+        let mut exec = UtxoExecutor::new(make_app_id());
+        let proposer = [0xAAu8; 32];
+        let treasury = [0xBBu8; 32];
+        // Use a value that divides exactly to avoid rounding noise.
+        let total = 10_000u64;
+        let split = exec.distribute_fees(42, total, proposer, None, Some(treasury));
+
+        assert_eq!(split.proposer_share, 5_000);
+        assert_eq!(split.treasury_share, 1_000);
+        assert_eq!(split.burned_share, 4_000);
+        assert!(split.treasury_active);
+        assert_eq!(
+            split.proposer_share + split.treasury_share + split.burned_share,
+            total
+        );
+
+        // Exactly 2 UTXOs materialised (proposer + treasury).
+        assert_eq!(exec.utxo_set().len(), 2);
+    }
+
+    #[test]
+    fn blocker_i_no_treasury_folds_into_burn() {
+        let mut exec = UtxoExecutor::new(make_app_id());
+        let proposer = [0xAAu8; 32];
+        let total = 10_000u64;
+        let split = exec.distribute_fees(42, total, proposer, None, None);
+
+        assert_eq!(split.proposer_share, 5_000);
+        assert_eq!(split.treasury_share, 0);
+        assert_eq!(
+            split.burned_share, 5_000,
+            "treasury share must fold into burn"
+        );
+        assert!(!split.treasury_active);
+        assert_eq!(
+            split.proposer_share + split.treasury_share + split.burned_share,
+            total
+        );
+
+        // Only the proposer UTXO materialised.
+        assert_eq!(exec.utxo_set().len(), 1);
+    }
+
+    #[test]
+    fn blocker_i_rounding_remainder_goes_to_burn() {
+        // 7 units: proposer=3 (50%), treasury=0 (10% of 7 = 0), burn=4.
+        // The 4-unit burn already absorbs the BPS remainder; this test
+        // pins down the exact behaviour for auditability.
+        let mut exec = UtxoExecutor::new(make_app_id());
+        let proposer = [0xAAu8; 32];
+        let treasury = [0xBBu8; 32];
+        let total = 7u64;
+        let split = exec.distribute_fees(1, total, proposer, None, Some(treasury));
+
+        assert_eq!(split.proposer_share, 3); // 7*5000/10000 = 3 (rounded down)
+        assert_eq!(split.treasury_share, 0); // 7*1000/10000 = 0 (rounded down)
+        assert_eq!(split.burned_share, 4); // remainder: 7 − 3 − 0 = 4
+        assert_eq!(
+            split.proposer_share + split.treasury_share + split.burned_share,
+            total,
+            "split must sum to total even when BPS math truncates"
+        );
+    }
+
+    #[test]
+    fn blocker_i_large_total_does_not_overflow() {
+        // u64::MAX * 10_000 would overflow in u64 math. `distribute_fees`
+        // uses u128 internally, so max-value totals must remain sound.
+        let mut exec = UtxoExecutor::new(make_app_id());
+        let proposer = [0xAAu8; 32];
+        let total = u64::MAX;
+        let split = exec.distribute_fees(1, total, proposer, None, None);
+
+        // Must not panic, and accounting must still be exact.
+        assert_eq!(
+            split.proposer_share + split.treasury_share + split.burned_share,
+            total
+        );
+    }
+
+    #[test]
+    fn blocker_i_same_commit_deterministic_outref() {
+        // The derived `tx_hash` for the proposer UTXO must be
+        // deterministic across nodes for the same (commit_index,
+        // proposer, treasury) — otherwise different nodes would
+        // produce UTXOs with different tx_hashes and the state root
+        // would diverge.
+        let mut exec_a = UtxoExecutor::new(make_app_id());
+        let mut exec_b = UtxoExecutor::new(make_app_id());
+        let proposer = [0xAAu8; 32];
+        let _ = exec_a.distribute_fees(99, 10_000, proposer, None, None);
+        let _ = exec_b.distribute_fees(99, 10_000, proposer, None, None);
+
+        // Compare the single UTXO that was created on each side.
+        let a_keys: Vec<_> = exec_a.utxo_set().all_spending_keys().keys().collect();
+        // (No spending pubkey attached when `proposer_pubkey == None`,
+        // so use the UTXO set's internal map instead.)
+        // Just assert that both executors produced a single output at
+        // the same (deterministically-derived) outref by checking the
+        // state root is identical.
+        assert_eq!(exec_a.utxo_set().len(), 1);
+        assert_eq!(exec_b.utxo_set().len(), 1);
+        assert_eq!(
+            exec_a.utxo_set().compute_state_root(),
+            exec_b.utxo_set().compute_state_root(),
+            "distribute_fees must be deterministic"
+        );
+        drop(a_keys);
     }
 }

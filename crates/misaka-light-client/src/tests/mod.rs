@@ -5,15 +5,13 @@
 //!
 //! NO stub verifiers. Every signature is real ML-DSA-65.
 
-mod happy_path;
 mod byzantine;
-mod epoch_transition;
-mod security;
 mod determinism;
+mod epoch_transition;
+mod happy_path;
+mod security;
 
-use misaka_crypto::validator_sig::{
-    validator_sign, ValidatorPqPublicKey, ValidatorPqSecretKey,
-};
+use misaka_crypto::validator_sig::{validator_sign, ValidatorPqPublicKey, ValidatorPqSecretKey};
 use misaka_pqc::pq_sign::MlDsaKeypair;
 use misaka_protocol_config::ProtocolVersion;
 use misaka_types::dag_types::{BlockDigest, BlockRef, CommitDigest};
@@ -45,8 +43,8 @@ impl TestFixture {
         for _i in 0..n {
             let kp = MlDsaKeypair::generate();
             let pk_bytes = kp.public_key.to_bytes();
-            let pq_pk = ValidatorPqPublicKey::from_bytes(&pk_bytes)
-                .expect("generated key should be valid");
+            let pq_pk =
+                ValidatorPqPublicKey::from_bytes(&pk_bytes).expect("generated key should be valid");
             let validator_id = pq_pk.to_canonical_id();
 
             committee.push(ValidatorIdentity {
@@ -75,8 +73,7 @@ impl TestFixture {
             initial_epoch: 0,
             initial_committee: self.committee.clone(),
         };
-        LightClient::new(trust_root, MemoryStorage::new())
-            .expect("client init should succeed")
+        LightClient::new(trust_root, MemoryStorage::new()).expect("client init should succeed")
     }
 
     /// Sign a message with validator at index, returning raw signature bytes.
@@ -91,12 +88,7 @@ impl TestFixture {
     }
 
     /// Create an UnverifiedCommit signed by the specified validators.
-    pub fn make_commit(
-        &self,
-        commit_index: u64,
-        slot: u64,
-        signers: &[usize],
-    ) -> UnverifiedCommit {
+    pub fn make_commit(&self, commit_index: u64, slot: u64, signers: &[usize]) -> UnverifiedCommit {
         self.make_commit_with_hash(commit_index, slot, signers, [0xAA; 32])
     }
 
@@ -159,11 +151,8 @@ impl TestFixture {
         signers: &[usize],
     ) -> EpochTransitionProof {
         let new_committee_hash = verification::committee_hash(new_committee);
-        let signing_bytes = EpochTransitionProof::signing_bytes(
-            old_epoch,
-            new_epoch,
-            &new_committee_hash,
-        );
+        let signing_bytes =
+            EpochTransitionProof::signing_bytes(old_epoch, new_epoch, &new_committee_hash);
 
         let transition_votes: Vec<EpochTransitionVote> = signers
             .iter()

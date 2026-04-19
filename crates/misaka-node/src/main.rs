@@ -347,7 +347,11 @@ struct Cli {
     dag_k: u64,
 
     /// DAG checkpoint interval (blue_score units).
-    #[arg(long, default_value = "50")]
+    ///
+    /// v0.8.9 Phase 0.5a: default dropped 50 → 10 so the wall-clock
+    /// cadence (~500 s) stays close to pre-change after
+    /// `FAST_LANE_BLOCK_TIME_SECS 2 → 10`.
+    #[arg(long, default_value = "10")]
     dag_checkpoint_interval: u64,
 
     /// Maximum transactions per DAG block.
@@ -380,6 +384,20 @@ struct Cli {
     /// Protocol fee share is sent here. REQUIRED for mainnet validators.
     #[arg(long, env = "MISAKA_TREASURY_ADDRESS")]
     treasury_address: Option<String>,
+
+    /// Initial treasury balance, in base units (10⁹ per MSK), minted
+    /// as a single genesis UTXO at `--treasury-address`.
+    ///
+    /// BLOCKER J: this value is part of the canonical genesis hash via
+    /// `GenesisBuilder::with_treasury`. ALL validators must pass the
+    /// same value (together with the same `--treasury-address`) or
+    /// the computed `genesis_hash` will diverge across nodes. Setting
+    /// only one of the two pair is ignored — both are required.
+    ///
+    /// A value of 0 is treated as "no treasury allocation" and produces
+    /// the same genesis hash as omitting the flags entirely.
+    #[arg(long, env = "MISAKA_TREASURY_INITIAL_BALANCE")]
+    treasury_initial_balance: Option<u64>,
 
     // ─── Validator Registration (misakastake.com) ──────────
     /// Generate L1 validator key and exit. Does NOT start the node.
@@ -1585,6 +1603,54 @@ async fn start_narwhal_node(
     let committee_shared: std::sync::Arc<
         tokio::sync::RwLock<misaka_dag::narwhal_types::committee::Committee>,
     > = std::sync::Arc::new(tokio::sync::RwLock::new(committee.clone()));
+
+    // BLOCKER F: peer-score / ban-list persistence.
+    //
+    // Load the multi-dimensional `ScoreManager` from
+    // `{data_dir}/peer_scores.json` so that temp/perm bans survive a
+    // restart. Without persistence, every node restart resets the
+    // ban list and score history, and an attacker who hit the
+    // permanent-ban threshold can simply wait for the next restart
+    // to be welcomed back as a fresh peer.
+    //
+    // Fallback policy (matches BLOCKER A UTXO snapshot):
+    // * Missing file → start with a fresh, empty ScoreManager.
+    // * Corrupt / format-mismatched file → log + start fresh.
+    // The in-memory state is wrapped in an `Arc<parking_lot::Mutex>`
+    // so the sig-verify-fail hooks (sync context, inside tokio::select
+    // arms) can mutate it without .await, and the periodic
+    // save/tick task can also take short locks.
+    let peer_scores_path = data_dir.join("peer_scores.json");
+    let score_manager: std::sync::Arc<parking_lot::Mutex<misaka_p2p::scoring::ScoreManager>> =
+        std::sync::Arc::new(parking_lot::Mutex::new(
+            match misaka_p2p::scoring::ScoreManager::load_from_file(&peer_scores_path) {
+                Ok(Some(mgr)) => {
+                    info!(
+                        "BLOCKER F: loaded peer-score snapshot from {} ({} peers, {} bans)",
+                        peer_scores_path.display(),
+                        mgr.peer_count(),
+                        mgr.banned_count(),
+                    );
+                    mgr
+                }
+                Ok(None) => {
+                    info!(
+                        "BLOCKER F: no peer-score snapshot at {} — starting fresh",
+                        peer_scores_path.display()
+                    );
+                    misaka_p2p::scoring::ScoreManager::new()
+                }
+                Err(e) => {
+                    warn!(
+                        "BLOCKER F: failed to load peer-score snapshot at {} ({}) — starting fresh",
+                        peer_scores_path.display(),
+                        e
+                    );
+                    misaka_p2p::scoring::ScoreManager::new()
+                }
+            },
+        ));
+
     info!("startup[2/6]: parsing validator keys...");
     let relay_public_key = identity.validator_public_key()?;
     let relay_secret_key = Arc::new(identity.validator_secret_key()?);
@@ -1721,10 +1787,65 @@ async fn start_narwhal_node(
         .iter()
         .map(|auth| auth.public_key.clone())
         .collect();
-    let genesis_hash = misaka_types::genesis::compute_genesis_hash(cli.chain_id, &committee_pks);
-    let chain_ctx = misaka_types::chain_context::ChainContext::new(cli.chain_id, genesis_hash);
+
+    // BLOCKER J: construct the canonical Genesis via misaka-genesis-builder.
+    //
+    // This replaces the deprecated `misaka_types::genesis::compute_genesis_hash`
+    // (which hashed only `chain_id` + concatenated pubkeys) with the
+    // canonical v2 hash that covers:
+    //   * ProtocolVersion
+    //   * chain_id
+    //   * genesis_timestamp_ms  (fixed at 0 so all nodes agree without
+    //                             needing a wall-clock handshake)
+    //   * every GenesisValidator (authority_index / pubkey / stake /
+    //                             network_address / solana_stake_account)
+    //   * every treasury UTXO
+    // Domain: `MISAKA-GENESIS:v2:` — disjoint from the v1 domain used by
+    // the deprecated `compute_genesis_hash` so the two hash spaces
+    // cannot collide.
+    //
+    // A future manifest revision can carry a `genesis_timestamp_ms`
+    // field so the committee timestamp matches chain-launch wall-clock
+    // if that ever becomes policy-relevant. For now 0 is deterministic
+    // and auditable.
+    let genesis = {
+        let mut builder = misaka_genesis_builder::GenesisBuilder::new()
+            .with_protocol_version(misaka_protocol_config::ProtocolVersion::V1)
+            .with_chain_id(cli.chain_id)
+            .with_genesis_timestamp_ms(0);
+        for auth in &committee.authorities {
+            // committee_pks[i] matches committee.authorities[i].public_key
+            // by construction; use the authority struct directly so we
+            // thread stake and the advertise address through. The
+            // narwhal `Authority` struct spells the field `hostname`,
+            // which is what the genesis-builder expects for its
+            // `network_address` slot.
+            builder = builder.add_validator(auth.public_key.clone(), auth.stake, &auth.hostname);
+        }
+        // Optional treasury UTXO: only when the operator passed
+        // `--treasury-address` / `MISAKA_TREASURY_ADDRESS` AND a positive
+        // initial balance via `--treasury-initial-balance`. The genesis
+        // hash depends on these, so every node MUST pass the same
+        // values or the hashes diverge.
+        if let (Some(addr_hex), Some(balance)) =
+            (cli.treasury_address.as_ref(), cli.treasury_initial_balance)
+        {
+            if let Some(addr_bytes) = hex::decode(addr_hex).ok().filter(|b| b.len() == 32) {
+                let mut addr = [0u8; 32];
+                addr.copy_from_slice(&addr_bytes);
+                if balance > 0 {
+                    builder = builder.with_treasury(addr, balance);
+                }
+            }
+        }
+        builder.build().map_err(|e| {
+            anyhow::anyhow!("BLOCKER J: failed to construct canonical Genesis: {}", e)
+        })?
+    };
+    let genesis_hash = genesis.hash();
+    let chain_ctx = genesis.chain_context();
     info!(
-        "ChainContext: chain_id={}, genesis_hash={}",
+        "ChainContext: chain_id={}, genesis_hash={} (v2 canonical, via GenesisBuilder)",
         chain_ctx.chain_id,
         hex::encode(&chain_ctx.genesis_hash[..8]),
     );
@@ -1746,7 +1867,9 @@ async fn start_narwhal_node(
         timeout_base_ms: 2000,
         timeout_max_ms: 60_000,
         dag_config: DagStateConfig::default(),
-        checkpoint_interval: 100,
+        // v0.8.9 Phase 0.5a: 100 → 20 to preserve ~200 s checkpoint wall-clock
+        // cadence after FAST_LANE_BLOCK_TIME_SECS 2 → 10.
+        checkpoint_interval: 20,
         custom_verifier: None, // production MlDsa65Verifier (default)
         retention_rounds: 10_000,
     };
@@ -3418,6 +3541,11 @@ async fn start_narwhal_node(
     let connected_peers_for_ingress = connected_peers.clone();
     let observer_count_for_ingress = observer_count.clone();
     let observer_registry_for_ingress = observer_registry.clone();
+    // BLOCKER F: clone the shared ScoreManager + committee handle into
+    // the relay ingress task so the sig-verify-fail hooks can update
+    // scores keyed on the authority's pubkey-derived PeerId.
+    let score_manager_for_ingress = score_manager.clone();
+    let committee_shared_for_ingress = committee_shared.clone();
     let relay_ingress_handle = tokio::spawn(async move {
         while let Some(event) = relay_in_rx.recv().await {
             match event {
@@ -3598,16 +3726,38 @@ async fn start_narwhal_node(
                         }
                         if let Ok(outcome) = reply_rx.await {
                             if outcome.sig_verify_failed {
-                                // Task D / audit follow-up: the sender pushed a
-                                // block whose ML-DSA-65 signature or structural
-                                // check failed inside CoreEngine. Surface that
-                                // fact to operators so bad peers are visible
-                                // even though the production code path currently
-                                // has no PeerScorer wired up.
-                                warn!(
-                                    "peer_sig_verify_failed from={} round={}",
-                                    authority_index, block_ref.round,
-                                );
+                                // BLOCKER F: record InvalidPqSignature against
+                                // the sending authority's pubkey-derived PeerId.
+                                // ScoreManager auto-bans at the -100 threshold;
+                                // a single InvalidPqSignature costs 50 penalty
+                                // points, so two failures → permanent ban.
+                                let peer_id = {
+                                    let c = committee_shared_for_ingress.read().await;
+                                    c.authorities
+                                        .get(authority_index as usize)
+                                        .filter(|a| !a.public_key.is_empty())
+                                        .map(|a| {
+                                            use sha3::{Digest, Sha3_256};
+                                            let id: [u8; 32] =
+                                                Sha3_256::digest(&a.public_key).into();
+                                            misaka_p2p::peer_id::PeerId(id)
+                                        })
+                                };
+                                if let Some(pid) = peer_id {
+                                    let banned = score_manager_for_ingress.lock().record_event(
+                                        pid,
+                                        misaka_p2p::scoring::ScoreEvent::InvalidPqSignature,
+                                    );
+                                    warn!(
+                                        "peer_sig_verify_failed from={} round={} score_event=InvalidPqSignature banned={}",
+                                        authority_index, block_ref.round, banned,
+                                    );
+                                } else {
+                                    warn!(
+                                        "peer_sig_verify_failed from={} round={} (no committee pubkey — score not updated)",
+                                        authority_index, block_ref.round,
+                                    );
+                                }
                             }
                             if !outcome.accepted.is_empty() {
                                 // Cache ONLY after verification succeeded
@@ -3692,10 +3842,35 @@ async fn start_narwhal_node(
                             }
                             if let Ok(outcome) = reply_rx.await {
                                 if outcome.sig_verify_failed {
-                                    warn!(
-                                        "peer_sig_verify_failed from={} round={} (BlockResponse)",
-                                        authority_index, block_ref.round,
-                                    );
+                                    // BLOCKER F: same score path as the
+                                    // BlockProposal arm directly above.
+                                    let peer_id = {
+                                        let c = committee_shared_for_ingress.read().await;
+                                        c.authorities
+                                            .get(authority_index as usize)
+                                            .filter(|a| !a.public_key.is_empty())
+                                            .map(|a| {
+                                                use sha3::{Digest, Sha3_256};
+                                                let id: [u8; 32] =
+                                                    Sha3_256::digest(&a.public_key).into();
+                                                misaka_p2p::peer_id::PeerId(id)
+                                            })
+                                    };
+                                    if let Some(pid) = peer_id {
+                                        let banned = score_manager_for_ingress.lock().record_event(
+                                            pid,
+                                            misaka_p2p::scoring::ScoreEvent::InvalidPqSignature,
+                                        );
+                                        warn!(
+                                            "peer_sig_verify_failed from={} round={} (BlockResponse) score_event=InvalidPqSignature banned={}",
+                                            authority_index, block_ref.round, banned,
+                                        );
+                                    } else {
+                                        warn!(
+                                            "peer_sig_verify_failed from={} round={} (BlockResponse, no committee pubkey)",
+                                            authority_index, block_ref.round,
+                                        );
+                                    }
                                 }
                                 if !outcome.accepted.is_empty() {
                                     relay_cache_for_ingress
@@ -3773,6 +3948,39 @@ async fn start_narwhal_node(
         }
     });
 
+    // BLOCKER F: periodic peer-score save + decay tick.
+    //
+    // Every 60s we (a) decay non-penalty scores toward zero and drop
+    // expired temp bans via `ScoreManager::tick`, then (b) persist the
+    // snapshot atomically to `{data_dir}/peer_scores.json`. A
+    // save-failure is logged but is NOT fatal — the in-memory state
+    // is still authoritative and the next tick will retry.
+    let score_manager_for_saver = score_manager.clone();
+    let peer_scores_path_for_saver = peer_scores_path.clone();
+    let score_saver_handle = tokio::spawn(async move {
+        let mut tick = tokio::time::interval(tokio::time::Duration::from_secs(60));
+        tick.tick().await; // consume the initial immediate tick
+        loop {
+            tick.tick().await;
+            let save_result = {
+                let mut mgr = score_manager_for_saver.lock();
+                mgr.tick();
+                mgr.save_to_file(&peer_scores_path_for_saver)
+            };
+            match save_result {
+                Ok(()) => tracing::debug!(
+                    "BLOCKER F: peer-score snapshot saved to {}",
+                    peer_scores_path_for_saver.display()
+                ),
+                Err(e) => tracing::warn!(
+                    "BLOCKER F: failed to save peer-score snapshot at {}: {}",
+                    peer_scores_path_for_saver.display(),
+                    e
+                ),
+            }
+        }
+    });
+
     // Main loop: process committed outputs
     tokio::select! {
         _ = rpc_server => {
@@ -3783,6 +3991,12 @@ async fn start_narwhal_node(
         }
         _ = relay_ingress_handle => {
             info!("Narwhal relay ingress stopped");
+        }
+        _ = score_saver_handle => {
+            // The score saver loops forever; it only exits on panic /
+            // task abort. Treat as informational — the node keeps
+            // running, scoring state is still in memory.
+            info!("BLOCKER F: peer-score saver task stopped");
         }
         relay_result = relay_transport_handle => {
             match relay_result {
@@ -3811,25 +4025,35 @@ async fn start_narwhal_node(
 
             // R7 C-1: Build executor from persisted UTXO snapshot (if any),
             // falling back to the canonical set from mempool, then to fresh.
+            //
+            // BLOCKER A: use `UtxoExecutor::load_snapshot` so that
+            // `processed_burns` and `total_emitted` are restored alongside
+            // the UTXO set. `load_from_file` alone lost both, which
+            // re-opened the bridge replay attack and the supply-cap reset
+            // on every node restart.
             let utxo_snapshot_path = std::path::Path::new(&cli.data_dir)
                 .join("narwhal_utxo_snapshot.json");
             let mut tx_executor = {
-                match misaka_storage::utxo_set::UtxoSet::load_from_file(
-                    &utxo_snapshot_path, 1000,
+                match crate::utxo_executor::UtxoExecutor::load_snapshot(
+                    &utxo_snapshot_path,
+                    app_id.clone(),
                 ) {
-                    Ok(Some(restored)) => {
+                    Ok(Some(restored_exec)) => {
                         info!(
-                            "Restored UTXO snapshot: height={}, utxos={}",
-                            restored.height, restored.len()
+                            "Restored UTXO snapshot: height={}, utxos={}, total_emitted={}, processed_burns={}",
+                            restored_exec.utxo_set().height,
+                            restored_exec.utxo_set().len(),
+                            restored_exec.total_emitted(),
+                            restored_exec.processed_burns().len(),
                         );
                         {
                             // Mempool and RPC share the same Arc, one write suffices
                             let mut shared = utxo_set_writer.write().await;
-                            *shared = restored.clone();
+                            *shared = restored_exec.utxo_set().clone();
                         }
-                        crate::utxo_executor::UtxoExecutor::with_utxo_set(restored, app_id.clone())
+                        restored_exec
                     }
-                    _ => {
+                    Ok(None) | Err(_) => {
                         let canonical = narwhal_mempool.utxo_set();
                         let snapshot = canonical.read().await;
                         crate::utxo_executor::UtxoExecutor::with_utxo_set(
@@ -3960,6 +4184,34 @@ async fn start_narwhal_node(
                 std::collections::HashMap::new();
             let mut epoch_block_count: u64 = 0;
 
+            // BLOCKER I: treasury payout address (hex → 32 bytes).
+            // Derived once before the commit loop so each commit's
+            // `distribute_fees` call is a cheap Option copy. When this
+            // is `None` the treasury portion (§5.5 = 10%) folds into the
+            // burn share — see `UtxoExecutor::distribute_fees`.
+            let treasury_address_for_fees: Option<[u8; 32]> = cli
+                .treasury_address
+                .as_deref()
+                .and_then(|hex_str| {
+                    let bytes = hex::decode(hex_str).ok()?;
+                    if bytes.len() == 32 {
+                        let mut arr = [0u8; 32];
+                        arr.copy_from_slice(&bytes);
+                        Some(arr)
+                    } else {
+                        tracing::warn!(
+                            "BLOCKER I: --treasury-address must be 32 bytes hex, got {} bytes; treasury share will burn",
+                            bytes.len()
+                        );
+                        None
+                    }
+                });
+            if treasury_address_for_fees.is_none() {
+                tracing::warn!(
+                    "BLOCKER I: no treasury address configured — §5.5 treasury fee share (10%) will be folded into the burn share"
+                );
+            }
+
             while let Some(output) = commit_rx.recv().await {
                 // v0.5.9: if safe-mode has already been tripped, drop
                 // any further committed sub-dags without applying.
@@ -4018,6 +4270,17 @@ async fn start_narwhal_node(
                 // txs in a batch mutate the registry atomically relative to
                 // the REST api (which takes read locks).
                 let current_epoch_for_stake = *current_epoch.read().await;
+                // BLOCKER H: track whether this commit rolled an epoch so
+                // we can persist the full lifecycle snapshot immediately
+                // after `drop(registry_guard)`. The epoch-boundary block
+                // is where the most consequential registry mutations
+                // happen (settle_unlocks, downtime-Minor + equivocation
+                // slashes, auto_activate_locked), and they were
+                // previously lost on crash because the lifecycle
+                // persister was only called at bootstrap. Capture after
+                // the block runs so the JSON file reflects the exact
+                // post-mutation state.
+                let mut registry_dirty_from_epoch_boundary = false;
                 let mut registry_guard = validator_registry.write().await;
                 let exec_result = tx_executor.execute_committed(
                     output.commit_index,
@@ -4147,6 +4410,126 @@ async fn start_narwhal_node(
                                 new_epoch,
                                 activated.len(),
                             );
+                        }
+
+                        // BLOCKER D: equivocation → slashing wiring.
+                        //
+                        // The DAG's SlotEquivocationLedger accumulates every
+                        // detected two-block-at-one-slot violation plus any
+                        // commit-vote equivocation. Until this block, that
+                        // evidence stayed inside CoreEngine — offenders were
+                        // excluded from live quorum but were NEVER debited on
+                        // the staking side. We now drain the ledger each
+                        // epoch boundary and apply `SlashSeverity::Severe`
+                        // (2000 BPS = 20 % per §5.6) via
+                        // `StakingRegistry::slash`, which already owns:
+                        //   * cooldown (`slash_cooldown_epochs`)
+                        //   * idempotency (`last_slash_epoch`)
+                        //   * auto-eject (Active → Exiting below min stake)
+                        //   * reporter reward (carved out of slashed amount)
+                        //
+                        // Evidence is append-only in the ledger, so repeat
+                        // draws are safe: the `last_slash_epoch` gate filters
+                        // out already-applied slashes. This mirrors the
+                        // downtime-Minor path directly above.
+                        {
+                            let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+                            let send_result = msg_tx.try_send(
+                                misaka_dag::narwhal_dag::runtime::ConsensusMessage::DrainEvidence {
+                                    reply: reply_tx,
+                                },
+                            );
+                            if send_result.is_err() {
+                                tracing::warn!(
+                                    "BLOCKER D: consensus runtime busy — skipping \
+                                     equivocation evidence drain at epoch {}",
+                                    new_epoch
+                                );
+                            } else {
+                                match reply_rx.await {
+                                    Ok(evidence) if !evidence.is_empty() => {
+                                        let committee_guard = committee_shared.read().await;
+                                        let mut slashed_ct: u64 = 0;
+                                        let mut skipped_ct: u64 = 0;
+                                        let mut total_slashed: u64 = 0;
+                                        for ev in &evidence {
+                                            let author_idx = ev.authority as usize;
+                                            let pk = match committee_guard
+                                                .authorities
+                                                .get(author_idx)
+                                            {
+                                                Some(a) if !a.public_key.is_empty() => {
+                                                    a.public_key.clone()
+                                                }
+                                                _ => {
+                                                    tracing::warn!(
+                                                        "BLOCKER D: no pubkey for authority={} \
+                                                         in committee — cannot slash",
+                                                        author_idx
+                                                    );
+                                                    skipped_ct += 1;
+                                                    continue;
+                                                }
+                                            };
+                                            let vid = misaka_consensus::slashing::authority_map::pubkey_to_validator_id(&pk);
+                                            match registry_guard.slash(
+                                                &vid,
+                                                misaka_consensus::staking::SlashSeverity::Severe,
+                                                new_epoch,
+                                            ) {
+                                                Ok((amount, reward)) => {
+                                                    slashed_ct += 1;
+                                                    total_slashed =
+                                                        total_slashed.saturating_add(amount);
+                                                    tracing::warn!(
+                                                        "BLOCKER D: equivocation slash Severe (20%) — \
+                                                         validator={} round={} amount={} \
+                                                         reporter_reward={} detected_at_ms={}",
+                                                        hex::encode(&vid[..8]),
+                                                        ev.slot.round,
+                                                        amount,
+                                                        reward,
+                                                        ev.detected_at_ms,
+                                                    );
+                                                }
+                                                Err(e) => {
+                                                    skipped_ct += 1;
+                                                    tracing::debug!(
+                                                        "BLOCKER D: equivocation slash skipped \
+                                                         for validator={}: {:?}",
+                                                        hex::encode(&vid[..8]),
+                                                        e,
+                                                    );
+                                                }
+                                            }
+                                        }
+                                        drop(committee_guard);
+                                        tracing::info!(
+                                            "BLOCKER D: epoch {} evidence drain — seen={} \
+                                             slashed={} skipped={} total_slashed_base_units={}",
+                                            new_epoch,
+                                            evidence.len(),
+                                            slashed_ct,
+                                            skipped_ct,
+                                            total_slashed,
+                                        );
+                                    }
+                                    Ok(_) => {
+                                        tracing::debug!(
+                                            "BLOCKER D: epoch {} — no equivocation evidence",
+                                            new_epoch
+                                        );
+                                    }
+                                    Err(_) => {
+                                        tracing::warn!(
+                                            "BLOCKER D: consensus runtime dropped DrainEvidence \
+                                             reply at epoch {} — evidence retained in ledger, \
+                                             will be retried next boundary",
+                                            new_epoch
+                                        );
+                                    }
+                                }
+                            }
                         }
 
                         // Phase 10 (Item 1): Deferred VALIDATOR restart.
@@ -4291,36 +4674,116 @@ async fn start_narwhal_node(
                         // propose counts across epochs and inflate uptime.
                         propose_count.clear();
                         epoch_block_count = 0;
+
+                        // BLOCKER H: mark the registry as dirty so the
+                        // lifecycle snapshot is persisted once the write
+                        // lock is released below. The actual IO happens
+                        // outside the lock — we do not want to block REST
+                        // readers behind a tokio::fs::write.
+                        registry_dirty_from_epoch_boundary = true;
                     }
                 }
 
                 drop(registry_guard);
+
+                // BLOCKER H: persist the full lifecycle snapshot outside
+                // the write lock. Failures are non-fatal — the in-memory
+                // state is still authoritative and the next epoch will
+                // retry. Without this call the settle_unlocks /
+                // downtime-Minor / equivocation-slash mutations
+                // performed above would be lost on the next crash.
+                if registry_dirty_from_epoch_boundary {
+                    if let Err(e) = crate::validator_lifecycle_persistence::persist_global_state(
+                        &validator_registry,
+                        &current_epoch,
+                        &validator_epoch_progress,
+                    )
+                    .await
+                    {
+                        tracing::warn!(
+                            "BLOCKER H: validator lifecycle persist failed at epoch-boundary commit={}: {}",
+                            output.commit_index,
+                            e
+                        );
+                    } else {
+                        tracing::debug!(
+                            "BLOCKER H: validator lifecycle persisted at commit={}",
+                            output.commit_index
+                        );
+                    }
+                }
                 total_committed_txs += output.transactions.len() as u64;
                 total_accepted_txs += exec_result.txs_accepted as u64;
 
                 // SEC-FIX C-12: Generate block reward for the commit leader.
                 // R7 C-4: Skip when the batch already contained a SystemEmission
                 // to prevent double emission in the same commit.
-                if let Some(addr) = leader_address.filter(|_| !exec_result.had_system_emission) {
+                //
+                // BLOCKER I: we also capture the leader's pubkey here so we
+                // can pass it to `distribute_fees` below — both the block
+                // reward and the proposer's fee share need a spending_pubkey
+                // on the created UTXO, otherwise the leader cannot spend
+                // their own reward.
+                let (proposer_address_for_fees, proposer_pubkey_for_fees): (
+                    Option<[u8; 32]>,
+                    Option<Vec<u8>>,
+                ) = if let Some(addr) = leader_address {
                     let author_idx = output.leader.author as usize;
-                    let leader_pk = if author_idx < committee_guard.authorities.len() {
+                    let pk_opt = if author_idx < committee_guard.authorities.len() {
                         let pk = &committee_guard.authorities[author_idx].public_key;
                         if !pk.is_empty() { Some(pk.clone()) } else { None }
                     } else {
                         None
                     };
-                    let reward = tx_executor.generate_block_reward(addr, leader_pk);
-                    if reward > 0 {
-                        tracing::info!(
-                            "Block reward: {} MISAKA to leader {} (commit {})",
-                            reward as f64 / 1_000_000_000.0,
-                            hex::encode(&addr[..8]),
+
+                    if !exec_result.had_system_emission {
+                        let reward = tx_executor.generate_block_reward(addr, pk_opt.clone());
+                        if reward > 0 {
+                            tracing::info!(
+                                "Block reward: {} MISAKA to leader {} (commit {})",
+                                reward as f64 / 1_000_000_000.0,
+                                hex::encode(&addr[..8]),
+                                output.commit_index,
+                            );
+                        }
+                    }
+
+                    (Some(addr), pk_opt)
+                } else {
+                    (None, None)
+                };
+
+                drop(committee_guard);
+
+                // BLOCKER I: distribute §5.5 fee split (50% proposer / 10%
+                // treasury / 40% burn). When there is no proposer address
+                // (observer node, or leader not yet identified), the entire
+                // fee pot burns — safer than letting it silently vanish.
+                if exec_result.total_fees > 0 {
+                    if let Some(addr) = proposer_address_for_fees {
+                        let split = tx_executor.distribute_fees(
                             output.commit_index,
+                            exec_result.total_fees,
+                            addr,
+                            proposer_pubkey_for_fees.clone(),
+                            treasury_address_for_fees,
+                        );
+                        tracing::debug!(
+                            "BLOCKER I: commit {} fee split — proposer={} treasury={} burned={} (treasury_active={})",
+                            output.commit_index,
+                            split.proposer_share,
+                            split.treasury_share,
+                            split.burned_share,
+                            split.treasury_active,
+                        );
+                    } else {
+                        tracing::warn!(
+                            "BLOCKER I: commit {} had {} fees but no proposer address — entire pot burned",
+                            output.commit_index,
+                            exec_result.total_fees
                         );
                     }
                 }
-
-                drop(committee_guard);
 
                 // Update shared persistent block height
                 block_height_writer.store(
@@ -4410,6 +4873,15 @@ async fn start_narwhal_node(
 
                     let mut tx_map = committed_txs_writer.write().await;
                     let mut mempool_guard = narwhal_mempool.mempool.lock().await;
+                    // BLOCKER H: accumulate every tx_index + addr_index
+                    // entry for this commit into buffers, then issue ONE
+                    // atomic `write_commit_indexes` batch at the end.
+                    // Replaces the per-tx `put_tx_detail` / `put_addr_entry`
+                    // calls which were non-atomic — a crash mid-loop could
+                    // leave the explorer with a half-indexed commit.
+                    let mut pending_tx_details: Vec<([u8; 32], Vec<u8>)> =
+                        Vec::with_capacity(output.transactions.len());
+                    let mut pending_addr_entries: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
                     for raw_tx in &output.transactions {
                         if let Ok(tx) = borsh::from_slice::<misaka_types::utxo::UtxoTransaction>(raw_tx) {
                             let hash = tx.tx_hash();
@@ -4445,14 +4917,18 @@ async fn start_narwhal_node(
                                 memo: memo.clone(),
                             };
 
-                            // Persist to RocksDB
+                            // BLOCKER H: stage for the atomic batch below
+                            // instead of issuing a single-key `put_cf` here.
                             if let Ok(json_bytes) = serde_json::to_vec(&detail) {
-                                if let Err(e) = tx_index_store.put_tx_detail(&hash, &json_bytes) {
-                                    tracing::warn!("Failed to persist tx_index: {}", e);
-                                }
+                                pending_tx_details.push((hash, json_bytes));
+                            } else {
+                                tracing::warn!(
+                                    "BLOCKER H: failed to serialize tx_index for {}",
+                                    hash_hex
+                                );
                             }
 
-                            // Persist address index entries for outputs
+                            // Stage address index entries for outputs.
                             for out_summary in &outputs_summary {
                                 let addr_ref = AddressTxRef {
                                     tx_hash: hash_hex.clone(),
@@ -4467,12 +4943,13 @@ async fn start_narwhal_node(
                                         "{}:{:016x}:{}",
                                         out_summary.address, current_height, hash_hex
                                     );
-                                    if let Err(e) = tx_index_store.put_addr_entry(
-                                        addr_key.as_bytes(),
-                                        &ref_bytes,
-                                    ) {
-                                        tracing::warn!("Failed to persist addr_index: {}", e);
-                                    }
+                                    pending_addr_entries
+                                        .push((addr_key.into_bytes(), ref_bytes));
+                                } else {
+                                    tracing::warn!(
+                                        "BLOCKER H: failed to serialize addr_index for {}",
+                                        hash_hex
+                                    );
                                 }
                             }
 
@@ -4480,6 +4957,33 @@ async fn start_narwhal_node(
                             tx_map.insert(hash, detail);
                             mempool_guard.remove(&hash);
                         }
+                    }
+
+                    // BLOCKER H: one atomic WriteBatch for this commit's
+                    // tx_index + addr_index + last_committed_index marker.
+                    // Success means every entry plus the index marker
+                    // landed together; failure means none of them did.
+                    if let Err(e) = tx_index_store.write_commit_indexes(
+                        output.commit_index,
+                        &pending_tx_details,
+                        &pending_addr_entries,
+                    ) {
+                        tracing::warn!(
+                            "BLOCKER H: atomic commit-index batch failed at commit={} \
+                             tx_entries={} addr_entries={}: {}",
+                            output.commit_index,
+                            pending_tx_details.len(),
+                            pending_addr_entries.len(),
+                            e
+                        );
+                    } else {
+                        tracing::debug!(
+                            "BLOCKER H: persisted commit={} atomic batch \
+                             tx_entries={} addr_entries={}",
+                            output.commit_index,
+                            pending_tx_details.len(),
+                            pending_addr_entries.len(),
+                        );
                     }
                     // Evict oldest entries from in-memory cache if too large
                     if tx_map.len() > 10_000 {
@@ -4492,6 +4996,24 @@ async fn start_narwhal_node(
                         for (k, _) in entries.into_iter().take(excess) {
                             tx_map.remove(&k);
                         }
+                    }
+                } else {
+                    // BLOCKER H: even on an empty commit (no tx_index or
+                    // addr_index entries), stamp the `last_committed_index`
+                    // marker so recovery knows the DAG store is caught up
+                    // to this index and the UTXO snapshot can be compared
+                    // against it at startup.
+                    if let Err(e) = tx_index_store.write_commit_indexes(
+                        output.commit_index,
+                        &[],
+                        &[],
+                    ) {
+                        tracing::warn!(
+                            "BLOCKER H: failed to stamp last_committed_index={} \
+                             on empty commit: {}",
+                            output.commit_index,
+                            e
+                        );
                     }
                 }
 
@@ -4513,14 +5035,23 @@ async fn start_narwhal_node(
                 // wasteful 2GB+ writes on empty blocks. The snapshot is saved
                 // synchronously here (blocking) because spawn_blocking + clone
                 // doubles memory usage and triggers OOM on small servers.
+                //
+                // BLOCKER A: use `save_snapshot` so `processed_burns` and
+                // `total_emitted` are persisted atomically with the UTXO set.
+                // The prior `utxo_set().save_to_file()` silently wrote
+                // `total_emitted = 0` and `processed_burns = []`, which meant
+                // the supply cap and the burn-replay guard reset on every
+                // restart.
                 if exec_result.txs_accepted > 0 {
-                    if let Err(e) = tx_executor.utxo_set().save_to_file(&utxo_snapshot_path) {
+                    if let Err(e) = tx_executor.save_snapshot(&utxo_snapshot_path) {
                         tracing::warn!("Failed to save UTXO snapshot: {}", e);
                     } else {
                         tracing::info!(
-                            "UTXO snapshot saved at commit {} (height={}) [triggered by {} accepted tx(s)]",
+                            "UTXO snapshot saved at commit {} (height={}, total_emitted={}, processed_burns={}) [triggered by {} accepted tx(s)]",
                             output.commit_index,
                             tx_executor.utxo_set().height,
+                            tx_executor.total_emitted(),
+                            tx_executor.processed_burns().len(),
                             exec_result.txs_accepted,
                         );
                     }
@@ -4605,12 +5136,16 @@ async fn start_narwhal_node(
             }
             // Graceful shutdown: save UTXO snapshot so balances survive restart.
             // This is a single save (not per-commit clone) so OOM is not a concern.
-            if let Err(e) = tx_executor.utxo_set().save_to_file(&utxo_snapshot_path) {
+            //
+            // BLOCKER A: same full-metadata save as the per-commit path above.
+            if let Err(e) = tx_executor.save_snapshot(&utxo_snapshot_path) {
                 tracing::warn!("Failed to save UTXO snapshot on shutdown: {}", e);
             } else {
                 tracing::info!(
-                    "UTXO snapshot saved on shutdown (height={})",
+                    "UTXO snapshot saved on shutdown (height={}, total_emitted={}, processed_burns={})",
                     tx_executor.utxo_set().height,
+                    tx_executor.total_emitted(),
+                    tx_executor.processed_burns().len(),
                 );
             }
 
@@ -5144,6 +5679,196 @@ mod tests {
         ));
     }
 
+    // ─── BLOCKER J: GenesisBuilder wiring tests ──────────────────────────
+    //
+    // Pins down the contract of the wiring added in BLOCKER J:
+    // * The canonical genesis hash is fully determined by
+    //   (chain_id, protocol_version, timestamp=0, validator set,
+    //    treasury allocation) — no wall-clock input.
+    // * Every node that loads the same `genesis_committee.toml` and
+    //   passes the same `--treasury-*` flags obtains the same 32-byte
+    //   genesis hash.
+    // * Any change to `chain_id`, validator stake, validator hostname,
+    //   or treasury amount/address produces a DIFFERENT hash.
+
+    fn mk_pk(seed: u8) -> Vec<u8> {
+        // 1952-byte ML-DSA-65 placeholder — the builder does not verify
+        // the key internally, only the length.
+        vec![seed; 1952]
+    }
+
+    fn build_genesis_for_test(
+        chain_id: u32,
+        treasury: Option<([u8; 32], u64)>,
+    ) -> misaka_genesis_builder::Genesis {
+        let mut b = misaka_genesis_builder::GenesisBuilder::new()
+            .with_protocol_version(misaka_protocol_config::ProtocolVersion::V1)
+            .with_chain_id(chain_id)
+            .with_genesis_timestamp_ms(0)
+            .add_validator(mk_pk(0xA1), 1_000, "127.0.0.1:16111")
+            .add_validator(mk_pk(0xA2), 1_000, "127.0.0.1:16112")
+            .add_validator(mk_pk(0xA3), 1_000, "127.0.0.1:16113");
+        if let Some((addr, amount)) = treasury {
+            b = b.with_treasury(addr, amount);
+        }
+        b.build().expect("test-only builder must build")
+    }
+
+    #[test]
+    fn blocker_j_genesis_hash_is_deterministic_across_invocations() {
+        let g1 = build_genesis_for_test(2, None);
+        let g2 = build_genesis_for_test(2, None);
+        assert_eq!(
+            g1.hash(),
+            g2.hash(),
+            "GenesisBuilder must be deterministic across invocations"
+        );
+    }
+
+    #[test]
+    fn blocker_j_genesis_hash_changes_with_chain_id() {
+        // The builder requires a treasury for mainnet (chain_id=1), so we
+        // supply the SAME treasury to both genesis instances and verify that
+        // only the differing chain_id alters the hash.
+        let treasury = Some(([0xCDu8; 32], 1_000_000));
+        let g_testnet = build_genesis_for_test(2, treasury);
+        let g_mainnet = build_genesis_for_test(1, treasury);
+        assert_ne!(
+            g_testnet.hash(),
+            g_mainnet.hash(),
+            "chain_id must be part of the canonical hash"
+        );
+    }
+
+    #[test]
+    fn blocker_j_genesis_hash_changes_with_treasury() {
+        let no_treasury = build_genesis_for_test(2, None);
+        let with_treasury = build_genesis_for_test(2, Some(([0xCDu8; 32], 1_000_000)));
+        assert_ne!(
+            no_treasury.hash(),
+            with_treasury.hash(),
+            "treasury UTXO must be part of the canonical hash"
+        );
+
+        let different_amount = build_genesis_for_test(2, Some(([0xCDu8; 32], 999_999)));
+        assert_ne!(
+            with_treasury.hash(),
+            different_amount.hash(),
+            "treasury amount must be part of the canonical hash"
+        );
+
+        let different_addr = build_genesis_for_test(2, Some(([0xABu8; 32], 1_000_000)));
+        assert_ne!(
+            with_treasury.hash(),
+            different_addr.hash(),
+            "treasury address must be part of the canonical hash"
+        );
+    }
+
+    #[test]
+    fn blocker_j_zero_timestamp_is_cross_node_reproducible() {
+        // The production wiring fixes `with_genesis_timestamp_ms(0)` so
+        // every validator that loads the same committee manifest will
+        // agree on the genesis hash without coordinating wall-clocks.
+        // This test mirrors that call to guarantee the assumption stays
+        // visible to anyone who later tries to "improve" the wiring by
+        // reading `chrono::Utc::now()`.
+        let g = build_genesis_for_test(2, None);
+        assert_eq!(
+            g.genesis_timestamp_ms, 0,
+            "BLOCKER J: production wiring must keep genesis_timestamp_ms = 0"
+        );
+    }
+
+    // ─── BLOCKER D: equivocation → slashing wiring tests ─────────────────
+    //
+    // Pins down the invariants the production wiring relies on:
+    // * `authority_map::pubkey_to_validator_id` (used to map the DAG's
+    //   `AuthorityIndex` to a 32-byte staking id) produces the EXACT
+    //   same hash as the ad-hoc `Sha3_256::digest(pk)` path used for
+    //   `leader_address` in the commit loop. If these two diverge, a
+    //   proposer could receive rewards at one id but be slashed at
+    //   another.
+    // * Committee authorities can be looked up by index and their
+    //   `public_key` fed through `pubkey_to_validator_id` to produce the
+    //   staking id.
+    // * `SlashSeverity::Severe` resolves to the 2000 BPS (20 %) rate
+    //   the production wiring applies for equivocation. This is the
+    //   rate in §5.6 of the economic spec.
+
+    #[test]
+    fn blocker_d_pubkey_to_validator_id_matches_commit_loop_leader_address() {
+        use sha3::{Digest, Sha3_256};
+        let pk = vec![0xAAu8; 1952];
+        let via_authority_map =
+            misaka_consensus::slashing::authority_map::pubkey_to_validator_id(&pk);
+        let via_commit_loop: [u8; 32] = Sha3_256::digest(&pk).into();
+        assert_eq!(
+            via_authority_map, via_commit_loop,
+            "BLOCKER D: authority_map::pubkey_to_validator_id MUST match the \
+             SHA3-256(pubkey) derivation used in the commit loop for leader_address \
+             — divergence would split reward address from slash id"
+        );
+    }
+
+    #[test]
+    fn blocker_d_authority_index_maps_to_distinct_validator_ids() {
+        // Mirrors the lookup the drain-and-slash hook performs:
+        //     committee.authorities[author_idx].public_key
+        //       → pubkey_to_validator_id
+        // Using distinct pubkeys guarantees distinct validator ids.
+        let pks = [vec![0x01u8; 1952], vec![0x02u8; 1952], vec![0x03u8; 1952]];
+        let ids: Vec<[u8; 32]> = pks
+            .iter()
+            .map(|pk| misaka_consensus::slashing::authority_map::pubkey_to_validator_id(pk))
+            .collect();
+
+        // All distinct.
+        assert_ne!(ids[0], ids[1]);
+        assert_ne!(ids[1], ids[2]);
+        assert_ne!(ids[0], ids[2]);
+
+        // Deterministic — calling twice yields the same id.
+        let id_again = misaka_consensus::slashing::authority_map::pubkey_to_validator_id(&pks[1]);
+        assert_eq!(ids[1], id_again);
+    }
+
+    #[test]
+    fn blocker_d_severe_slash_rate_is_2000_bps() {
+        // The production wiring calls `StakingRegistry::slash(vid,
+        // SlashSeverity::Severe, epoch)`. The Severe rate MUST be 2000
+        // BPS (20 %) — if this ever changes the economic spec §5.6
+        // changes and we need to update it deliberately.
+        let mainnet = misaka_consensus::staking::StakingConfig::mainnet();
+        assert_eq!(
+            mainnet.slash_severe_bps, 2000,
+            "BLOCKER D: equivocation applies Severe slash, which MUST be 2000 BPS (20%)"
+        );
+        let testnet = misaka_consensus::staking::StakingConfig::testnet();
+        assert_eq!(
+            testnet.slash_severe_bps, 2000,
+            "BLOCKER D: testnet Severe rate must match mainnet for wiring parity"
+        );
+    }
+
+    #[test]
+    fn blocker_d_authority_out_of_range_cannot_produce_id() {
+        // Negative test: if the DAG reports evidence at `authority =
+        // U` and the committee has fewer than U+1 entries (e.g. after
+        // a ReloadCommittee), the drain-and-slash hook logs a warn and
+        // skips instead of slashing the wrong validator id.
+        //
+        // We emulate the lookup directly here — `Committee::authority`
+        // is tested in misaka-dag; what we pin is that the index path
+        // in main.rs (committee.authorities.get(idx)) returns None for
+        // out-of-range indices.
+        let authorities: Vec<Vec<u8>> = vec![vec![1u8; 1952], vec![2u8; 1952], vec![3u8; 1952]];
+        let out_of_range_idx: usize = 99;
+        assert!(
+            authorities.get(out_of_range_idx).is_none(),
+            "BLOCKER D: out-of-range authority index must NOT map to a validator id"
+        );
+    }
     // ─── Permissionless SR: OBSERVER dynamic-validator expansion ─────
     //
     // Verifies the Phase 8.5 gate: a validator that is NOT in the

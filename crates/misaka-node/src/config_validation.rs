@@ -83,7 +83,7 @@ impl Default for TestnetConfig {
             chain_name: "MISAKA Testnet".into(),
             p2p_port: 6690,
             rpc_port: 3001,
-            block_time_secs: 2, // Fast lane default
+            block_time_secs: 10, // Fast lane default (v0.8.9 Phase 0.5a)
             max_inbound_peers: 32,
             max_outbound_peers: 8,
             node_mode: NodeMode::Public,

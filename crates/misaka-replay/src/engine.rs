@@ -94,9 +94,7 @@ impl<S: ReadOnlyStore, E: ReplayExecutor> ReplayEngine<S, E> {
             // Deserialize and apply each transaction
             for (tx_idx, raw_tx) in block.transactions.iter().enumerate() {
                 let tx: UtxoTransaction = borsh::from_slice(raw_tx).map_err(|e| {
-                    ReplayError::DeserializationError(format!(
-                        "height {height} tx {tx_idx}: {e}"
-                    ))
+                    ReplayError::DeserializationError(format!("height {height} tx {tx_idx}: {e}"))
                 })?;
 
                 let state_before = self.executor.compute_state_root(&utxo_set);
@@ -196,9 +194,8 @@ impl<S: ReadOnlyStore, E: ReplayExecutor> ReplayEngine<S, E> {
         };
 
         for (tx_idx, raw_tx) in block.transactions.iter().enumerate() {
-            let tx: UtxoTransaction = borsh::from_slice(raw_tx).map_err(|e| {
-                ReplayError::DeserializationError(format!("tx {tx_idx}: {e}"))
-            })?;
+            let tx: UtxoTransaction = borsh::from_slice(raw_tx)
+                .map_err(|e| ReplayError::DeserializationError(format!("tx {tx_idx}: {e}")))?;
 
             let root_before = self.executor.compute_state_root(&utxo_set);
             let apply_result = self.executor.apply_tx(&mut utxo_set, &tx, &ctx);

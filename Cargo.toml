@@ -31,17 +31,50 @@ members = [
     "crates/misaka-utils",
     "crates/misaka-security",
     "crates/misaka-txscript",
-    # ── v0.8.0 merged adoption (Phase 1 = dead code only, wiring comes in PR C/D) ──
-    # These crates are part of the misaka-test-net-merged v0.8.0 snapshot that
-    # ships the eUTXO / SMT / SDK / audit layer. They build standalone but are
-    # NOT referenced by misaka-node in Phase 1 mainnet, so their output is not
-    # compiled into the production node. Phase 1 ships pure UTXO + self-stake.
-    # v0.9.0 hard fork wires misaka-smt into utxo_set state root.
-    # v2.0 hard fork wires eUTXO execution (misaka-eutxo-audit, sdk, etc.).
+    # ── v0.8.0 merged-snapshot crates: wiring status matrix (BLOCKER K) ──
+    #
+    # | crate                          | status  | production caller              | target |
+    # |--------------------------------|---------|--------------------------------|--------|
+    # | misaka-smt                     | WIRED   | misaka-storage/utxo_set.rs     | v0.8.0 |
+    # | misaka-genesis-builder         | WIRING  | BLOCKER J (this milestone)     | v0.8.0 |
+    # | misaka-authority-aggregation   | DEAD    | — (planned for v0.9.0)         | v0.9.0 |
+    # | misaka-loadgen                 | DEAD    | — (bench / testnet only)       | dev-only |
+    #
+    # "DEAD" crates are compiled by `cargo build --workspace` but no
+    # consumer links their symbols into the production node. This is
+    # deliberate for the v0.8.0 mainnet surface — we want the code in
+    # tree and type-checked so follow-up PRs can wire it, but the
+    # symbols must not smuggle unverified behaviour into the node.
+    #
+    # When you add a new public API to a DEAD crate, add its first
+    # production caller in the same PR. If you cannot add a caller,
+    # hide the API behind a feature flag or keep it private — a
+    # caller-less `pub fn` is a review-blocking regression under the
+    # planned `cargo-udeps` / `cargo-machete` CI gate (BLOCKER L).
     "crates/misaka-smt",
     "crates/misaka-genesis-builder",
     "crates/misaka-authority-aggregation",
     "crates/misaka-loadgen",
+    # ── v0.8.0 eUTXO dead crates (wiring status matrix, BLOCKER K) ──
+    #
+    # | crate                          | status  | production caller              | target |
+    # |--------------------------------|---------|--------------------------------|--------|
+    # | misaka-sdk                     | DEAD    | — (only misaka-eutxo-audit,    | v2.0   |
+    # |                                |         |   itself dead)                 |        |
+    # | misaka-light-client            | DEAD    | — (planned for v0.9.0)         | v0.9.0 |
+    # | misaka-replay                  | DEAD    | — (debugging / post-mortem)    | dev-only |
+    #
+    # These depend on the eUTXO types + dag_types added by PR B. They
+    # ship as dead code — buildable but not linked by misaka-node.
+    #
+    # misaka-eutxo-audit is STILL deferred because it pulls features that
+    # need to be declared in misaka-mempool / misaka-txscript
+    # (eutxo-v1-vm, transitive ModEu wiring) which is larger than the
+    # PR-D2 scope. Re-enable in a dedicated follow-up after those
+    # feature flags land.
+    "crates/misaka-sdk",
+    "crates/misaka-light-client",
+    "crates/misaka-replay",
     # misaka-vm: DELETED (Phase 25). VM is not implemented.
     # See docs/design/VM_ROADMAP.md for v1.1 plan.
     "components/addressmanager",
@@ -51,6 +84,17 @@ members = [
     "wallet/core",
 ]
 exclude = [
+    # BLOCKER B: `relayer` and `solana-bridge` are explicitly out of scope
+    # for the v0.8.0 mainnet launch. Keeping them in `[workspace.exclude]`
+    # means:
+    #   - `cargo build --workspace [--all-features]` does NOT compile them
+    #   - the CI gate does NOT gate on bridge code
+    #   - external audits of the workspace do NOT include unimplemented bridge
+    # Build them on demand with `cd relayer && cargo build`. The relayer
+    # binary itself FATALs on mainnet until the mint endpoint
+    # (`POST /api/bridge/submit_mint`) is implemented, and the node-side
+    # stub in `crates/misaka-node/src/main.rs` always rejects mint requests
+    # with `accepted: false`. See `relayer/README.md` for the full status.
     "relayer",
     "solana-bridge",
 ]
@@ -114,6 +158,11 @@ once_cell = "1"
 async-trait = "0.1"
 chacha20 = "0.9"
 num-bigint = "0.4"
+# BLOCKER C: BIP-39 mnemonic (English wordlist, English-only features).
+# The prior wallet/core mnemonic used synthetic "word0042" tokens and
+# was explicitly flagged as a mainnet blocker; we ship `bip39 = "2"`
+# pinned to the English language feature (no BIP-39 language bloat).
+bip39 = { version = "2", default-features = false }
 
 [workspace.lints.clippy]
 unwrap_used = "warn"

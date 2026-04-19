@@ -4,6 +4,13 @@ description = "Core types for MISAKA Network — PQC-native"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+
+[features]
+default = []
+## eUTXO v2 type definitions (wire format frozen at E1).
+## Does NOT include VM execution or cost model values.
+eutxo-v1-types = []
+
 [dependencies]
 sha3 = { workspace = true }
 serde = { workspace = true }

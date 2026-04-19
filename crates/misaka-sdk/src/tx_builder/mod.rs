@@ -203,8 +203,7 @@ impl TxBuilder {
     /// Build with structural validation.
     pub fn build(self) -> Result<UtxoTransactionV2, SdkError> {
         let tx = self.build_unchecked()?;
-        validate_structural(&tx)
-            .map_err(|e| SdkError::ValidationFailed(format!("{}", e)))?;
+        validate_structural(&tx).map_err(|e| SdkError::ValidationFailed(format!("{}", e)))?;
         Ok(tx)
     }
 
