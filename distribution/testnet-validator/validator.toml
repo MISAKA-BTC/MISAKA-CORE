@@ -1,0 +1,70 @@
+# MISAKA Testnet — Validator config template (v0.9.0)
+#
+# Copy to ~/misaka-config/validator.toml and start the node with:
+#
+#   misaka-node \
+#       --config ~/misaka-config/validator.toml \
+#       --genesis-path ~/misaka-config/genesis_committee.toml \
+#       run
+#
+# See docs/JOIN_TESTNET.md for the full procedure.
+
+[chain]
+chain_id = 2
+chain_name = "MISAKA Testnet"
+
+[node]
+# "validator" = committee member (proposes + votes), key required
+# "observer"  = read-only sync, ephemeral key auto-generated
+mode = "validator"
+data_dir = "/var/lib/misaka"
+log_level = "info"
+
+[p2p]
+# Narwhal relay port is determined by genesis_committee.toml network_address.
+# This [p2p].port is a fallback for the legacy GhostDAG-compat code path
+# and does NOT affect the Narwhal listener. Leave as-is.
+port = 6691
+max_inbound_peers = 32
+max_outbound_peers = 8
+
+[rpc]
+# Loopback only. DO NOT set bind_addr to 0.0.0.0 without a reverse proxy +
+# Bearer auth + IP allowlist — the RPC surfaces validator state.
+port = 3001
+
+[consensus]
+# v0.8.9 raised FAST_LANE_BLOCK_TIME_SECS from 2 → 10 for storage efficiency.
+fast_block_time_secs = 10
+
+[faucet]
+# Testnet participants do NOT need the faucet enabled on their own node.
+# The operator seed runs faucet; participants query it via /api/faucet.
+enabled = false
+
+[security]
+# Keystore MUST be encrypted (Argon2id + ChaCha20-Poly1305).
+# Set MISAKA_VALIDATOR_PASSPHRASE or MISAKA_VALIDATOR_PASSPHRASE_FILE.
+require_encrypted_keystore = true
+
+[prune_mode]
+# "Archival"                  — keep full history (20-50 GB over 90 days)
+# { mode = "Pruned", keep_rounds = N }
+#                             — drop rounds below tip-N (min N = 1000)
+#
+# Recommended for participants: Archival for the first week of smoke,
+# switch to Pruned keep_rounds=10000 (~27 h) if disk is tight.
+mode = "Archival"
+
+# ── Optional tuning (uncomment if needed) ──
+
+# [staking]
+# min_stake = 100_000_000_000       # 100,000 MSK in base units
+# unbonding_period = 10             # epochs (testnet)
+# max_validators = 50
+
+# [dag]
+# retention_rounds = 10000
+
+# [node_observability]
+# metrics_bind = "127.0.0.1:3002"

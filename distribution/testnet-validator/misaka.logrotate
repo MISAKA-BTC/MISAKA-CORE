@@ -1,0 +1,17 @@
+# MISAKA Testnet — logrotate template
+# Copy to /etc/logrotate.d/misaka
+#
+# Rotates /var/log/misaka-node.log daily, compresses, keeps 14 days.
+# Uses `copytruncate` so the running node does not need a reload —
+# safe because misaka-node opens the log in append mode.
+
+/var/log/misaka-node.log {
+    daily
+    rotate 14
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+    create 0644 ubuntu ubuntu
+}

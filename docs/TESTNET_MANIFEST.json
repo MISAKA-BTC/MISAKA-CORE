@@ -1,33 +1,38 @@
 {
+  "_comment": "MISAKA Testnet manifest — consumed by scripts/testnet-join.sh, launcher tools, and the /api/get_chain_info RPC for consistency checks. Kept in-sync with Cargo workspace version (currently 0.9.0).",
+
   "network": "MISAKA Testnet",
-  "version": "0.5.1",
-  "consensus": "Narwhal/Bullshark",
+  "version": "0.9.0",
+  "previousVersions": ["0.8.9", "0.8.8", "0.8.6", "0.5.1"],
+
+  "consensus": "Narwhal/Bullshark (Mysticeti-equivalent)",
   "pqSignature": "ML-DSA-65 (FIPS 204 / Dilithium3)",
+  "stateCommitment": "Sparse Merkle Tree (SMT) — MISAKA:state_root:v5, live since v0.9.0",
 
   "chainId": 2,
   "networkId": "misaka-testnet-1",
   "addressPrefix": "misakatest1",
 
-  "seedNodes": [
-    {
-      "host": "160.16.131.119",
-      "rpcPort": 3000,
-      "p2pPort": 6690,
-      "location": "Tokyo, Japan"
-    }
-  ],
+  "seedNodes": {
+    "_comment": "Populated by the operator announce. Before the announce these entries are placeholders; clients that see a blank seed list should wait for the operator announce (Discord #testnet-announce) before attempting to join.",
+    "_status": "pending-announce-2026-04-19",
+    "entries": []
+  },
 
   "endpoints": {
-    "rpc": "http://160.16.131.119:3000",
-    "health": "http://160.16.131.119:3000/api/health",
-    "status": "http://160.16.131.119:3000/api/status",
-    "faucet": "http://160.16.131.119:3000/api/faucet",
-    "metrics": "http://160.16.131.119:3000/api/metrics",
-    "chainInfo": "http://160.16.131.119:3000/api/get_chain_info",
-    "submitTx": "http://160.16.131.119:3000/api/submit_tx"
+    "_comment": "Operator-published endpoints. Placeholders until announce.",
+    "rpc": "<pending>",
+    "health": "<pending>/api/health",
+    "chainInfo": "<pending>/api/get_chain_info",
+    "peers": "<pending>/api/get_peers",
+    "metrics": "<pending>/api/metrics",
+    "submitTx": "<pending>/api/submit_tx",
+    "faucet": "<pending>/api/faucet",
+    "validatorStatus": "<pending>/api/validator/me"
   },
 
   "bridge": {
+    "_comment": "Solana devnet bridge. Program ID / mint carry over from v0.5.x and are still valid.",
     "ui": "https://testbridge.misakastake.com",
     "solanaNetwork": "devnet",
     "solanaRpc": "https://api.devnet.solana.com",
@@ -39,16 +44,68 @@
   "faucet": {
     "defaultAmount": 100000,
     "cooldownSeconds": 300,
-    "endpoint": "POST /api/faucet {\"address\":\"...\",\"amount\":100000}"
+    "endpoint": "POST /api/faucet {\"address\":\"misakatest1...\",\"amount\":100000}",
+    "_note": "Faucet is enabled on operator seeds but disabled on participant nodes by default. See config/validator.toml [faucet].enabled."
   },
 
-  "genesisTimestamp": "2025-01-01T00:00:00Z",
+  "consensusParams": {
+    "blockTimeSecs": 10,
+    "_blockTimeNote": "FAST_LANE_BLOCK_TIME_SECS — raised from 2 → 10 in v0.8.9 for storage efficiency",
+    "checkpointInterval": 20,
+    "epochLengthBlocks": 360,
+    "_epochLengthNote": "Roughly 1 hour at 10 s/block; final value confirmed at announce",
+    "minStake": 100000000000,
+    "_minStakeNote": "100,000 MSK in base units (1 MSK = 10^6 base); testnet distributes via faucet",
+    "unbondingPeriodEpochs": 10,
+    "_unbondingNote": "Testnet value; mainnet uses much longer period (separate bug tracked in docs/issues/)",
+    "maxSuspendedPerAuthor": 256,
+    "peerReplayRoundWindow": 100
+  },
+
+  "storage": {
+    "pruneMode": "Archival",
+    "_pruneModeNote": "Default; users may opt into Pruned { keep_rounds = N } — see JOIN_TESTNET.md §3",
+    "maxTotalWalSizeMb": 512,
+    "blobDbEnabled": true,
+    "zstdEnabled": true,
+    "cfEnumShipped": "v0.9.0 — StorageCf + NarwhalCf enum",
+    "smtCanonical": "v5 domain tag — MISAKA:state_root:v5"
+  },
+
+  "genesisTimestamp": "pending-announce",
   "maxSupply": 10000000000,
 
   "minimumRequirements": {
-    "ram": "2 GB",
-    "disk": "20 GB",
-    "os": "Ubuntu 22.04+ / macOS 13+",
-    "rust": "1.75+"
+    "ram": "4 GB (validator), 2 GB (observer)",
+    "disk": "20 GB (50 GB recommended for 90-day retention)",
+    "cpu": "2 cores (4 cores recommended)",
+    "network": "10 Mbps up / down (100 Mbps recommended)",
+    "os": "Ubuntu 22.04 LTS / macOS 13+",
+    "rust": "1.75+ (only if building from source)"
+  },
+
+  "ports": {
+    "narwhalRelayTcp": 16110,
+    "_narwhalRelayNote": "REQUIRED inbound-reachable for validator mode",
+    "rpcTcp": 3001,
+    "_rpcNote": "Loopback (127.0.0.1) only — DO NOT expose publicly without reverse proxy + Bearer auth",
+    "legacyP2pTcpFallback": 6691,
+    "_legacyP2pNote": "Fallback only; real listener comes from genesis_committee.toml network_address"
+  },
+
+  "onboarding": {
+    "validatorJoinDoc": "docs/JOIN_TESTNET.md",
+    "troubleshootingDoc": "docs/JOIN_TESTNET_TROUBLESHOOTING.md",
+    "observerPackage": "distribution/public-node/README.md",
+    "operatorRunbook": "docs/ops/VALIDATOR_RUNBOOK.md",
+    "upgradeProcedure": "docs/ops/UPGRADE_PROCEDURE.md"
+  },
+
+  "supportChannels": {
+    "_comment": "Concrete URLs / invites get filled at announce time",
+    "discordTestnetSupport": "<pending-announce>",
+    "discordAnnouncements": "<pending-announce>",
+    "githubIssues": "https://github.com/MISAKA-BTC/MISAKA-CORE/issues",
+    "githubReleases": "https://github.com/MISAKA-BTC/MISAKA-CORE/releases"
   }
 }

@@ -1,0 +1,54 @@
+[Unit]
+Description=MISAKA Network Validator Node (testnet v0.9.0)
+Documentation=https://github.com/MISAKA-BTC/MISAKA-CORE/blob/main/docs/JOIN_TESTNET.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+
+# Adjust these to match your install layout:
+WorkingDirectory=/home/ubuntu
+ExecStart=/home/ubuntu/MISAKA-CORE/target/release/misaka-node \
+    --config /home/ubuntu/misaka-config/validator.toml \
+    --genesis-path /home/ubuntu/misaka-config/genesis_committee.toml \
+    run
+
+# Passphrase MUST come from a root-owned file (0600) — NEVER from a
+# plaintext Environment= line. Create the file with:
+#   echo -n "your-passphrase" | sudo tee /run/secrets/validator_passphrase
+#   sudo chmod 600 /run/secrets/validator_passphrase
+Environment="MISAKA_VALIDATOR_PASSPHRASE_FILE=/run/secrets/validator_passphrase"
+
+# Auto-restart on any exit; wait 10 s between restarts so a crash loop
+# does not DoS the seed nodes.
+Restart=always
+RestartSec=10
+
+# Resource limits. Raise LimitNOFILE for many peer connections + SST
+# handles; the default 1024 is not enough.
+LimitNOFILE=65536
+LimitNPROC=4096
+
+# Logging — append-only file under /var/log/misaka-node.log.
+# Use systemd-logrotate or the /etc/logrotate.d/misaka template.
+StandardOutput=append:/var/log/misaka-node.log
+StandardError=append:/var/log/misaka-node.log
+SyslogIdentifier=misaka-node
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/misaka /var/log
+ProtectHome=false
+ProtectKernelModules=true
+ProtectKernelTunables=true
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target
