@@ -306,6 +306,110 @@ pub enum Certificate {
     V2(CertificateV2),
 }
 
+// ─── Verify path (Phase 3a Part A.4) ─────────────────────────────
+
+/// Errors returned by [`verify_cert_v2`].
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum VerifyError {
+    /// Phase 3a invariant: `aggregation_slot` must be `None`.
+    /// Any cert carrying a `Some(_)` — regardless of the
+    /// `ProofSystem` variant or contents — is rejected. Phase 3b
+    /// will relax this when real proof verification lands.
+    #[error(
+        "cert rejected: aggregation_slot is Some(_) (system = {system_tag:#04x}) \
+         but Phase 3a rejects any aggregation proof"
+    )]
+    AggregationSlotNotYetAccepted { system_tag: u8 },
+
+    /// The commitment scheme byte tag carried by `vote_refs.scheme`
+    /// is not one this build recognises. Persisted tag bytes are
+    /// stable; this fires only if the cert was produced by a
+    /// future build with a newer scheme.
+    #[error("cert rejected: vote_refs.scheme tag {tag:#04x} not recognised by this build")]
+    UnknownCommitmentScheme { tag: u8 },
+
+    /// `voter_count` disagrees with `voter_ids.len()` supplied by
+    /// the caller. Surfaces mis-framed input before it affects the
+    /// merkle computation.
+    #[error("voter count mismatch: cert claims {claimed}, caller supplied {supplied} voter_ids")]
+    VoterCountMismatch { claimed: u32, supplied: usize },
+
+    /// The merkle root recomputed from `voter_ids` does not match
+    /// the `vote_refs.root` carried in the cert. Either the voter
+    /// list is wrong or the cert has been tampered with.
+    #[error("vote commitment root mismatch: cert carries {stored}, recomputed {recomputed}")]
+    RootMismatch { stored: String, recomputed: String },
+}
+
+/// Verify a [`CertificateV2`] under the Phase 3a invariant.
+///
+/// Caller supplies `voter_ids` — the list of 32-byte voter public
+/// keys corresponding to the epoch's authority set. The verifier:
+///
+/// 1. Rejects any cert with `aggregation_slot = Some(_)` (Phase 3a
+///    contract — no proofs accepted, regardless of their contents).
+/// 2. Rejects any cert whose `vote_refs.scheme` tag is unknown to
+///    this build. Currently only [`CommitmentScheme::Blake3MerkleV1`]
+///    is accepted.
+/// 3. Rejects a mismatch between `cert.vote_refs.voter_count` and
+///    the number of `voter_ids` supplied.
+/// 4. Recomputes the merkle root from `voter_ids` under the cert's
+///    declared scheme and compares against `cert.vote_refs.root`.
+///    Mismatch → `RootMismatch`.
+///
+/// The verifier does **not** check:
+/// - the bit-packed `voters` vector against anything (that's an
+///   authority-set lookup responsibility),
+/// - signatures (not included in the cert in Phase 3a),
+/// - the cert digest (caller's job — verify against the DAG
+///   reference that cites it).
+///
+/// Pure function: no I/O, no state. Two nodes reach the same verdict
+/// given the same inputs.
+pub fn verify_cert_v2(cert: &CertificateV2, voter_ids: &[[u8; 32]]) -> Result<(), VerifyError> {
+    // (1) No aggregation proof in Phase 3a.
+    if let Some(agg) = &cert.aggregation_slot {
+        return Err(VerifyError::AggregationSlotNotYetAccepted {
+            system_tag: agg.system.tag(),
+        });
+    }
+
+    // (2) Recognised scheme.
+    match cert.vote_refs.scheme {
+        CommitmentScheme::Blake3MerkleV1 => {} // When new variants land, add arms here. The match is
+                                               // deliberately non-exhaustive-catching so the compiler
+                                               // flags the missing arm on future additions.
+    }
+
+    // (3) Voter count sanity.
+    let supplied = voter_ids.len();
+    if cert.vote_refs.voter_count as usize != supplied {
+        return Err(VerifyError::VoterCountMismatch {
+            claimed: cert.vote_refs.voter_count,
+            supplied,
+        });
+    }
+
+    // (4) Recompute root under the declared scheme and compare.
+    let recomputed = match cert.vote_refs.scheme {
+        CommitmentScheme::Blake3MerkleV1 => {
+            let mut leaves: Vec<[u8; 32]> = voter_ids
+                .iter()
+                .map(|id| Blake3MerkleV1::leaf(id, &[]))
+                .collect();
+            Blake3MerkleV1::root(&mut leaves)
+        }
+    };
+    if recomputed != cert.vote_refs.root {
+        return Err(VerifyError::RootMismatch {
+            stored: hex::encode(&cert.vote_refs.root[..8]),
+            recomputed: hex::encode(&recomputed[..8]),
+        });
+    }
+
+    Ok(())
+}
+
 // ─── Tests ────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -518,5 +622,132 @@ mod tests {
             }
             Certificate::V1(_) => panic!("expected V2 variant"),
         }
+    }
+
+    // ── verify_cert_v2 (A.4) ──────────────────────────────────────
+
+    fn make_cert_with_voters(voter_ids: &[[u8; 32]], with_agg: bool) -> CertificateV2 {
+        let voter_count = voter_ids.len() as u32;
+        CertificateV2 {
+            header: CheckpointDigest([0xAB; 32]),
+            vote_refs: VoteCommitment::with_blake3(
+                voter_ids,
+                vec![0xFF; (voter_count as usize).div_ceil(8).max(1)],
+            ),
+            epoch: 1,
+            aggregation_slot: if with_agg {
+                Some(AggregationProof {
+                    system: ProofSystem::ReservedV1,
+                    proof: vec![],
+                    public_inputs: vec![],
+                    generated_at: 0,
+                })
+            } else {
+                None
+            },
+        }
+    }
+
+    #[test]
+    fn verify_rejects_any_aggregation_slot_in_phase_3a() {
+        let voters = [voter(0x01), voter(0x02)];
+        let cert = make_cert_with_voters(&voters, true);
+        let err = verify_cert_v2(&cert, &voters).expect_err("must reject");
+        match err {
+            VerifyError::AggregationSlotNotYetAccepted { system_tag } => {
+                assert_eq!(system_tag, ProofSystem::ReservedV1.tag());
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn verify_accepts_well_formed_cert_without_aggregation() {
+        let voters = [voter(0x01), voter(0x02), voter(0x03)];
+        let cert = make_cert_with_voters(&voters, false);
+        verify_cert_v2(&cert, &voters).expect("should accept");
+    }
+
+    #[test]
+    fn verify_rejects_voter_count_mismatch_undercount() {
+        let voters_in_cert = [voter(0x01), voter(0x02), voter(0x03)];
+        let cert = make_cert_with_voters(&voters_in_cert, false);
+        // Caller supplies only 2 voters.
+        let err = verify_cert_v2(&cert, &voters_in_cert[..2]).expect_err("mismatch");
+        match err {
+            VerifyError::VoterCountMismatch { claimed, supplied } => {
+                assert_eq!(claimed, 3);
+                assert_eq!(supplied, 2);
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn verify_rejects_voter_count_mismatch_overcount() {
+        let voters_in_cert = [voter(0x01), voter(0x02)];
+        let cert = make_cert_with_voters(&voters_in_cert, false);
+        let caller_voters = [voter(0x01), voter(0x02), voter(0x03)];
+        let err = verify_cert_v2(&cert, &caller_voters).expect_err("mismatch");
+        matches!(
+            err,
+            VerifyError::VoterCountMismatch {
+                claimed: 2,
+                supplied: 3
+            }
+        );
+    }
+
+    #[test]
+    fn verify_rejects_tampered_root() {
+        let voters = [voter(0x01), voter(0x02)];
+        let mut cert = make_cert_with_voters(&voters, false);
+        cert.vote_refs.root = [0xFF; 32];
+        let err = verify_cert_v2(&cert, &voters).expect_err("root tamper");
+        matches!(err, VerifyError::RootMismatch { .. });
+    }
+
+    #[test]
+    fn verify_rejects_wrong_voter_set() {
+        let voters_in_cert = [voter(0x01), voter(0x02)];
+        let cert = make_cert_with_voters(&voters_in_cert, false);
+        // Caller supplies same count but different IDs — recomputed
+        // root won't match.
+        let caller_voters = [voter(0x07), voter(0x08)];
+        let err = verify_cert_v2(&cert, &caller_voters).expect_err("wrong voters");
+        matches!(err, VerifyError::RootMismatch { .. });
+    }
+
+    #[test]
+    fn verify_order_independent_on_voter_ids() {
+        // `Blake3MerkleV1::root` sorts internally, so the caller's
+        // voter_ids order doesn't matter — verify should accept
+        // either order.
+        let voters_sorted = [voter(0x01), voter(0x02), voter(0x03)];
+        let voters_shuffled = [voter(0x03), voter(0x01), voter(0x02)];
+        let cert = make_cert_with_voters(&voters_sorted, false);
+        verify_cert_v2(&cert, &voters_shuffled).expect("order-independent");
+    }
+
+    #[test]
+    fn verify_empty_voter_set() {
+        // Edge case: cert with zero voters. root is the empty-set
+        // constant; verify should accept (or at least not panic).
+        let cert = make_cert_with_voters(&[], false);
+        verify_cert_v2(&cert, &[]).expect("empty set ok");
+    }
+
+    #[test]
+    fn verify_rejects_single_voter_supplied_empty() {
+        let voters = [voter(0x01)];
+        let cert = make_cert_with_voters(&voters, false);
+        let err = verify_cert_v2(&cert, &[]).expect_err("empty supplied but cert has 1");
+        matches!(
+            err,
+            VerifyError::VoterCountMismatch {
+                claimed: 1,
+                supplied: 0
+            }
+        );
     }
 }
