@@ -45,6 +45,17 @@ pub trait ReplayExecutor: Send + Sync {
 
     /// Compute the current state root.
     fn compute_state_root(&self, utxo_set: &UtxoSet) -> [u8; 32];
+
+    /// v1.0 hard-fork parallel SMT: compute the v4 state root
+    /// alongside the canonical v3. Default delegates to
+    /// [`UtxoSet::compute_state_root_v4`]; consumers that want
+    /// to cross-check both commitments during the migration
+    /// window (Step 5 of the v1.0 plan) can call this without
+    /// overriding. At the activation epoch (Step 7) the replay
+    /// pipeline's root comparison shifts to this method.
+    fn compute_state_root_v4(&self, utxo_set: &UtxoSet) -> [u8; 32] {
+        utxo_set.compute_state_root_v4()
+    }
 }
 
 /// UTXO-based replay executor.

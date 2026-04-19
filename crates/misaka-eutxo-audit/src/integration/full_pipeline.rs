@@ -46,6 +46,37 @@ mod tests {
         assert_eq!(build(), build(), "state_root must be deterministic");
     }
 
+    /// v1.0 hard-fork parallel SMT: the v4 state root (derived
+    /// from the parallel `SparseMerkleTree` inside `UtxoSet`,
+    /// wrapped under `"MISAKA:state_root:v4:"`) MUST be
+    /// deterministic across replays — same invariant as v3.
+    /// This pins the migration-window determinism contract from
+    /// the replay/audit side. See
+    /// `docs/design/v100_smt_migration.md`.
+    #[test]
+    fn state_root_v4_deterministic_replay() {
+        fn build() -> [u8; 32] {
+            let mut us = fresh_utxo_set();
+            for i in 0u8..10 {
+                let outref = OutputRef { tx_hash: [i + 1; 32], output_index: 0 };
+                prefund_utxo(&mut us, outref, 1_000_000 * (i as u64 + 1), [(i + 10); 32]);
+            }
+            us.compute_state_root_v4()
+        }
+        assert_eq!(build(), build(), "state_root_v4 must be deterministic");
+    }
+
+    /// v3 vs v4 domain separation audit: on the same UTXO set,
+    /// the two commitments MUST differ so no cross-labelled
+    /// replay can pass verification.
+    #[test]
+    fn state_root_v3_v4_are_domain_separated() {
+        let mut us = fresh_utxo_set();
+        let outref = OutputRef { tx_hash: [1u8; 32], output_index: 0 };
+        prefund_utxo(&mut us, outref, 1_000_000, [2u8; 32]);
+        assert_ne!(us.compute_state_root(), us.compute_state_root_v4());
+    }
+
     #[test]
     fn script_vm_evaluates_op_true() {
         use misaka_txscript::v2_eutxo::{

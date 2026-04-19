@@ -1174,6 +1174,21 @@ impl UtxoExecutor {
         self.utxo_set.compute_state_root()
     }
 
+    /// v1.0 hard-fork parallel SMT: return the v4 state root (SMT
+    /// root wrapped under the `"MISAKA:state_root:v4:"` domain tag
+    /// + height). Runs alongside [`Self::state_root`] during the
+    /// migration window; consensus does not consume this value
+    /// pre-activation. At the v1.0 activation epoch (Step 7 of the
+    /// migration plan), the canonical comparison on the commit
+    /// path shifts from `state_root` to this value.
+    ///
+    /// Observability: callers that want to log/compare both
+    /// commitments today can read both via `state_root()` and
+    /// `state_root_v4()` without touching the hot path.
+    pub fn state_root_v4(&self) -> [u8; 32] {
+        self.utxo_set.compute_state_root_v4()
+    }
+
     /// SEC-FIX C-12: Generate block reward (SystemEmission) for the commit leader.
     ///
     /// Narwhal's propose loop only includes user transactions from the mempool.
