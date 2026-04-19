@@ -41,6 +41,7 @@ pub mod db_key;
 pub mod db_writer;
 pub mod pruning_store;
 pub mod reachability_store;
+pub mod schema_version;
 pub mod store_errors;
 pub mod store_registry;
 
@@ -80,6 +81,13 @@ pub use db_writer::{
 pub use pruning_store::{PruningPointInfo, PruningStore, PruningUtxoEntry};
 pub use reachability_store::{
     BlockRelations, ChildrenList, FutureCoveringSet, ReachabilityInterval, ReachabilityStore,
+};
+pub use schema_version::{
+    check_compatible as check_storage_schema_compatible,
+    check_compatible_arc as check_storage_schema_compatible_arc,
+    read_schema_version as read_storage_schema_version,
+    write_schema_version as write_storage_schema_version, SchemaVersionError,
+    CURRENT_STORAGE_SCHEMA_VERSION, STORAGE_SCHEMA_VERSION_V088, STORAGE_SCHEMA_VERSION_V090,
 };
 pub use store_errors::StoreError;
 pub use store_registry::StorePrefixes;
