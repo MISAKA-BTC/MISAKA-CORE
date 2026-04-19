@@ -445,28 +445,57 @@ Regression: `cargo test -p misaka-dag --lib` 519/519
 - Prometheus export of the `new_config` / `stats` — trivial to
   add once integration lands.
 
-## 6. Out of scope for this session
+## 6. Remaining work (after this session)
 
-Deferred to follow-up commits:
+Store-layer items from §5 are all shipped. Remaining work splits
+into runtime integration and operational validation:
 
-- **A.4 — verify path**: reject any `CertificateV2` with
-  `aggregation_slot = Some(_)` and (later) verify merkle root against
-  the persisted voters list.
-- **A.5 — cert v1 ↔ v2 mapping CF** for one-epoch compatibility.
-- **A.6 — migrate `--from 2 --to 3`**: extends the R6-a CLI to stage
-  v2 stubs for every existing finalized cert.
-- **Adaptive round rate** (Prompt A Part B): new `RoundScheduler`,
-  `next_round_interval` linear interp, `tokio::select!` on sleep vs
-  mempool.
-- **Epoch-boundary config adjustment** (Prompt A Part C):
-  `adjust_round_config` deterministic from previous-epoch stats.
-- **ZK-aggregation retrofit plan**:
-  `docs/design/zk-aggregation-retrofit-plan.md` (Prompt B final item).
-- **7-day smoke**: deploy after the above lands. Prereq is also
-  Phase 2's pending 24h smoke.
+### Shipped (no action needed)
 
-All of the above reference this design doc so the reconciliation is
-stable across sessions.
+- ✅ **A.1-A.3** — `votes` CF + write/read path (e8197bd).
+- ✅ **A.4** — verify path (bc84de0).
+- ✅ **A.5** — cert v1 ↔ v2 mapping CF (5d8e332).
+- ✅ **A.6** — `migrate --to 3` + schema V091 = 3 (ca771b4).
+- ✅ **Part B core** — adaptive scheduler (342548e).
+- ✅ **Part B integration** — proposer loop + 4 NodeMetrics
+  fields (64589df).
+- ✅ **Part C store-layer** — `adjust_round_config` + audit CF
+  (4e6df79).
+- ✅ **Part D** — `docs/design/zk-aggregation-retrofit-plan.md`
+  (this commit).
+
+### Deferred — runtime integration
+
+- **A.7 — finalizer wire**: call `put_cert_v2_votes` +
+  `put_cert_mapping` + `verify_cert_v2` from the narwhal commit
+  finalizer (`checkpoint_manager::CheckpointManager::add_vote`
+  on quorum path).
+- **Part C integration**: epoch-transition hook that (a) collects
+  `EpochStats` from the previous epoch, (b) reads the previous
+  `RoundSchedulerConfig`, (c) calls `adjust_round_config`, (d)
+  persists via `put_round_config_audit`, (e) hands the new
+  config to the next epoch's propose-loop spawn.
+- **`/metrics` axum route**: expose `NodeMetrics::render_prometheus()`
+  over HTTP so operators can scrape the 4 new Part B gauges/counters
+  (currently accumulated in memory only).
+- **Cert digest → commit linkage**: the `checkpoint_manager` writes
+  a `FinalizedCheckpoint` (v1 shape); for the cross-over we need
+  a v2 equivalent computed alongside and the v1↔v2 mapping written.
+
+### Deferred — retrofit (Part D → Phase 3b)
+
+The retrofit plan itself lands this commit; its execution is
+Phase 3b. See `docs/design/zk-aggregation-retrofit-plan.md` §5
+for step-by-step sequencing and §7 for the rough effort estimate
+(~13-20 sessions, most risk concentrated in Step 5 — ML-DSA-65
+inside Plonky2).
+
+### Deferred — operational
+
+- **Part E — 7-day 4-node smoke**. Prereq: runtime integration
+  above + Phase 2's pending 24h smoke. Per Prompt A's target:
+  10-20 % disk savings over Phase 2 archival, 5-10× reduction
+  at idle.
 
 ## 7. Hard boundaries (unchanged from memory memo)
 
